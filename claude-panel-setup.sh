@@ -199,6 +199,17 @@ PYEOF
       folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
     fi
     printf '  📁 Folder: %s\n' "$folder_disp"
+    # CLAUDE_CODE_DISABLE_1M_CONTEXT=1 forces 1M-context models (Sonnet 5,
+    # Fable 5) to a 200k effective window with auto-compaction at that
+    # boundary — the same discipline Sonnet 4.6 had by default. /context
+    # reports usage against whichever window is active, so it can correctly
+    # show 200k while genuinely on Sonnet 5; show which cap is in effect
+    # here so that isn't mistaken for a silent model downgrade.
+    if [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-0}" = "1" ]; then
+      printf '  🧭 Context cap: 200k (forced via CLAUDE_CODE_DISABLE_1M_CONTEXT)\n'
+    else
+      printf '  🧭 Context cap: 1M (native)\n'
+    fi
     if awk -v a="$avg_session_cost" 'BEGIN{exit !(a>0)}'; then
       printf '  📊 7-day avg session: %s\n' "$(fmt_money "$avg_session_cost")"
     fi

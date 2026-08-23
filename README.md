@@ -81,6 +81,12 @@ You can also run either panel manually at any time, in any terminal:
 ~/.local/bin/opencode-panel.sh [refresh_seconds] [turn_rows]
 ```
 
+## FAQ
+
+- **Sonnet 5 (and Fable 5) burns through tokens much faster than Sonnet 4.6 did on the same kind of task — is there a way to cap it back to a 200k context window?** Yes. Set `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` in your shell profile. Claude Code then treats Sonnet 5 / Fable 5 as having a 200k context window instead of their native 1M, removes the 1M variant from the model picker, and — this is the part that actually matters for cost — **auto-compaction kicks in at the 200k boundary**, the same discipline that was implicitly keeping 4.6's token usage in check. You don't need to switch models back to get that behavior. The Claude panel shows which cap is currently in effect (`🧭 Context cap: 200k (forced via CLAUDE_CODE_DISABLE_1M_CONTEXT)` vs `1M (native)`) so it's visible at a glance rather than something you have to remember you set.
+- **`/context` shows 200k even though I selected Sonnet 5 — did it silently downgrade to 4.6?** Not necessarily. `/context` reports usage against whichever window is *currently active* for the session, and if `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` is set (or you're behind an LLM gateway that defaults Sonnet 5 to 200k), you'll correctly see a 200k ceiling while genuinely running Sonnet 5. Check the per-turn `Model` column in the panel — it reads the real model ID out of the transcript for every turn — rather than inferring the model from the context-window size alone.
+- **Does the generic `sonnet` alias always mean the latest Sonnet?** It's provider-dependent, not a bug: on the Anthropic API directly, `sonnet` resolves to the latest Sonnet (Sonnet 5 as of this writing). On Claude Platform via AWS it currently resolves to Sonnet 4.6; on Bedrock/Google Cloud/Microsoft Foundry it resolves to Sonnet 4.5. If you want a specific version regardless of provider, select it explicitly rather than relying on the bare alias.
+
 ## Troubleshooting
 
 - **Panel never opens automatically** — check `~/.cache/claude-panel-launch.log` or `~/.cache/opencode-panel-launch.log`. The most common cause is Ghostty missing Accessibility permission (System Settings → Privacy & Security → Accessibility).
