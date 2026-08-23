@@ -180,9 +180,9 @@ PYEOF
             # ccusage already prefixes this field with 💰 itself.
             printf '  %s\n' "$part"
           elif [ "$j" -eq 1 ]; then
-            printf '    📅 %s\n' "$part"
+            printf '  📅 %s\n' "$part"
           else
-            printf '    ⏳ %s\n' "$part"
+            printf '  ⏳ %s\n' "$part"
           fi
         done
       else
