@@ -177,9 +177,12 @@ PYEOF
         for j in "${!cost_parts[@]}"; do
           part="${cost_parts[$j]}"
           if [ "$j" -eq 0 ]; then
+            # ccusage already prefixes this field with 💰 itself.
             printf '  %s\n' "$part"
+          elif [ "$j" -eq 1 ]; then
+            printf '    📅 %s\n' "$part"
           else
-            printf '    %s\n' "$part"
+            printf '    ⏳ %s\n' "$part"
           fi
         done
       else
@@ -195,11 +198,11 @@ PYEOF
     if [ "${#folder_disp}" -gt "$folder_maxw" ]; then
       folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
     fi
-    printf '  Folder: %s\n' "$folder_disp"
+    printf '  📁 Folder: %s\n' "$folder_disp"
     if awk -v a="$avg_session_cost" 'BEGIN{exit !(a>0)}'; then
-      printf '  7-day avg session: %s\n' "$(fmt_money "$avg_session_cost")"
+      printf '  📊 7-day avg session: %s\n' "$(fmt_money "$avg_session_cost")"
     fi
-    printf '  30-day spend: %s\n' "$(fmt_money "$spend30")"
+    printf '  💵 30-day spend: %s\n' "$(fmt_money "$spend30")"
   else
     echo "no active Claude Code session found"
   fi
