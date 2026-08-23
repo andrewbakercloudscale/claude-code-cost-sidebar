@@ -52,23 +52,15 @@ TURN_ROWS="${2:-20}"
 C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
 
-hr() { local w="$1" ch="${2:--}"; printf '%*s\n' "$w" '' | tr ' ' "$ch"; }
-header() { local w="$1" title="$2"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RESET"; hr "$w"; }
+# A short colored title, not a full-width divider bar — a bar drawn at
+# $cols but rendered later in a narrower/resized pane just wraps into a
+# confusing second row of "=" or "-", which is worse than no rule at all.
+header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RESET"; }
 # Erases to end of line after every printed row before the newline, so a
 # frame whose lines are shorter than the previous frame's (e.g. right after
 # a pane resize) never leaves trailing characters from the old frame
 # ghosting through the new one — same fix as ccusage-panel.sh.
 clear_eol() { awk '{ printf "%s\033[K\n", $0 }'; }
-
-# Same thresholds and floor as ccusage-panel.sh, so "red"/"purple" mean the
-# same thing across both tools. A multiple alone is not enough: in a cheap
-# session, a turn well above the average in relative terms can still be a
-# trivial number in absolute terms, so nothing colors below the floor no
-# matter how many times over the average it is.
-COST_TIER_YELLOW_MULT=1.5
-COST_TIER_RED_MULT=2.0
-COST_TIER_PURPLE_MULT=3.0
-COST_TIER_MIN_TURN_ALERT=0.50
 
 # jq expression tried against two plausible `session list --format json`
 # shapes (flat time_created, or nested time.created / sessionID), sorted
@@ -90,7 +82,6 @@ while true; do
   {
   printf '%s%s OpenCode usage — %s %s(refresh %ss)%s\n' \
     "$C_BOLD" "──" "$(date '+%a %H:%M:%S')" "$C_DIM" "$REFRESH" "$C_RESET"
-  hr "$cols" "="
 
   if ! command -v opencode >/dev/null 2>&1; then
     echo "opencode CLI not found on PATH."
@@ -121,22 +112,20 @@ while true; do
     fi
     echo "session: $sess_disp"
     if awk -v a="$avg_session_cost" 'BEGIN{exit !(a>0)}'; then
-      printf '%s  7-day avg session: $%.3f%s\n' "$C_DIM" "$avg_session_cost" "$C_RESET"
+      printf '%s  7-day avg session: $%.2f%s\n' "$C_DIM" "$avg_session_cost" "$C_RESET"
     fi
     echo
 
-    header "$cols" "THIS SESSION — PER TURN"
+    header "THIS SESSION — PER TURN"
     if [ -n "$session_id" ]; then
       export_json=$(opencode export "$session_id" 2>/dev/null)
       if [ -n "$export_json" ]; then
         export_tmp=$(mktemp)
         printf '%s\n' "$export_json" > "$export_tmp"
-        python3 - "$export_tmp" "$TURN_ROWS" "$avg_session_cost" "$COST_TIER_YELLOW_MULT" "$COST_TIER_RED_MULT" "$COST_TIER_PURPLE_MULT" "$COST_TIER_MIN_TURN_ALERT" <<'PYEOF'
+        python3 - "$export_tmp" "$TURN_ROWS" <<'PYEOF'
 import json, sys
 
-path, max_rows, avg_baseline = sys.argv[1], int(sys.argv[2]), float(sys.argv[3] or 0)
-YELLOW_MULT, RED_MULT, PURPLE_MULT = (float(x) for x in sys.argv[4:7])
-MIN_TURN_ALERT = float(sys.argv[7])
+path, max_rows = sys.argv[1], int(sys.argv[2])
 
 def fmt_k(n):
     if abs(n) >= 1000:
@@ -187,40 +176,21 @@ for line in lines:
     # i.e. what a context spike looks like.
     turns.append((label, total_ctx, cache_write, cache_pct, cost))
 
-RED, YELLOW, PURPLE, RESET = "\033[31m", "\033[33m", "\033[38;5;129m", "\033[0m"
 total_n = len(turns)
 shown = turns[-max_rows:]
 if not shown:
     print("  (no assistant turns yet)")
 else:
-    session_avg = sum(t[4] for t in turns) / total_n if total_n else 0
-    # Prefer the 7-day cross-session baseline when we have one; fall back
-    # to this session's own average otherwise.
-    avg_cost = avg_baseline if avg_baseline > 0 else session_avg
     if total_n > len(shown):
         print(f"  (showing last {len(shown)} of {total_n} turns)")
     print(f"  {'Turn':<6}{'Model':<17}{'Ctx':>7}{'Δ':>8}{'Cache':>7}{'Cost':>8}")
     start_idx = total_n - len(shown) + 1
     for i, (label, total_ctx, delta, cache_pct, cost) in enumerate(shown):
         turn_no = start_idx + i
-        row = (f"  {turn_no:<6}{label:<17}{fmt_k(total_ctx):>7}"
-               f"{'+' + fmt_k(delta):>8}{cache_pct:>6.0f}%{'$' + format(cost, '.3f'):>8}")
-        # Below the absolute floor, never color a turn no matter its
-        # multiple of the average, same reasoning as ccusage-panel.sh.
-        if cost < MIN_TURN_ALERT:
-            print(row)
-        elif avg_cost > 0 and cost > avg_cost * PURPLE_MULT:
-            print(f"{PURPLE}{row}{RESET}")
-        elif avg_cost > 0 and cost > avg_cost * RED_MULT:
-            print(f"{RED}{row}{RESET}")
-        elif avg_cost > 0 and cost > avg_cost * YELLOW_MULT:
-            print(f"{YELLOW}{row}{RESET}")
-        else:
-            print(row)
-    if avg_cost > 0:
-        print(f"  (avg ${avg_cost:.3f}/turn, min ${MIN_TURN_ALERT:.2f} to color: purple >{PURPLE_MULT:g}x, red >{RED_MULT:g}x, yellow >{YELLOW_MULT:g}x)")
+        print(f"  {turn_no:<6}{label:<17}{fmt_k(total_ctx):>7}"
+              f"{'+' + fmt_k(delta):>8}{cache_pct:>6.0f}%{'$' + format(cost, '.2f'):>8}")
     session_cost = sum(t[4] for t in turns)
-    print(f"  session total so far: ${session_cost:.3f} ({total_n} assistant turns)")
+    print(f"  session total so far: ${session_cost:.2f} ({total_n} assistant turns)")
 PYEOF
         rm -f "$export_tmp"
       else
@@ -233,10 +203,10 @@ PYEOF
 
     # ---- today / week / month: shown as opencode's own output, not
     # parsed, per the note at the top of the installer ----
-    header "$cols" "TODAY (opencode stats --days 1)"
+    header "TODAY (opencode stats --days 1)"
     opencode stats --days 1 2>/dev/null | head -n 6 || echo "  (opencode stats not available)"
     echo
-    header "$cols" "LAST 7 DAYS (opencode stats --days 7)"
+    header "LAST 7 DAYS (opencode stats --days 7)"
     opencode stats --days 7 2>/dev/null | head -n 6 || echo "  (opencode stats not available)"
   fi
   } | head -n "$((rows - 1))" | clear_eol

@@ -57,21 +57,6 @@ TURN_ROWS="${2:-20}"
 
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
-C_PURPLE=$'\033[38;5;129m'  # very-high-cost tier, above red — see COST_TIER_* below
-
-# Shared cost-severity thresholds, as multiples of the relevant average.
-# Kept identical to claude-cost-alert-check.sh so "red"/"purple" mean the
-# same thing in the panel and in the chat-window alert.
-#
-# A multiple alone is not enough: in a cheap session (avg $0.05/turn), a
-# turn costing $0.13 is >2x average — a "false positive" red flag on money
-# nobody would ever look twice at. Below the absolute floors, a turn/session
-# never gets colored no matter how many times over the average it is.
-COST_TIER_YELLOW_MULT=1.5
-COST_TIER_RED_MULT=2.0
-COST_TIER_PURPLE_MULT=3.0
-COST_TIER_MIN_TURN_ALERT=0.50
-COST_TIER_MIN_SESSION_ALERT=5.00
 
 fmt_num() {
   awk -v n="$1" 'BEGIN{
@@ -83,8 +68,10 @@ fmt_num() {
 }
 fmt_money() { printf '$%.2f' "${1:-0}"; }
 fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
-hr() { local w="$1" ch="${2:--}"; printf '%*s\n' "$w" '' | tr ' ' "$ch"; }
-header() { local w="$1" title="$2"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RESET"; hr "$w"; }
+# A short colored title, not a full-width divider bar — a bar that's drawn
+# at $cols but rendered later in a narrower/resized pane just wraps into a
+# confusing second row of "=" or "-", which is worse than no rule at all.
+header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RESET"; }
 # Erases to end of line after every printed row before the newline, so a
 # frame whose lines are shorter than the previous frame's (e.g. right after
 # a pane resize, or just because the numbers got shorter) never leaves
@@ -106,12 +93,10 @@ while true; do
   guaranteed=$( {
   printf '%s%s Claude Code usage — %s (refresh %ss)%s\n' \
     "$C_BOLD" "──" "$(date '+%a %H:%M:%S')" "$REFRESH" "$C_RESET"
-  hr "$cols" "="
 
-  # ---- baseline: average session cost over the last 7 days ----
-  # Used to flag this session (below) and individual turns (further down)
-  # as unusually expensive. Needs >=3 real sessions to trust the average —
-  # otherwise a single earlier tiny/huge session would skew it.
+  # ---- baselines: average per-session cost over 7 days, total spend over
+  # 30 days. Session average needs >=3 real sessions to trust — otherwise a
+  # single earlier tiny/huge session would skew it.
   since7=$(date -v-7d +%Y%m%d 2>/dev/null || date -d '7 days ago' +%Y%m%d)
   baseline_json=$(ccusage session --json --since "$since7" --offline 2>/dev/null)
   avg_session_cost=$(jq -r '
@@ -120,6 +105,10 @@ while true; do
   ' <<<"$baseline_json" 2>/dev/null)
   [ -z "$avg_session_cost" ] && avg_session_cost=0
 
+  since30=$(date -v-29d +%Y%m%d 2>/dev/null || date -d '29 days ago' +%Y%m%d)
+  spend30=$(ccusage daily --json --since "$since30" --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
+  [ -z "$spend30" ] && spend30=0
+
   # ---- live status line (current session) ----
   # Needs the REAL session_id and model.id — a placeholder session_id
   # ("live") matches no recorded session (session cost silently comes back
@@ -127,12 +116,13 @@ while true; do
   # window instead of Sonnet 5's actual 1M, so context% reads >100%.
   latest=$(ls -t ~/.claude/projects/*/*.jsonl 2>/dev/null | head -1)
   if [ -n "$latest" ]; then
-    IFS=$'\t' read -r sess_id model_id model_label < <(python3 - "$latest" <<'PYEOF'
+    IFS=$'\t' read -r sess_id model_id model_label folder_name < <(python3 - "$latest" <<'PYEOF'
 import json, os, sys
 
 path = sys.argv[1]
 sid = os.path.basename(path).removesuffix(".jsonl")
 model = "unknown"
+folder = ""
 try:
     with open(path) as f:
         for line in f:
@@ -140,6 +130,8 @@ try:
                 d = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not folder and d.get("cwd"):
+                folder = os.path.basename(d["cwd"])
             if d.get("type") == "assistant":
                 m = d.get("message", {}).get("model")
                 if m:
@@ -157,26 +149,12 @@ elif len(nums) == 1:
     label = f"{name} {nums[0]}"
 else:
     label = name
-print(f"{sid}\t{model}\t{label}")
+print(f"{sid}\t{model}\t{label}\t{folder}")
 PYEOF
     )
     payload=$(printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","model":{"id":"%s","display_name":"%s"},"workspace":{"current_dir":"%s","project_dir":"%s"},"version":"1.0","output_style":{"name":"default"}}' \
       "$sess_id" "$latest" "$PWD" "$model_id" "$model_label" "$PWD" "$PWD")
     statusline_out=$(echo "$payload" | ccusage statusline -B text 2>/dev/null)
-    # Flag this session as unusually expensive vs the 7-day average.
-    if [[ "$statusline_out" =~ (\$-?[0-9]+\.[0-9]+\ session) ]]; then
-      sess_token="${BASH_REMATCH[1]}"
-      sess_amt="${sess_token#\$}"; sess_amt="${sess_amt% session}"
-      sess_color=""
-      if awk -v v="$sess_amt" -v f="$COST_TIER_MIN_SESSION_ALERT" 'BEGIN{exit !(v>=f)}'; then
-        awk -v v="$sess_amt" -v a="$avg_session_cost" -v m="$COST_TIER_YELLOW_MULT" 'BEGIN{exit !(a>0 && v>a*m)}' && sess_color="$C_YELLOW"
-        awk -v v="$sess_amt" -v a="$avg_session_cost" -v m="$COST_TIER_RED_MULT" 'BEGIN{exit !(a>0 && v>a*m)}' && sess_color="$C_RED"
-        awk -v v="$sess_amt" -v a="$avg_session_cost" -v m="$COST_TIER_PURPLE_MULT" 'BEGIN{exit !(a>0 && v>a*m)}' && sess_color="$C_PURPLE"
-      fi
-      if [ -n "$sess_color" ]; then
-        statusline_out="${statusline_out/$sess_token/${sess_color}${sess_token}${C_RESET}}"
-      fi
-    fi
     # One metric per line rather than piping the whole thing through `fold`
     # — a fold-wrapped line breaks mid-word depending on pane width, which
     # reads badly at 1/3 width. ccusage joins fields with " | "; split on
@@ -208,20 +186,20 @@ PYEOF
         printf '  %s\n' "$seg"
       fi
     done
-    # Claude Code's sanitized project-dir name (slashes -> dashes) can run
-    # well past a narrow 1/3-width split; clip it to fit so it can't wrap
-    # and throw off the guaranteed/remaining row-count math below. Keep the
-    # tail rather than the head — the deepest path segment is the useful
-    # part, the "-Users-name-Desktop-..." prefix is not.
-    sess_dir="$(basename "$(dirname "$latest")")"
-    sess_maxw=$(( cols - 12 )); (( sess_maxw < 10 )) && sess_maxw=10
-    if [ "${#sess_dir}" -gt "$sess_maxw" ]; then
-      sess_dir="...${sess_dir: -$((sess_maxw - 3))}"
+    # Show just the project folder name (from the transcript's own "cwd"
+    # field), not Claude Code's sanitized full-path directory name — the
+    # latter is the whole path with slashes turned into dashes and can run
+    # well past a narrow 1/3-width split.
+    folder_disp="${folder_name:-unknown}"
+    folder_maxw=$(( cols - 12 )); (( folder_maxw < 10 )) && folder_maxw=10
+    if [ "${#folder_disp}" -gt "$folder_maxw" ]; then
+      folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
     fi
-    printf '  session: %s\n' "$sess_dir"
+    printf '  Folder: %s\n' "$folder_disp"
     if awk -v a="$avg_session_cost" 'BEGIN{exit !(a>0)}'; then
       printf '  7-day avg session: %s\n' "$(fmt_money "$avg_session_cost")"
     fi
+    printf '  30-day spend: %s\n' "$(fmt_money "$spend30")"
   else
     echo "no active Claude Code session found"
   fi
@@ -235,14 +213,12 @@ PYEOF
   # input rate (0.1x read, 1.25x 5m write, 2x 1h write). Sonnet 5's launch
   # rate of $2/$10 was made permanent on 2026-08-10, cancelling the planned
   # increase to $3/$15; verify this has not changed again before trusting it.
-  header "$cols" "THIS SESSION — PER TURN"
+  header "THIS SESSION — PER TURN"
   if [ -n "$latest" ]; then
-    python3 - "$latest" "$TURN_ROWS" "$COST_TIER_YELLOW_MULT" "$COST_TIER_RED_MULT" "$COST_TIER_PURPLE_MULT" "$COST_TIER_MIN_TURN_ALERT" <<'PYEOF'
+    python3 - "$latest" "$TURN_ROWS" <<'PYEOF'
 import json, sys
 
 path, max_rows = sys.argv[1], int(sys.argv[2])
-YELLOW_MULT, RED_MULT, PURPLE_MULT = (float(x) for x in sys.argv[3:6])
-MIN_TURN_ALERT = float(sys.argv[6])
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-sonnet-5":   (2.00, 10.00),
@@ -318,36 +294,18 @@ for line in lines:
 
     turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost))
 
-RED, YELLOW, PURPLE, RESET = "\033[31m", "\033[33m", "\033[38;5;129m", "\033[0m"
-
 total_n = len(turns)
 shown = turns[-max_rows:]
 if not shown:
     print("  (no assistant turns yet)")
 else:
-    avg_cost = sum(t[4] for t in turns) / total_n if total_n else 0
     if total_n > len(shown):
         print(f"  (showing last {len(shown)} of {total_n} turns)")
     print(f"  {'Turn':<6}{'Model':<12}{'Input':>8}{'Δ Context':>11}{'Cache':>8}{'Cost':>9}")
     start_idx = total_n - len(shown) + 1
     for i, (label, total_ctx, delta, cache_pct, cost) in enumerate(shown):
         turn_no = start_idx + i
-        row = f"  {turn_no:<6}{label:<12}{fmt_k(total_ctx):>8}{'+' + fmt_k(delta):>11}{cache_pct:>7.0f}%{'$' + format(cost, '.2f'):>9}"
-        # Below the absolute floor, never color a turn no matter its
-        # multiple of the average — a $0.09 turn is not interesting just
-        # because the session's turns usually cost $0.05.
-        if cost < MIN_TURN_ALERT:
-            print(row)
-        elif avg_cost > 0 and cost > avg_cost * PURPLE_MULT:
-            print(f"{PURPLE}{row}{RESET}")
-        elif avg_cost > 0 and cost > avg_cost * RED_MULT:
-            print(f"{RED}{row}{RESET}")
-        elif avg_cost > 0 and cost > avg_cost * YELLOW_MULT:
-            print(f"{YELLOW}{row}{RESET}")
-        else:
-            print(row)
-    if avg_cost > 0:
-        print(f"  (avg ${avg_cost:.2f}/turn, min ${MIN_TURN_ALERT:.2f} to color: purple >{PURPLE_MULT:g}x, red >{RED_MULT:g}x, yellow >{YELLOW_MULT:g}x)")
+        print(f"  {turn_no:<6}{label:<12}{fmt_k(total_ctx):>8}{'+' + fmt_k(delta):>11}{cache_pct:>7.0f}%{'$' + format(cost, '.2f'):>9}")
     session_cost = sum(t[4] for t in turns)
     print(f"  est. session total: ${session_cost:.2f} (all {total_n} turns in this file)")
 PYEOF
@@ -364,7 +322,7 @@ PYEOF
   echo
 
   # ---- active 5h block: burn rate + projection ----
-  header "$cols" "ACTIVE BLOCK"
+  header "ACTIVE BLOCK"
   block_json=$(ccusage blocks --active --json --offline 2>/dev/null)
   has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
   if [ "${has_block:-0}" = "1" ]; then
@@ -392,7 +350,7 @@ PYEOF
   echo
 
   # ---- today: totals + per-model breakdown ----
-  header "$cols" "TODAY"
+  header "TODAY"
   daily_json=$(ccusage daily --json --last 1 --offline 2>/dev/null)
   if [ -n "$daily_json" ] && [ "$(jq -r '.daily | length' <<<"$daily_json" 2>/dev/null)" != "0" ]; then
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
@@ -411,7 +369,7 @@ PYEOF
   echo
 
   # ---- 3-day trend ----
-  header "$cols" "LAST 3 DAYS"
+  header "LAST 3 DAYS"
   since3=$(date -v-2d +%Y%m%d 2>/dev/null || date -d '2 days ago' +%Y%m%d)
   trend_json=$(ccusage daily --json --since "$since3" --offline 2>/dev/null)
   if [ -n "$trend_json" ]; then
@@ -428,7 +386,7 @@ PYEOF
   echo
 
   # ---- week / month totals ----
-  header "$cols" "WEEK / MONTH"
+  header "WEEK / MONTH"
   week_cost=$(ccusage weekly --json --last 1 --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
   month_cost=$(ccusage monthly --json --last 1 --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
   printf '  this week   %s\n' "$(fmt_money "$week_cost")"
@@ -436,7 +394,7 @@ PYEOF
   echo
 
   # ---- top sessions today ----
-  header "$cols" "TOP SESSIONS TODAY"
+  header "TOP SESSIONS TODAY"
   session_json=$(ccusage session --json --since "$(date +%Y%m%d)" --offline 2>/dev/null)
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     while IFS=$'\t' read -r sid scost stok slast; do
