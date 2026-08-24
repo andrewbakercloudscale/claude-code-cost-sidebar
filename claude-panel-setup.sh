@@ -466,22 +466,36 @@ PYEOF
           today_amt="${BASH_REMATCH[1]}"
           tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
           printf '  📅 Today Spend: %s$%s%s\n' "$tc" "$today_amt" "$C_RESET"
-          # today_amt (actual, already spent) + this machine's own historical
-          # average spend for each hour-of-day still remaining today, from
-          # the persisted bucket cache above. Deliberately NOT a flat
-          # current-rate extrapolation (blk_cph*10) — that rate is a
-          # seconds-scale figure that spikes 10x+ right after a single
-          # pricey turn and decays within minutes, which made this line
-          # swing wildly (e.g. $350 -> $46 -> $22 across three 5s refreshes
-          # with nothing unusual happening). Buckets with no history yet
-          # just contribute $0, so a fresh cache understates rather than
-          # fabricates a projection.
+          # today_amt (actual, already spent) + a forecast for the hours
+          # still remaining today. Deliberately NOT a flat current-rate
+          # extrapolation (blk_cph*10) — that rate is a seconds-scale figure
+          # that spikes 10x+ right after a single pricey turn and decays
+          # within minutes, which made this line swing wildly (e.g.
+          # $350 -> $46 -> $22 across three 5s refreshes with nothing
+          # unusual happening).
+          #
+          # The remaining-hours forecast itself is the persisted bucket
+          # cache's historical average per hour-of-day, SCALED by how
+          # today's pace compares to a typical day's pace so far — not used
+          # unscaled. An unscaled historical average ignores today entirely:
+          # on a quiet day (e.g. $17.93 spent by 14:48 against a ~$274
+          # historical average for hours 0-14) it forecast $215 for the
+          # day, back near the 30-day average, regardless of how light
+          # today had actually been. pace_ratio = today_amt ÷ the same
+          # buckets' historical average for hours 0..now; ratio 1 (no
+          # scaling) when there's no historical baseline yet (cold cache).
           current_hour=$(( 10#$(date +%H) ))
-          remaining_avg=$(jq -r --argjson ch "$current_hour" '
-            [.buckets[]? | select(.hour > $ch) | .avgCost] | add // 0
-          ' "$HOURLY_BUCKET_CACHE" 2>/dev/null)
+          IFS=$'\t' read -r typical_so_far remaining_avg <<<"$(jq -r --argjson ch "$current_hour" '
+            ( [.buckets[]? | select(.hour <= $ch) | .avgCost] | add // 0 ) as $ts |
+            ( [.buckets[]? | select(.hour >  $ch) | .avgCost] | add // 0 ) as $ra |
+            [$ts, $ra] | @tsv
+          ' "$HOURLY_BUCKET_CACHE" 2>/dev/null)"
+          [ -z "$typical_so_far" ] && typical_so_far=0
           [ -z "$remaining_avg" ] && remaining_avg=0
-          today_pred=$(awk -v b="$today_amt" -v r="$remaining_avg" 'BEGIN{ printf "%.2f", b+r }')
+          today_pred=$(awk -v b="$today_amt" -v ts="$typical_so_far" -v ra="$remaining_avg" 'BEGIN{
+            ratio = (ts > 0) ? b/ts : 1
+            printf "%.2f", b + ratio*ra
+          }')
           pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
           printf '  🔮 Today'"'"'s Predicted Spend: %s$%s%s\n' "$pc" "$today_pred" "$C_RESET"
         fi
