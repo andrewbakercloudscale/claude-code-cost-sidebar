@@ -133,12 +133,155 @@ header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RES
 # trailing characters from the old frame ghosting through the new one.
 clear_eol() { awk '{ printf "%s\033[K\n", $0 }'; }
 
+# ---- persisted hourly-cost buckets, used by "Today's Predicted Spend" ----
+# Forecasts the rest of today from this machine's own historical hour-of-day
+# spend pattern, instead of extrapolating ccusage's live burnRate.costPerHour
+# (a seconds-scale figure that spikes hugely right after any single pricey
+# turn, then decays as cheaper turns dilute it — e.g. $35/hr -> $4.64/hr ->
+# $2.21/hr across three refreshes with nothing unusual happening). A full
+# 30-day JSONL scan is too slow to redo every 5s refresh, so this only
+# rebuilds when the cache is stale; every other refresh just reads the file.
+HOURLY_BUCKET_CACHE="$HOME/.cache/claude-hourly-buckets.json"
+HOURLY_BUCKET_TTL=900
+HOURLY_BUCKET_WINDOW_DAYS=30
+
+refresh_hourly_buckets() {
+  local cache_mtime now_epoch lock_dir lock_age
+  now_epoch=$(date +%s)
+  if [ -f "$HOURLY_BUCKET_CACHE" ]; then
+    cache_mtime=$(stat -f %m "$HOURLY_BUCKET_CACHE" 2>/dev/null || stat -c %Y "$HOURLY_BUCKET_CACHE" 2>/dev/null || echo 0)
+    if (( now_epoch - cache_mtime < HOURLY_BUCKET_TTL )); then
+      return
+    fi
+  fi
+
+  # Every open panel runs this same loop, so more than one can notice the
+  # cache is stale in the same tick. mkdir is atomic on POSIX (no flock
+  # dependency) — whichever panel wins the mkdir does the (expensive)
+  # rebuild; the rest just keep using the still-valid cache this refresh
+  # instead of duplicating the same 30-day scan. Both would compute the
+  # same answer from the same shared JSONL files anyway, so this only
+  # avoids wasted work, not a correctness issue.
+  lock_dir="$HOURLY_BUCKET_CACHE.lock"
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    # Held by another panel's rebuild — unless it died mid-rebuild and
+    # left the lock behind, which a real rebuild never takes this long.
+    lock_age=$(( now_epoch - $(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo "$now_epoch") ))
+    if (( lock_age > 60 )); then
+      rmdir "$lock_dir" 2>/dev/null
+      mkdir "$lock_dir" 2>/dev/null || return
+    else
+      return
+    fi
+  fi
+
+  mkdir -p "$(dirname "$HOURLY_BUCKET_CACHE")"
+  # Same per-model pricing table as the per-turn breakdown below (JSONL
+  # entries carry token usage but no precomputed cost) — kept as a separate
+  # copy since each heredoc here is a standalone python3 invocation.
+  python3 - "$HOURLY_BUCKET_CACHE" "$HOURLY_BUCKET_WINDOW_DAYS" <<'BUCKET_PYEOF'
+import glob, json, os, sys, time, datetime as dt
+
+cache_path, window_days = sys.argv[1], int(sys.argv[2])
+
+PRICES = {
+    "claude-sonnet-5":   (2.00, 10.00),
+    "claude-opus-5":     (5.00, 25.00),
+    "claude-haiku-4-5":  (1.00, 5.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-opus-4-8":   (5.00, 25.00),
+    "claude-opus-4-7":   (5.00, 25.00),
+    "claude-opus-4-6":   (5.00, 25.00),
+    "claude-fable-5":    (10.00, 50.00),
+    "claude-mythos-5":   (10.00, 50.00),
+}
+DEFAULT_PRICE = (3.00, 15.00)
+CACHE_READ_MULT, CACHE_WRITE_5M_MULT, CACHE_WRITE_1H_MULT = 0.1, 1.25, 2.0
+
+now = time.time()
+cutoff = now - window_days * 86400
+
+bucket_cost = [0.0] * 24
+bucket_days = [set() for _ in range(24)]
+seen = set()
+
+for path in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
+    try:
+        # A file's mtime is >= its last entry's timestamp (append-only) —
+        # if that's still before the window, nothing inside can be in range.
+        if os.path.getmtime(path) < cutoff:
+            continue
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        continue
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if d.get("type") != "assistant":
+            continue
+        msg = d.get("message", {})
+        usage = msg.get("usage")
+        mid = msg.get("id")
+        ts_str = d.get("timestamp")
+        if not usage or not mid or not ts_str or mid in seen:
+            continue
+        try:
+            ts_utc = dt.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts_utc.timestamp() < cutoff:
+            continue
+        seen.add(mid)
+
+        model = msg.get("model", "unknown")
+        in_tok = usage.get("input_tokens", 0)
+        out_tok = usage.get("output_tokens", 0)
+        cr_tok = usage.get("cache_read_input_tokens", 0)
+        cc_tok = usage.get("cache_creation_input_tokens", 0)
+        cc = usage.get("cache_creation") or {}
+        cw_1h = cc.get("ephemeral_1h_input_tokens", cc_tok if not cc else 0)
+        cw_5m = cc.get("ephemeral_5m_input_tokens", 0)
+
+        price_in, price_out = PRICES.get(model, DEFAULT_PRICE)
+        cost = (
+            in_tok * price_in
+            + out_tok * price_out
+            + cr_tok * price_in * CACHE_READ_MULT
+            + cw_1h * price_in * CACHE_WRITE_1H_MULT
+            + cw_5m * price_in * CACHE_WRITE_5M_MULT
+        ) / 1_000_000
+
+        local = ts_utc.astimezone()
+        h = local.hour
+        bucket_cost[h] += cost
+        bucket_days[h].add(local.date().isoformat())
+
+buckets = []
+for h in range(24):
+    days = len(bucket_days[h])
+    avg = bucket_cost[h] / days if days else 0.0
+    buckets.append({"hour": h, "totalCost": round(bucket_cost[h], 4), "days": days, "avgCost": round(avg, 4)})
+
+out = {"generatedAt": int(now), "windowDays": window_days, "buckets": buckets}
+tmp_path = cache_path + ".tmp"
+with open(tmp_path, "w") as f:
+    json.dump(out, f)
+os.replace(tmp_path, cache_path)
+BUCKET_PYEOF
+  rmdir "$lock_dir" 2>/dev/null
+}
+
 while true; do
   printf '\033[H'
   cols=$(tput cols 2>/dev/null || echo 60)
   (( cols < 40 )) && cols=40
   rows=$(tput lines 2>/dev/null || echo 24)
   (( rows < 10 )) && rows=10
+
+  refresh_hourly_buckets
 
   # ---- active 5h block: fetched once here (not down in the ACTIVE BLOCK
   # section) so the summary line above can show the same burn-rate-derived
@@ -323,20 +466,24 @@ PYEOF
           today_amt="${BASH_REMATCH[1]}"
           tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
           printf '  📅 Today Spend: %s$%s%s\n' "$tc" "$today_amt" "$C_RESET"
-          # Projects the CURRENT burn rate (blk_cph, all sessions in the
-          # active block — the same $/hr the All Sessions Burn Rate line
-          # below shows) across a flat 10h work day. Deliberately NOT
-          # today_amt ÷ hours-since-midnight: most of "since midnight" is
-          # idle overnight hours, which dilutes that rate below the current
-          # pace and can even predict LESS than what's already been spent
-          # today. blk_cph is ccusage's own rate over actual active time in
-          # the block, so it doesn't have that problem. Only shown when a
-          # block is active — otherwise there's no current rate to project.
-          if [ "${has_block:-0}" = "1" ]; then
-            today_pred=$(awk -v r="$blk_cph" 'BEGIN{ printf "%.2f", r*10 }')
-            pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-            printf '  🔮 Today'"'"'s Predicted Spend: %s$%s%s\n' "$pc" "$today_pred" "$C_RESET"
-          fi
+          # today_amt (actual, already spent) + this machine's own historical
+          # average spend for each hour-of-day still remaining today, from
+          # the persisted bucket cache above. Deliberately NOT a flat
+          # current-rate extrapolation (blk_cph*10) — that rate is a
+          # seconds-scale figure that spikes 10x+ right after a single
+          # pricey turn and decays within minutes, which made this line
+          # swing wildly (e.g. $350 -> $46 -> $22 across three 5s refreshes
+          # with nothing unusual happening). Buckets with no history yet
+          # just contribute $0, so a fresh cache understates rather than
+          # fabricates a projection.
+          current_hour=$(( 10#$(date +%H) ))
+          remaining_avg=$(jq -r --argjson ch "$current_hour" '
+            [.buckets[]? | select(.hour > $ch) | .avgCost] | add // 0
+          ' "$HOURLY_BUCKET_CACHE" 2>/dev/null)
+          [ -z "$remaining_avg" ] && remaining_avg=0
+          today_pred=$(awk -v b="$today_amt" -v r="$remaining_avg" 'BEGIN{ printf "%.2f", b+r }')
+          pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
+          printf '  🔮 Today'"'"'s Predicted Spend: %s$%s%s\n' "$pc" "$today_pred" "$C_RESET"
         fi
 
         if [ "${has_block:-0}" = "1" ]; then
