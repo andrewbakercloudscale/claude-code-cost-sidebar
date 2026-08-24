@@ -314,14 +314,14 @@ PYEOF
         fi
 
         if [ "${has_block:-0}" = "1" ]; then
-          printf '  ⏳ Block Spend: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
+          printf '  ⏳ Current Time Block Spend: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
           # This is the burn rate across ALL sessions active in the current
           # 5h block, not just this one — ccusage's block totals are
           # already aggregated across every concurrent session.
           printf '  🔥 All-Sessions Burn Rate: %s%s/hr%s (%s) → $%s/10h day\n' \
             "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label" "$(awk -v c="$blk_cph" 'BEGIN{ printf "%.2f", c*10 }')"
         else
-          printf '  ⏳ Block Spend: (no active block)\n'
+          printf '  ⏳ Current Time Block Spend: (no active block)\n'
         fi
       elif [ "$i" -eq $((n_segs - 1)) ] && [[ "$seg" =~ ([0-9,]+)\ \(([0-9]+)%\) ]]; then
         # Context segment — recompute the window size and % ourselves
