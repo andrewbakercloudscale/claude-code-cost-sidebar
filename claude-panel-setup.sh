@@ -250,7 +250,12 @@ PYEOF
       seg="${statusline_segs[$i]}"
       seg="${seg#"${seg%%[![:space:]]*}"}"
       seg="${seg%"${seg##*[![:space:]]}"}"
-      if [ "$i" -eq 1 ]; then
+      if [ "$i" -eq 0 ]; then
+        # "🤖 Sonnet 5" -> "🤖 Model: Sonnet 5" — every metric below gets
+        # the same "icon  Label: value" shape, icons unchanged.
+        m_emoji="${seg%% *}"; m_rest="${seg#* }"
+        printf '  %s Model: %s\n' "$m_emoji" "$m_rest"
+      elif [ "$i" -eq 1 ]; then
         # The cost segment ("💰 $X session / $Y today / $Z block (...)")
         # is the widest one and the one most likely to wrap mid-word on a
         # narrow pane — give session/today/block their own lines. Split
@@ -265,26 +270,27 @@ PYEOF
         # since that's the same real number the ACTIVE BLOCK section uses
         # and doesn't depend on scraping ccusage's rendered string.
         sess_part="${cost_parts[0]}"
+        sess_emoji="${sess_part%% *}"
         if [[ "$sess_part" =~ \$(-?[0-9.]+) ]]; then
           sess_amt="${BASH_REMATCH[1]}"
           sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
-          sess_part="${sess_part/\$$sess_amt/${sc}\$${sess_amt}${C_RESET}}"
+          printf '  %s Session Spend: %s$%s%s\n' "$sess_emoji" "$sc" "$sess_amt" "$C_RESET"
+        else
+          printf '  %s\n' "$sess_part"
         fi
-        printf '  %s\n' "$sess_part"
 
         today_part="${cost_parts[1]:-}"
         if [[ "$today_part" =~ \$(-?[0-9.]+) ]]; then
           today_amt="${BASH_REMATCH[1]}"
           tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-          today_part="${today_part/\$$today_amt/${tc}\$${today_amt}${C_RESET}}"
+          printf '  📅 Today Spend: %s$%s%s\n' "$tc" "$today_amt" "$C_RESET"
         fi
-        printf '  📅 %s\n' "$today_part"
 
         if [ "${has_block:-0}" = "1" ]; then
-          printf '  ⏳ %s%s block (%s left)%s\n' "$burn_color" "$(fmt_money "$blk_cost")" "$(fmt_hm "$blk_rem")" "$C_RESET"
-          printf '  🔥 %s%s/hr (%s)%s\n' "$burn_color" "$(fmt_money "$blk_cph")" "$burn_label" "$C_RESET"
+          printf '  ⏳ Block Spend: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
+          printf '  🔥 Burn Rate: %s%s/hr%s (%s)\n' "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label"
         else
-          printf '  ⏳ No active block\n'
+          printf '  ⏳ Block Spend: (no active block)\n'
         fi
       elif [ "$i" -eq $((n_segs - 1)) ] && [[ "$seg" =~ ([0-9,]+)\ \(([0-9]+)%\) ]]; then
         # Context segment — recompute the window size and % ourselves
@@ -301,12 +307,13 @@ PYEOF
         if [ "$win_size" = "200000" ] && [[ "$model_id" == "claude-sonnet-5" || "$model_id" == "claude-fable-5" ]]; then
           forced_note=" [forced 200k]"
         fi
-        printf '  🧠 Context: %s / %s tokens (%s%s%%%s)%s\n' \
+        printf '  🧠 Context Usage: %s / %s tokens (%s%s%%%s)%s\n' \
           "$(fmt_num "$ctx_tokens")" "$(fmt_num "$win_size")" "$ctx_color" "$ctx_pct" "$C_RESET" "$forced_note"
       elif [ "$i" -ne 2 ] || [ "$n_segs" -lt 4 ]; then
         # Skip ccusage's own middle "burn rate" segment when present (i==2
         # of 4) — already printed above from the JSON fetch; anything else
-        # (model name, etc.) prints as-is.
+        # prints as-is (nothing currently falls here besides the two cases
+        # above, but kept as a safety net if ccusage adds a segment).
         printf '  %s\n' "$seg"
       fi
     done
@@ -327,10 +334,10 @@ PYEOF
     # tokens faster than before" signal worth a color for.
     if awk -v a="$avg_session_cost" 'BEGIN{exit !(a>0)}'; then
       avgc=$(tier_color "$avg_session_cost" "$prev7_avg" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-      printf '  📊 7-day avg session: %s%s%s\n' "$avgc" "$(fmt_money "$avg_session_cost")" "$C_RESET"
+      printf '  📊 7-Day Avg Session: %s%s%s\n' "$avgc" "$(fmt_money "$avg_session_cost")" "$C_RESET"
     fi
     spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-    printf '  💵 30-day spend: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
+    printf '  💵 30-Day Spend: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
   else
     echo "no active Claude Code session found"
   fi
