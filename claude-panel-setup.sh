@@ -67,6 +67,7 @@ fmt_num() {
   }'
 }
 fmt_money() { printf '$%.2f' "${1:-0}"; }
+fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.1fM", n/1000000 }'; }
 fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 
 # ---- traffic-light thresholds, shared by every colored figure in the panel ----
@@ -339,7 +340,7 @@ PYEOF
           forced_note=" [forced 200k]"
         fi
         printf '  🧠 Context Usage: %s / %s tokens (%s%s%%%s)%s\n' \
-          "$(fmt_num "$ctx_tokens")" "$(fmt_num "$win_size")" "$ctx_color" "$ctx_pct" "$C_RESET" "$forced_note"
+          "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_color" "$ctx_pct" "$C_RESET" "$forced_note"
       elif [ "$i" -ne 2 ] || [ "$n_segs" -lt 4 ]; then
         # Skip ccusage's own middle "burn rate" segment when present (i==2
         # of 4) — already printed above from the JSON fetch; anything else
