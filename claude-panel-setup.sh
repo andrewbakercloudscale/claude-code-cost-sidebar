@@ -296,13 +296,12 @@ PYEOF
           sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
           printf '  %s Session Spend: %s$%s%s\n' "$sess_emoji" "$sc" "$sess_amt" "$C_RESET"
           # THIS session's own $/hr (spend so far ÷ time since its first
-          # message), projected across a 10h day — separate from the block
-          # burn rate below, which is every session's combined spend in the
-          # current 5h window, not just this one.
+          # message) — separate from the block burn rate below, which is
+          # every session's combined spend in the current 5h window, not
+          # just this one.
           sess_rate=$(awk -v c="$sess_amt" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
-          sess_proj10=$(awk -v r="$sess_rate" 'BEGIN{ printf "%.2f", r*10 }')
           src=$(threshold_color "$sess_rate" "$BURN_YELLOW" "$BURN_RED")
-          printf '  📈 Session Burn Rate: %s$%s/hr%s → $%s/10h day\n' "$src" "$sess_rate" "$C_RESET" "$sess_proj10"
+          printf '  📈 Session Burn Rate: %s$%s/hr%s\n' "$src" "$sess_rate" "$C_RESET"
         else
           printf '  %s\n' "$sess_part"
         fi
@@ -319,8 +318,8 @@ PYEOF
           # This is the burn rate across ALL sessions active in the current
           # 5h block, not just this one — ccusage's block totals are
           # already aggregated across every concurrent session.
-          printf '  🔥 All Sessions Burn Rate: %s%s/hr%s (%s) → $%s/10h day\n' \
-            "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label" "$(awk -v c="$blk_cph" 'BEGIN{ printf "%.2f", c*10 }')"
+          printf '  🔥 All Sessions Burn Rate: %s%s/hr%s (%s)\n' \
+            "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label"
         else
           printf '  ⏳ Current Time Block Spend: (no active block)\n'
         fi
