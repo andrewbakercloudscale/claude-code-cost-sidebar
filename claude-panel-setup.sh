@@ -68,6 +68,49 @@ fmt_num() {
 }
 fmt_money() { printf '$%.2f' "${1:-0}"; }
 fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
+
+# ---- traffic-light thresholds, shared by every colored figure in the panel ----
+TIER_YELLOW_MULT=1.5
+TIER_RED_MULT=2.0
+BURN_YELLOW=3
+BURN_RED=6
+CTX_YELLOW=50
+CTX_RED=80
+# A value only gets colored once it clears an absolute floor — in a cheap
+# session (avg $0.05) a $0.13 turn is >2x average and would false-positive
+# red on money nobody would look twice at.
+MIN_SESSION_ALERT=5.00
+MIN_DAILY_ALERT=15.00
+MIN_TREND_ALERT=2.00
+
+# value baseline yellow_mult red_mult floor -> green/yellow/red
+tier_color() {
+  local v="$1" a="$2" ym="$3" rm="$4" floor="${5:-0}" color="$C_GREEN"
+  awk -v v="$v" -v a="$a" -v f="$floor" 'BEGIN{exit !(a+0>0 && v+0>=f)}' || { printf '%s' "$color"; return; }
+  awk -v v="$v" -v a="$a" -v m="$ym" 'BEGIN{exit !(v+0>a*m)}' && color="$C_YELLOW"
+  awk -v v="$v" -v a="$a" -v m="$rm" 'BEGIN{exit !(v+0>a*m)}' && color="$C_RED"
+  printf '%s' "$color"
+}
+# value yellow_threshold red_threshold -> green/yellow/red (no baseline needed)
+threshold_color() {
+  local v="$1" yt="$2" rt="$3" color="$C_GREEN"
+  awk -v v="$v" -v t="$yt" 'BEGIN{exit !(v+0>t)}' && color="$C_YELLOW"
+  awk -v v="$v" -v t="$rt" 'BEGIN{exit !(v+0>t)}' && color="$C_RED"
+  printf '%s' "$color"
+}
+# Only Sonnet 5 and Fable 5 have a native 1M window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+# forces those two back to Sonnet 4.6's 200k boundary — see the comment above the
+# "Context cap" line below for why that distinction matters.
+context_window_size() {
+  local size=200000
+  case "$1" in
+    claude-sonnet-5|claude-fable-5) size=1000000 ;;
+  esac
+  if [ "$size" = "1000000" ] && [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-0}" = "1" ]; then
+    size=200000
+  fi
+  printf '%s' "$size"
+}
 # A short colored title, not a full-width divider bar — a bar that's drawn
 # at $cols but rendered later in a narrower/resized pane just wraps into a
 # confusing second row of "=" or "-", which is worse than no rule at all.
@@ -84,6 +127,28 @@ while true; do
   (( cols < 40 )) && cols=40
   rows=$(tput lines 2>/dev/null || echo 24)
   (( rows < 10 )) && rows=10
+
+  # ---- active 5h block: fetched once here (not down in the ACTIVE BLOCK
+  # section) so the summary line above can show the same burn-rate-derived
+  # color as the detailed section — one source of truth, one API call.
+  block_json=$(ccusage blocks --active --json --offline 2>/dev/null)
+  has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
+  if [ "${has_block:-0}" = "1" ]; then
+    IFS=$'\t' read -r blk_start blk_end blk_cost blk_tokens blk_cph blk_tpm blk_rem blk_projCost blk_projTokens blk_models <<<"$(jq -r '
+      .blocks[0] |
+      [
+        (.startTime[0:19]+"Z" | fromdateiso8601 | strftime("%H:%M")),
+        (.endTime[0:19]+"Z"   | fromdateiso8601 | strftime("%H:%M")),
+        .costUSD, .totalTokens, .burnRate.costPerHour, .burnRate.tokensPerMinute,
+        .projection.remainingMinutes, .projection.totalCost, .projection.totalTokens,
+        (.models | join(", "))
+      ] | @tsv
+    ' <<<"$block_json")"
+    burn_color=$(threshold_color "$blk_cph" "$BURN_YELLOW" "$BURN_RED")
+    burn_label="Normal"
+    [ "$burn_color" = "$C_YELLOW" ] && burn_label="Elevated"
+    [ "$burn_color" = "$C_RED" ] && burn_label="High"
+  fi
 
   # Everything through the per-turn table is GUARANTEED — printed in full,
   # never truncated, even on a short pane — so "show N turns" always means
@@ -108,6 +173,24 @@ while true; do
   since30=$(date -v-29d +%Y%m%d 2>/dev/null || date -d '29 days ago' +%Y%m%d)
   spend30=$(ccusage daily --json --since "$since30" --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
   [ -z "$spend30" ] && spend30=0
+  avg_daily_30=$(awk -v s="$spend30" 'BEGIN{ printf "%.4f", s/29 }')
+
+  # ---- trend baselines: the SAME two windows one period earlier, so the
+  # 7-day-avg and 30-day-spend lines can be traffic-lit against "am I
+  # spending more than I was a week/month ago" rather than against
+  # themselves (a baseline has nothing to compare to but its own past).
+  prev7_since=$(date -v-14d +%Y%m%d 2>/dev/null || date -d '14 days ago' +%Y%m%d)
+  prev7_until=$(date -v-8d +%Y%m%d 2>/dev/null || date -d '8 days ago' +%Y%m%d)
+  prev7_avg=$(ccusage session --json --since "$prev7_since" --until "$prev7_until" --offline 2>/dev/null | jq -r '
+    [.session[].totalCost] | map(select(. > 0.05)) |
+    if length >= 3 then (add/length) else 0 end
+  ' 2>/dev/null)
+  [ -z "$prev7_avg" ] && prev7_avg=0
+
+  prev30_since=$(date -v-58d +%Y%m%d 2>/dev/null || date -d '58 days ago' +%Y%m%d)
+  prev30_until=$(date -v-30d +%Y%m%d 2>/dev/null || date -d '30 days ago' +%Y%m%d)
+  prev_spend30=$(ccusage daily --json --since "$prev30_since" --until "$prev30_until" --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
+  [ -z "$prev_spend30" ] && prev_spend30=0
 
   # ---- live status line (current session) ----
   # Needs the REAL session_id and model.id — a placeholder session_id
@@ -162,6 +245,7 @@ PYEOF
     old_ifs="$IFS"
     IFS='|' read -ra statusline_segs <<< "$statusline_out"
     IFS="$old_ifs"
+    n_segs=${#statusline_segs[@]}
     for i in "${!statusline_segs[@]}"; do
       seg="${statusline_segs[$i]}"
       seg="${seg#"${seg%%[![:space:]]*}"}"
@@ -174,18 +258,55 @@ PYEOF
         # between those three fields — a bare "/" also turns up inside
         # the trailing burn rate, e.g. "$2.10/hr", and must not be split.
         IFS=$'\n' read -rd '' -a cost_parts < <(printf '%s' "$seg" | sed 's# / #\n#g'; printf '\0')
-        for j in "${!cost_parts[@]}"; do
-          part="${cost_parts[$j]}"
-          if [ "$j" -eq 0 ]; then
-            # ccusage already prefixes this field with 💰 itself.
-            printf '  %s\n' "$part"
-          elif [ "$j" -eq 1 ]; then
-            printf '  📅 %s\n' "$part"
-          else
-            printf '  ⏳ %s\n' "$part"
-          fi
-        done
-      else
+        # Session/today $ figures are colored against their own baselines
+        # (7-day avg session, 30-day daily avg); ccusage's own text for the
+        # third ("block") field is discarded here — the block/burn lines
+        # below are reconstructed from the JSON block fetch above instead,
+        # since that's the same real number the ACTIVE BLOCK section uses
+        # and doesn't depend on scraping ccusage's rendered string.
+        sess_part="${cost_parts[0]}"
+        if [[ "$sess_part" =~ \$(-?[0-9.]+) ]]; then
+          sess_amt="${BASH_REMATCH[1]}"
+          sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
+          sess_part="${sess_part/\$$sess_amt/${sc}\$${sess_amt}${C_RESET}}"
+        fi
+        printf '  %s\n' "$sess_part"
+
+        today_part="${cost_parts[1]:-}"
+        if [[ "$today_part" =~ \$(-?[0-9.]+) ]]; then
+          today_amt="${BASH_REMATCH[1]}"
+          tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
+          today_part="${today_part/\$$today_amt/${tc}\$${today_amt}${C_RESET}}"
+        fi
+        printf '  📅 %s\n' "$today_part"
+
+        if [ "${has_block:-0}" = "1" ]; then
+          printf '  ⏳ %s%s block (%s left)%s\n' "$burn_color" "$(fmt_money "$blk_cost")" "$(fmt_hm "$blk_rem")" "$C_RESET"
+          printf '  🔥 %s%s/hr (%s)%s\n' "$burn_color" "$(fmt_money "$blk_cph")" "$burn_label" "$C_RESET"
+        else
+          printf '  ⏳ No active block\n'
+        fi
+      elif [ "$i" -eq $((n_segs - 1)) ] && [[ "$seg" =~ ([0-9,]+)\ \(([0-9]+)%\) ]]; then
+        # Context segment — recompute the window size and % ourselves
+        # rather than trust ccusage's own %. ccusage assumes each model's
+        # native window (1M for Sonnet 5) regardless of whether
+        # CLAUDE_CODE_DISABLE_1M_CONTEXT forced the real active boundary
+        # back to 200k, which is exactly the mismatch that made context
+        # usage impossible to keep in check this week.
+        ctx_tokens="${BASH_REMATCH[1]//,/}"
+        win_size=$(context_window_size "$model_id")
+        ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
+        ctx_color=$(threshold_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED")
+        forced_note=""
+        if [ "$win_size" = "200000" ] && [[ "$model_id" == "claude-sonnet-5" || "$model_id" == "claude-fable-5" ]]; then
+          forced_note=" [forced 200k]"
+        fi
+        printf '  🧠 Context: %s / %s tokens (%s%s%%%s)%s\n' \
+          "$(fmt_num "$ctx_tokens")" "$(fmt_num "$win_size")" "$ctx_color" "$ctx_pct" "$C_RESET" "$forced_note"
+      elif [ "$i" -ne 2 ] || [ "$n_segs" -lt 4 ]; then
+        # Skip ccusage's own middle "burn rate" segment when present (i==2
+        # of 4) — already printed above from the JSON fetch; anything else
+        # (model name, etc.) prints as-is.
         printf '  %s\n' "$seg"
       fi
     done
@@ -199,21 +320,17 @@ PYEOF
       folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
     fi
     printf '  📁 Folder: %s\n' "$folder_disp"
-    # CLAUDE_CODE_DISABLE_1M_CONTEXT=1 forces 1M-context models (Sonnet 5,
-    # Fable 5) to a 200k effective window with auto-compaction at that
-    # boundary — the same discipline Sonnet 4.6 had by default. /context
-    # reports usage against whichever window is active, so it can correctly
-    # show 200k while genuinely on Sonnet 5; show which cap is in effect
-    # here so that isn't mistaken for a silent model downgrade.
-    if [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-0}" = "1" ]; then
-      printf '  🧭 Context cap: 200k (forced via CLAUDE_CODE_DISABLE_1M_CONTEXT)\n'
-    else
-      printf '  🧭 Context cap: 1M (native)\n'
-    fi
+    # Both trend lines below are colored against the SAME window one period
+    # earlier (this week's avg vs last week's, this month's spend vs last
+    # month's) — a baseline has no natural threshold of its own, but a
+    # widening gap vs its own past is exactly the "am I burning through
+    # tokens faster than before" signal worth a color for.
     if awk -v a="$avg_session_cost" 'BEGIN{exit !(a>0)}'; then
-      printf '  📊 7-day avg session: %s\n' "$(fmt_money "$avg_session_cost")"
+      avgc=$(tier_color "$avg_session_cost" "$prev7_avg" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
+      printf '  📊 7-day avg session: %s%s%s\n' "$avgc" "$(fmt_money "$avg_session_cost")" "$C_RESET"
     fi
-    printf '  💵 30-day spend: %s\n' "$(fmt_money "$spend30")"
+    spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
+    printf '  💵 30-day spend: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
   else
     echo "no active Claude Code session found"
   fi
@@ -336,28 +453,15 @@ PYEOF
   echo
 
   # ---- active 5h block: burn rate + projection ----
+  # block_json/blk_*/burn_color/burn_label were already fetched once, up
+  # top before the summary line, so this section and the summary agree.
   header "ACTIVE BLOCK"
-  block_json=$(ccusage blocks --active --json --offline 2>/dev/null)
-  has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
   if [ "${has_block:-0}" = "1" ]; then
-    IFS=$'\t' read -r start end cost tokens cph tpm rem projCost projTokens models <<<"$(jq -r '
-      .blocks[0] |
-      [
-        (.startTime[0:19]+"Z" | fromdateiso8601 | strftime("%H:%M")),
-        (.endTime[0:19]+"Z"   | fromdateiso8601 | strftime("%H:%M")),
-        .costUSD, .totalTokens, .burnRate.costPerHour, .burnRate.tokensPerMinute,
-        .projection.remainingMinutes, .projection.totalCost, .projection.totalTokens,
-        (.models | join(", "))
-      ] | @tsv
-    ' <<<"$block_json")"
-    burn_color="$C_GREEN"
-    awk -v c="$cph" 'BEGIN{exit !(c+0>3)}' && burn_color="$C_YELLOW"
-    awk -v c="$cph" 'BEGIN{exit !(c+0>6)}' && burn_color="$C_RED"
-    printf '  window   %s – %s  (%s left)\n' "$start" "$end" "$(fmt_hm "$rem")"
-    printf '  spent    %s   %s tok\n' "$(fmt_money "$cost")" "$(fmt_num "$tokens")"
-    printf '  burn     %s%s/hr%s   %s tok/min\n' "$burn_color" "$(fmt_money "$cph")" "$C_RESET" "$(fmt_num "$tpm")"
-    printf '  proj.    %s total   %s tok\n' "$(fmt_money "$projCost")" "$(fmt_num "$projTokens")"
-    printf '  models   %s\n' "$models"
+    printf '  window   %s – %s  (%s left)\n' "$blk_start" "$blk_end" "$(fmt_hm "$blk_rem")"
+    printf '  spent    %s   %s tok\n' "$(fmt_money "$blk_cost")" "$(fmt_num "$blk_tokens")"
+    printf '  burn     %s%s/hr (%s)%s   %s tok/min\n' "$burn_color" "$(fmt_money "$blk_cph")" "$burn_label" "$C_RESET" "$(fmt_num "$blk_tpm")"
+    printf '  proj.    %s total   %s tok\n' "$(fmt_money "$blk_projCost")" "$(fmt_num "$blk_projTokens")"
+    printf '  models   %s\n' "$blk_models"
   else
     echo "  (no active block)"
   fi
