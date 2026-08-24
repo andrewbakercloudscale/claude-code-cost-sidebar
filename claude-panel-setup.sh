@@ -150,6 +150,60 @@ while true; do
     [ "$burn_color" = "$C_RED" ] && burn_label="High"
   fi
 
+  # ---- current session identity: fetched once here (not inside the
+  # guaranteed subshell below) so TOP SESSIONS TODAY, further down, can
+  # mark which row is THIS session — a command-substitution subshell can
+  # read these variables outside itself but never write them back out.
+  latest=$(ls -t ~/.claude/projects/*/*.jsonl 2>/dev/null | head -1)
+  if [ -n "$latest" ]; then
+    IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(python3 - "$latest" <<'PYEOF'
+import datetime, json, os, sys
+
+path = sys.argv[1]
+sid = os.path.basename(path).removesuffix(".jsonl")
+model = "unknown"
+folder = ""
+first_ts = None
+try:
+    with open(path) as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not folder and d.get("cwd"):
+                folder = os.path.basename(d["cwd"])
+            if not first_ts and d.get("timestamp"):
+                first_ts = d["timestamp"]
+            if d.get("type") == "assistant":
+                m = d.get("message", {}).get("model")
+                if m:
+                    model = m
+except OSError:
+    pass
+
+rest = model.removeprefix("claude-")
+parts = rest.split("-")
+name = parts[0].capitalize()
+nums = parts[1:]
+if len(nums) >= 2:
+    label = f"{name} {nums[0]}.{nums[1]}"
+elif len(nums) == 1:
+    label = f"{name} {nums[0]}"
+else:
+    label = name
+
+epoch = 0
+if first_ts:
+    epoch = int(datetime.datetime.fromisoformat(first_ts.replace("Z", "+00:00")).timestamp())
+print(f"{sid}\t{model}\t{label}\t{folder}\t{epoch}")
+PYEOF
+    )
+    # Floor elapsed time at 3 minutes — a session-so-far rate computed over
+    # the first few seconds swings wildly and would flash red/green noise.
+    sess_elapsed_h=$(awk -v s="$sess_start_epoch" -v n="$(date +%s)" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
+  fi
+
   # Everything through the per-turn table is GUARANTEED — printed in full,
   # never truncated, even on a short pane — so "show N turns" always means
   # N turns, not "N turns if there's room after the other sections." Only
@@ -193,48 +247,13 @@ while true; do
   [ -z "$prev_spend30" ] && prev_spend30=0
 
   # ---- live status line (current session) ----
-  # Needs the REAL session_id and model.id — a placeholder session_id
-  # ("live") matches no recorded session (session cost silently comes back
-  # $-0.00), and an unset model.id makes ccusage assume an old 200k context
-  # window instead of Sonnet 5's actual 1M, so context% reads >100%.
-  latest=$(ls -t ~/.claude/projects/*/*.jsonl 2>/dev/null | head -1)
+  # sess_id/model_id/model_label/folder_name/sess_start_epoch were already
+  # resolved once, up top, before this subshell — needs the REAL
+  # session_id and model.id: a placeholder session_id ("live") matches no
+  # recorded session (session cost silently comes back $-0.00), and an
+  # unset model.id makes ccusage assume an old 200k context window instead
+  # of Sonnet 5's actual 1M, so context% reads >100%.
   if [ -n "$latest" ]; then
-    IFS=$'\t' read -r sess_id model_id model_label folder_name < <(python3 - "$latest" <<'PYEOF'
-import json, os, sys
-
-path = sys.argv[1]
-sid = os.path.basename(path).removesuffix(".jsonl")
-model = "unknown"
-folder = ""
-try:
-    with open(path) as f:
-        for line in f:
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not folder and d.get("cwd"):
-                folder = os.path.basename(d["cwd"])
-            if d.get("type") == "assistant":
-                m = d.get("message", {}).get("model")
-                if m:
-                    model = m
-except OSError:
-    pass
-
-rest = model.removeprefix("claude-")
-parts = rest.split("-")
-name = parts[0].capitalize()
-nums = parts[1:]
-if len(nums) >= 2:
-    label = f"{name} {nums[0]}.{nums[1]}"
-elif len(nums) == 1:
-    label = f"{name} {nums[0]}"
-else:
-    label = name
-print(f"{sid}\t{model}\t{label}\t{folder}")
-PYEOF
-    )
     payload=$(printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","model":{"id":"%s","display_name":"%s"},"workspace":{"current_dir":"%s","project_dir":"%s"},"version":"1.0","output_style":{"name":"default"}}' \
       "$sess_id" "$latest" "$PWD" "$model_id" "$model_label" "$PWD" "$PWD")
     statusline_out=$(echo "$payload" | ccusage statusline -B text 2>/dev/null)
@@ -275,6 +294,14 @@ PYEOF
           sess_amt="${BASH_REMATCH[1]}"
           sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
           printf '  %s Session Spend: %s$%s%s\n' "$sess_emoji" "$sc" "$sess_amt" "$C_RESET"
+          # THIS session's own $/hr (spend so far ÷ time since its first
+          # message), projected across a 10h day — separate from the block
+          # burn rate below, which is every session's combined spend in the
+          # current 5h window, not just this one.
+          sess_rate=$(awk -v c="$sess_amt" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
+          sess_proj10=$(awk -v r="$sess_rate" 'BEGIN{ printf "%.2f", r*10 }')
+          src=$(threshold_color "$sess_rate" "$BURN_YELLOW" "$BURN_RED")
+          printf '  📈 Session Burn Rate: %s$%s/hr%s → $%s/10h day\n' "$src" "$sess_rate" "$C_RESET" "$sess_proj10"
         else
           printf '  %s\n' "$sess_part"
         fi
@@ -288,7 +315,11 @@ PYEOF
 
         if [ "${has_block:-0}" = "1" ]; then
           printf '  ⏳ Block Spend: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
-          printf '  🔥 Burn Rate: %s%s/hr%s (%s)\n' "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label"
+          # This is the burn rate across ALL sessions active in the current
+          # 5h block, not just this one — ccusage's block totals are
+          # already aggregated across every concurrent session.
+          printf '  🔥 All-Sessions Burn Rate: %s%s/hr%s (%s) → $%s/10h day\n' \
+            "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label" "$(awk -v c="$blk_cph" 'BEGIN{ printf "%.2f", c*10 }')"
         else
           printf '  ⏳ Block Spend: (no active block)\n'
         fi
@@ -518,14 +549,20 @@ PYEOF
   printf '  this month  %s\n' "$(fmt_money "$month_cost")"
   echo
 
-  # ---- top sessions today ----
+  # ---- top sessions today: which session is consuming the day's spend ----
   header "TOP SESSIONS TODAY"
   session_json=$(ccusage session --json --since "$(date +%Y%m%d)" --offline 2>/dev/null)
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     while IFS=$'\t' read -r sid scost stok slast; do
       [ -z "$sid" ] && continue
       lasthm=$(jq -rn --arg t "$slast" '($t[0:19]+"Z") | fromdateiso8601 | strftime("%H:%M")' 2>/dev/null)
-      printf '  %-10s %8s  %s tok  last %s\n' "${sid:0:10}" "$(fmt_money "$scost")" "$(fmt_num "$stok")" "$lasthm"
+      pct=$(awk -v c="$scost" -v t="${tCost:-0}" 'BEGIN{ print (t>0? c/t*100:0) }')
+      row=$(printf '%-10s %8s (%3.0f%% of today)  %s tok  last %s' "${sid:0:10}" "$(fmt_money "$scost")" "$pct" "$(fmt_num "$stok")" "$lasthm")
+      if [ "$sid" = "${sess_id:-}" ]; then
+        printf '  %s%s → this session%s\n' "$C_BOLD" "$row" "$C_RESET"
+      else
+        printf '  %s\n' "$row"
+      fi
     done < <(jq -r '.session | sort_by(-.totalCost) | .[0:5][] | [.period, .totalCost, .totalTokens, .metadata.lastActivity] | @tsv' <<<"$session_json")
   else
     echo "  (none)"
