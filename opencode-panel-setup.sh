@@ -62,6 +62,61 @@ header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RES
 # ghosting through the new one — same fix as ccusage-panel.sh.
 clear_eol() { awk '{ printf "%s\033[K\n", $0 }'; }
 
+fmt_money() { printf '$%.2f' "${1:-0}"; }
+fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.1fM", n/1000000 }'; }
+# value yellow_threshold red_threshold -> green/yellow/red. No historical
+# baseline to compare against (unlike the Claude Code panel's ccusage-backed
+# tier_color) — Together AI/opencode has no equivalent of ccusage's flexible
+# --since/--until session query, so these are fixed heuristic dollar/percent
+# cutoffs rather than "vs. your own recent average". Adjust if they don't
+# match your actual usage pattern.
+threshold_color() {
+  local v="$1" yt="$2" rt="$3" color="$C_GREEN"
+  awk -v v="$v" -v t="$yt" 'BEGIN{exit !(v+0>t)}' && color="$C_YELLOW"
+  awk -v v="$v" -v t="$rt" 'BEGIN{exit !(v+0>t)}' && color="$C_RED"
+  printf '%s' "$color"
+}
+
+# Looks up a model's context-window size via `opencode models --verbose`,
+# which takes ~1s (it hits models.dev), so the result is cached to disk for
+# 10 minutes — a model's context limit never changes mid-session, and this
+# runs on every 5s refresh tick otherwise.
+model_context_limit() {
+  local provider="$1" model="$2"
+  local cache_dir="$HOME/.cache/opencode-panel-model-limits"
+  mkdir -p "$cache_dir" 2>/dev/null
+  local cache_key cache_file cache_age
+  cache_key=$(printf '%s_%s' "$provider" "$model" | tr '/ ' '__')
+  cache_file="$cache_dir/$cache_key"
+  if [ -f "$cache_file" ]; then
+    cache_age=$(( $(date +%s) - $(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0) ))
+    if [ "$cache_age" -lt 600 ]; then
+      cat "$cache_file"
+      return
+    fi
+  fi
+  local limit
+  limit=$(opencode models "$provider" --verbose 2>/dev/null | python3 -c '
+import sys, json, re
+provider, target = sys.argv[1], sys.argv[2]
+text = sys.stdin.read()
+for block in re.split(r"\n(?=" + re.escape(provider) + r"/)", text.strip()):
+    parts = block.split("\n", 1)
+    if len(parts) != 2:
+        continue
+    try:
+        d = json.loads(parts[1])
+    except json.JSONDecodeError:
+        continue
+    if d.get("id") == target:
+        print((d.get("limit") or {}).get("context", 0))
+        break
+' "$provider" "$model" 2>/dev/null)
+  [ -z "$limit" ] && limit=0
+  echo "$limit" > "$cache_file" 2>/dev/null
+  printf '%s' "$limit"
+}
+
 # jq expression tried against two plausible `session list --format json`
 # shapes (flat time_created, or nested time.created / sessionID), sorted
 # newest first. If neither field exists on your version, this falls back
@@ -73,6 +128,7 @@ BASELINE_AVG='
 '
 
 while true; do
+  SECONDS=0
   printf '\033[H'
   cols=$(tput cols 2>/dev/null || echo 60)
   (( cols < 40 )) && cols=40
@@ -116,13 +172,122 @@ while true; do
     fi
     echo
 
-    header "THIS SESSION — PER TURN"
+    # `opencode stats` takes ~0.5s per call (Node/Bun startup, not the
+    # query itself) — fetched once per day-range here and reused below by
+    # both the headline block and the TODAY/LAST 7 DAYS sections, instead
+    # of hitting the same range twice per refresh tick.
+    today_stats=$(opencode stats --days 1 2>/dev/null)
+    week_stats=$(opencode stats --days 7 2>/dev/null)
+    month_stats=$(opencode stats --days 30 2>/dev/null)
+    stats_field() { awk -F'\\$' -v pat="$2" '$0 ~ pat {gsub(/[ │]/,"",$2); print $2}' <<<"$1"; }
+
+    # ---- headline status block, "icon Label: value" per row like the
+    # Claude Code panel. `opencode export` is fetched once here and its
+    # temp file reused below by the per-turn table, instead of exporting
+    # the same session twice per refresh tick. There is no OpenCode
+    # equivalent of Claude Code's 5-hour billing block (Together AI and
+    # the other providers here bill per-token continuously with no block
+    # reset), so "Current Time Block" / "All Sessions Burn Rate" are
+    # skipped rather than faked.
+    export_tmp=""
     if [ -n "$session_id" ]; then
       export_json=$(opencode export "$session_id" 2>/dev/null)
       if [ -n "$export_json" ]; then
         export_tmp=$(mktemp)
         printf '%s\n' "$export_json" > "$export_tmp"
-        python3 - "$export_tmp" "$TURN_ROWS" <<'PYEOF'
+      fi
+    fi
+
+    if [ -n "$export_tmp" ]; then
+      IFS=$'\t' read -r model_label session_cost sess_elapsed_h last_ctx_tokens provider_id model_id \
+        < <(python3 - "$export_tmp" <<'PYEOF'
+import json, sys, time
+
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        doc = json.load(f)
+except (OSError, json.JSONDecodeError):
+    doc = {}
+
+info = doc.get("info", {}) or {}
+model = info.get("model", {}) or {}
+provider_id = model.get("providerID", "?")
+model_id = model.get("id", "unknown")
+label = model_id.split("/")[-1][:20] or "unknown"
+
+cost = info.get("cost", 0) or 0
+created_ms = (info.get("time", {}) or {}).get("created", 0) or 0
+# Floor elapsed time at 3 minutes — a rate computed over the first few
+# seconds of a session swings wildly and would flash red/green noise.
+elapsed_h = max((time.time() * 1000 - created_ms) / 3_600_000, 0.05) if created_ms else 0.05
+
+last_ctx = 0
+for m in doc.get("messages", []):
+    minfo = m.get("info", {}) or {}
+    if minfo.get("role") != "assistant":
+        continue
+    tokens = minfo.get("tokens", {}) or {}
+    cache = tokens.get("cache", {}) or {}
+    last_ctx = tokens.get("input", 0) + cache.get("read", 0) + cache.get("write", 0)
+
+print(f"{label}\t{cost}\t{elapsed_h:.4f}\t{last_ctx}\t{provider_id}\t{model_id}")
+PYEOF
+      )
+
+      printf '  🤖 Model: %s\n' "${model_label:-unknown}"
+
+      sc=$(threshold_color "${session_cost:-0}" 1 5)
+      printf '  💰 Session Spend: %s%s%s\n' "$sc" "$(fmt_money "${session_cost:-0}")" "$C_RESET"
+
+      sess_rate=$(awk -v c="${session_cost:-0}" -v h="${sess_elapsed_h:-0.05}" 'BEGIN{ printf "%.2f", (h>0? c/h:0) }')
+      rc=$(threshold_color "$sess_rate" 2 5)
+      printf '  📈 Session Burn Rate: %s$%s/hr%s\n' "$rc" "$sess_rate" "$C_RESET"
+
+      today_cost=$(stats_field "$today_stats" "Total Cost")
+      [ -z "$today_cost" ] && today_cost=0
+      tc=$(threshold_color "$today_cost" 5 20)
+      printf '  📅 Today Spend: %s%s%s\n' "$tc" "$(fmt_money "$today_cost")" "$C_RESET"
+
+      # Projects the CURRENT session's burn rate across a flat 10h work
+      # day — same convention as the Claude Code panel's predicted-spend
+      # line, standing in for a per-block rate since there's no block here.
+      today_pred=$(awk -v r="$sess_rate" 'BEGIN{ printf "%.2f", r*10 }')
+      pc=$(threshold_color "$today_pred" 5 20)
+      printf '  🔮 Today'"'"'s Predicted Spend: %s%s%s\n' "$pc" "$(fmt_money "$today_pred")" "$C_RESET"
+
+      if [ "${last_ctx_tokens:-0}" -gt 0 ] 2>/dev/null; then
+        ctx_limit=$(model_context_limit "${provider_id:-}" "${model_id:-}")
+        if [ "${ctx_limit:-0}" -gt 0 ] 2>/dev/null; then
+          ctx_pct=$(awk -v t="$last_ctx_tokens" -v w="$ctx_limit" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
+          cc=$(threshold_color "$ctx_pct" 50 80)
+          printf '  🧠 Context Usage: %s / %s tokens (%s%s%%%s)\n' \
+            "$(fmt_m "$last_ctx_tokens")" "$(fmt_m "$ctx_limit")" "$cc" "$ctx_pct" "$C_RESET"
+        fi
+      fi
+
+      folder_full=$(jq -r --arg sid "$session_id" \
+        '.[] | select((.id // .sessionID // .session_id) == $sid) | (.directory // "")' \
+        <<<"$list_json" 2>/dev/null)
+      [ -n "$folder_full" ] && printf '  📁 Folder: %s\n' "$(basename "$folder_full")"
+
+      week_avg_cost=$(stats_field "$week_stats" "Avg Cost.Day")
+      if [ -n "$week_avg_cost" ]; then
+        wc=$(threshold_color "$week_avg_cost" 5 20)
+        printf '  📊 7-Day Avg Daily Spend: %s%s%s\n' "$wc" "$(fmt_money "$week_avg_cost")" "$C_RESET"
+      fi
+
+      month_cost=$(stats_field "$month_stats" "Total Cost")
+      if [ -n "$month_cost" ]; then
+        mc=$(threshold_color "$month_cost" 50 200)
+        printf '  💵 30-Day Spend: %s%s%s\n' "$mc" "$(fmt_money "$month_cost")" "$C_RESET"
+      fi
+      echo
+    fi
+
+    header "THIS SESSION — PER TURN"
+    if [ -n "$export_tmp" ]; then
+      python3 - "$export_tmp" "$TURN_ROWS" <<'PYEOF'
 import json, sys
 
 path, max_rows = sys.argv[1], int(sys.argv[2])
@@ -132,43 +297,36 @@ def fmt_k(n):
         return f"{n/1000:.0f}k"
     return str(n)
 
-turns, seen = [], set()
+turns = []
 try:
     with open(path) as f:
-        lines = f.readlines()
-except OSError:
-    lines = []
+        doc = json.load(f)
+except (OSError, json.JSONDecodeError):
+    doc = {}
 
-for line in lines:
-    line = line.strip()
-    if not line:
+# `opencode export` prints one pretty-printed JSON object — {"info": ...,
+# "messages": [{"info": {...}, "parts": [...]}]} — not JSON-lines, and each
+# message's fields (role/tokens/cost/modelID/providerID) live directly on
+# its own "info", not nested under a "data" key. The original version of
+# this parser assumed a JSONL shape that never matched a real export, so
+# every session showed "no assistant turns yet" regardless of activity.
+for m in doc.get("messages", []):
+    info = m.get("info", {}) or {}
+    if info.get("role") != "assistant":
         continue
-    try:
-        d = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if d.get("type") != "message":
-        continue
-    data = d.get("data", {})
-    if data.get("role") != "assistant":
-        continue
-    mid = d.get("id")
-    if not mid or mid in seen:
-        continue
-    seen.add(mid)
 
-    tokens = data.get("tokens", {}) or {}
+    tokens = info.get("tokens", {}) or {}
     in_tok = tokens.get("input", 0)
     cache = tokens.get("cache", {}) or {}
     cache_read = cache.get("read", 0)
     cache_write = cache.get("write", 0)
-    cost = data.get("cost", 0) or 0
+    cost = info.get("cost", 0) or 0
 
     total_ctx = in_tok + cache_read + cache_write
     cache_pct = (cache_read / total_ctx * 100) if total_ctx else 0.0
 
-    provider = data.get("providerID", "?")
-    model = data.get("modelID", "unknown")
+    provider = info.get("providerID", "?")
+    model = info.get("modelID", "unknown")
     label = f"{provider}/{model}"[:16]
 
     # Δ is new cache writes this turn, matching the ccusage panel's
@@ -192,27 +350,54 @@ else:
     session_cost = sum(t[4] for t in turns)
     print(f"  session total so far: ${session_cost:.2f} ({total_n} assistant turns)")
 PYEOF
-        rm -f "$export_tmp"
-      else
-        echo "  (couldn't export session $session_id — 'opencode export' may need a newer CLI version)"
-      fi
+      rm -f "$export_tmp"
+    elif [ -n "$session_id" ]; then
+      echo "  (couldn't export session $session_id — 'opencode export' may need a newer CLI version)"
     else
       echo "  (no OpenCode session found — run 'opencode session list --format json' to check)"
     fi
     echo
 
-    # ---- today / week / month: shown as opencode's own output, not
-    # parsed, per the note at the top of the installer ----
-    header "TODAY (opencode stats --days 1)"
-    opencode stats --days 1 2>/dev/null | head -n 6 || echo "  (opencode stats not available)"
+    # ---- today / week: `opencode stats` renders fixed 60-column boxes
+    # (OVERVIEW + COST & TOKENS + TOOL USAGE, ~30 lines each) that don't
+    # fit a narrow side panel — a 58-col pane wraps every box line, and
+    # printing both sections in full blows past the panel's row budget
+    # before TOOL USAGE or the 7-day section ever render. Pull just the
+    # headline fields into plain "label: value" lines instead, same
+    # compact style as the rest of this panel. $today_stats/$week_stats
+    # were already fetched above for the headline block — reused here
+    # rather than calling `opencode stats` a second time per range.
+    extract_stats() {
+      sed -n '/Sessions/p;/Messages/p;/^│Days/p;/Total Cost/p;/Avg Cost.Day/p' \
+        | sed -E 's/ *│ *$//; s/ {2,}/: /; s/^│/  /'
+    }
+    header "TODAY"
+    if [ -n "$today_stats" ]; then
+      echo "$today_stats" | extract_stats
+    else
+      echo "  (opencode stats not available)"
+    fi
     echo
-    header "LAST 7 DAYS (opencode stats --days 7)"
-    opencode stats --days 7 2>/dev/null | head -n 6 || echo "  (opencode stats not available)"
+    header "LAST 7 DAYS"
+    if [ -n "$week_stats" ]; then
+      echo "$week_stats" | extract_stats
+    else
+      echo "  (opencode stats not available)"
+    fi
   fi
   } | head -n "$((rows - 1))" | clear_eol
   printf '\033[0J'
 
-  sleep "$REFRESH"
+  # Each refresh shells out to `opencode` 4-5 times (session list, export,
+  # up to three stats calls) at ~0.5s of Node/Bun startup apiece — that's
+  # ~2.5s of unavoidable overhead before REFRESH's own sleep even starts,
+  # so a plain `sleep "$REFRESH"` after that silently turns a "5s refresh"
+  # into an ~8-9s one. Subtract the work already spent this tick so the
+  # labeled cadence is honest; floor at 1s in case a tick ever runs long.
+  elapsed=$SECONDS
+  remaining=$(( REFRESH - elapsed ))
+  (( remaining < 1 )) && remaining=1
+  sleep "$remaining"
 done
 PANEL_EOF
 chmod +x "$BIN_DIR/opencode-panel.sh"
