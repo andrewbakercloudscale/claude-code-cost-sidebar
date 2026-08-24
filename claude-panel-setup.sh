@@ -323,17 +323,31 @@ PYEOF
           today_amt="${BASH_REMATCH[1]}"
           tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
           printf '  📅 Today Spend: %s$%s%s\n' "$tc" "$today_amt" "$C_RESET"
+          # Projects the CURRENT burn rate (blk_cph, all sessions in the
+          # active block — the same $/hr the All Sessions Burn Rate line
+          # below shows) across a flat 10h work day. Deliberately NOT
+          # today_amt ÷ hours-since-midnight: most of "since midnight" is
+          # idle overnight hours, which dilutes that rate below the current
+          # pace and can even predict LESS than what's already been spent
+          # today. blk_cph is ccusage's own rate over actual active time in
+          # the block, so it doesn't have that problem. Only shown when a
+          # block is active — otherwise there's no current rate to project.
+          if [ "${has_block:-0}" = "1" ]; then
+            today_pred=$(awk -v r="$blk_cph" 'BEGIN{ printf "%.2f", r*10 }')
+            pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
+            printf '  🔮 Today'"'"'s Predicted Spend: %s$%s%s\n' "$pc" "$today_pred" "$C_RESET"
+          fi
         fi
 
         if [ "${has_block:-0}" = "1" ]; then
-          printf '  ⏳ Current Time Block Spend: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
+          printf '  ⏳ Current Time Block: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
           # This is the burn rate across ALL sessions active in the current
           # 5h block, not just this one — ccusage's block totals are
           # already aggregated across every concurrent session.
           printf '  🔥 All Sessions Burn Rate: %s%s/hr%s (%s)\n' \
             "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label"
         else
-          printf '  ⏳ Current Time Block Spend: (no active block)\n'
+          printf '  ⏳ Current Time Block: (no active block)\n'
         fi
       elif [ "$i" -eq $((n_segs - 1)) ] && [[ "$seg" =~ ([0-9,]+)\ \(([0-9]+)%\) ]]; then
         # Context segment — recompute the window size and % ourselves
