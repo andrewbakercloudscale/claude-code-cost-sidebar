@@ -8,6 +8,14 @@
 #                                           top sessions)
 #   ~/.local/bin/claude-panel-launch.sh  - opens a right-hand Ghostty split
 #                                           running the panel above
+#   ~/.local/bin/claude-panel-keyblock   - compiled helper (clang, from a
+#                                           heredoc source below) that
+#                                           swallows real keyboard input for
+#                                           a few seconds while the launcher
+#                                           above is driving synthetic
+#                                           keystrokes, so accidental typing
+#                                           during window setup can't land
+#                                           in the new split
 #   ~/.zshrc (appended, idempotent)      - a preexec hook that runs the
 #                                           launcher once per terminal
 #                                           window, the first time a
@@ -28,9 +36,12 @@
 #                                           above into UserPromptSubmit
 #
 # Requirements: macOS + Ghostty (for the auto-split part — the panel script
-# itself works in any terminal), Node.js (for `ccusage`), jq, and
-# Accessibility permission granted to Ghostty/Terminal for the System
-# Events automation (macOS will prompt the first time if not yet granted).
+# itself works in any terminal), Node.js (for `ccusage`), jq, clang (Xcode
+# Command Line Tools, for the keyboard-guard helper — optional, skipped with
+# a warning if missing), and Accessibility permission granted to
+# Ghostty/Terminal for the System Events automation, PLUS Accessibility +
+# Input Monitoring granted to claude-panel-keyblock for the keyboard guard
+# (macOS will prompt the first time each isn't yet granted).
 #
 # Safe to re-run: overwrites the two scripts with the latest version and
 # skips the .zshrc block if it's already present.
@@ -246,6 +257,7 @@ PYEOF
   prev30_until=$(date -v-30d +%Y%m%d 2>/dev/null || date -d '30 days ago' +%Y%m%d)
   prev_spend30=$(ccusage daily --json --since "$prev30_since" --until "$prev30_until" --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
   [ -z "$prev_spend30" ] && prev_spend30=0
+  prev_avg_daily_30=$(awk -v s="$prev_spend30" 'BEGIN{ printf "%.4f", s/29 }')
 
   # ---- live status line (current session) ----
   # sess_id/model_id/model_label/folder_name/sess_start_epoch were already
@@ -363,9 +375,9 @@ PYEOF
     # month's) — a baseline has no natural threshold of its own, but a
     # widening gap vs its own past is exactly the "am I burning through
     # tokens faster than before" signal worth a color for.
-    if awk -v a="$avg_session_cost" 'BEGIN{exit !(a>0)}'; then
-      avgc=$(tier_color "$avg_session_cost" "$prev7_avg" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-      printf '  📊 7-Day Avg Session: %s%s%s\n' "$avgc" "$(fmt_money "$avg_session_cost")" "$C_RESET"
+    if awk -v a="$avg_daily_30" 'BEGIN{exit !(a>0)}'; then
+      avgc=$(tier_color "$avg_daily_30" "$prev_avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
+      printf '  📊 30-Day Avg Daily Spend: %s%s%s\n' "$avgc" "$(fmt_money "$avg_daily_30")" "$C_RESET"
     fi
     spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
     printf '  💵 30-Day Spend: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
@@ -576,6 +588,98 @@ done
 PANEL_EOF
 chmod +x "$BIN_DIR/ccusage-panel.sh"
 
+echo "Installing claude-panel-keyblock (keyboard guard for the auto-split) ..."
+# Swallows real keyboard input system-wide for a few seconds while
+# claude-panel-launch.sh is driving synthetic keystrokes into the new split,
+# so typing during that window can't land in the wrong pane or get
+# interleaved into the command being typed and corrupt it.
+#
+# Safety valves against ever getting "stuck blocked":
+#   - the event tap is owned by this process; macOS tears it down the moment
+#     the process exits, crashes, or is killed — there is no way to leave
+#     the keyboard blocked after this process is gone
+#   - CFRunLoopRunInMode returns on its own after $1 seconds even if no
+#     events arrive, so the normal path always exits by itself
+#   - a SIGALRM backstop fires ~2s after that in case the run loop ever
+#     wedges, and the duration argument is hard-capped at 15s regardless of
+#     what's passed in
+#
+# Real vs. synthetic keystrokes are told apart via kCGEventSourceUnixProcessID:
+# hardware-originated events report source pid 0; keystrokes that "System
+# Events" (osascript's keystroke command) posts on our behalf report ITS
+# pid. So real typing gets dropped and the launcher's own automation still
+# gets through untouched.
+KEYBLOCK_SRC="$(mktemp -t claude-panel-keyblock).c"
+cat > "$KEYBLOCK_SRC" <<'KEYBLOCK_EOF'
+#include <ApplicationServices/ApplicationServices.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+static CGEventRef tap_callback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon) {
+    (void)proxy; (void)type; (void)refcon;
+    int64_t source_pid = CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID);
+    if (source_pid == 0) {
+        return NULL; /* hardware-originated keystroke: swallow it */
+    }
+    return event; /* synthetic (posted by System Events on our behalf): let it through */
+}
+
+static void on_alarm(int sig) {
+    (void)sig;
+    _exit(0); /* hard backstop: exit unconditionally, tearing the tap down with us */
+}
+
+int main(int argc, char **argv) {
+    double duration = argc > 1 ? atof(argv[1]) : 2.5;
+    if (duration <= 0 || duration > 15) duration = 2.5;
+
+    signal(SIGALRM, on_alarm);
+    alarm((unsigned int)duration + 2);
+
+    CGEventMask mask = CGEventMaskBit(kCGEventKeyDown)
+                      | CGEventMaskBit(kCGEventKeyUp)
+                      | CGEventMaskBit(kCGEventFlagsChanged);
+    CFMachPortRef tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
+                                          kCGEventTapOptionDefault, mask, tap_callback, NULL);
+    if (!tap) {
+        fprintf(stderr, "claude-panel-keyblock: failed to create event tap "
+                        "(grant Accessibility + Input Monitoring to this binary)\n");
+        return 1;
+    }
+    CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopCommonModes);
+    CGEventTapEnable(tap, true);
+
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, duration, false);
+
+    CGEventTapEnable(tap, false);
+    CFMachPortInvalidate(tap);
+    CFRelease(tap);
+    CFRelease(src);
+    return 0;
+}
+KEYBLOCK_EOF
+if command -v clang >/dev/null 2>&1; then
+  if clang -O2 -Wall -framework ApplicationServices -framework CoreFoundation \
+      -o "$BIN_DIR/claude-panel-keyblock" "$KEYBLOCK_SRC" 2>/tmp/claude-panel-keyblock-build.log; then
+    chmod +x "$BIN_DIR/claude-panel-keyblock"
+    echo "Built ~/.local/bin/claude-panel-keyblock."
+    echo "NOTE: the first time it runs, macOS will ask you to grant it Accessibility"
+    echo "and Input Monitoring access (System Settings > Privacy & Security) — approve"
+    echo "both, otherwise it just logs a failure and the launcher proceeds unblocked."
+  else
+    echo "WARNING: failed to build claude-panel-keyblock (see /tmp/claude-panel-keyblock-build.log)."
+    echo "The auto-split launcher will still work, just without the keyboard guard."
+  fi
+else
+  echo "WARNING: no clang found — skipping claude-panel-keyblock (keyboard guard)."
+  echo "The auto-split launcher will still work, just without the keyboard guard."
+fi
+rm -f "$KEYBLOCK_SRC"
+
 echo "Installing claude-panel-launch.sh ..."
 cat > "$BIN_DIR/claude-panel-launch.sh" <<'LAUNCH_EOF'
 #!/usr/bin/env bash
@@ -657,6 +761,19 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
     continue
   fi
   log "attempt $attempt: frontmost confirmed ghostty after $polls poll(s)"
+
+  # Block real keyboard input for the settle delay + the whole keystroke
+  # sequence below (worst case, a wide monitor's resize-repeat loop, runs
+  # ~4s) so anything typed while the window is still settling can't land in
+  # the new split or get woven into the command being typed into it. Fully
+  # self-bounded: it exits on its own after the duration below even if this
+  # script dies first — see claude-panel-keyblock's own comments for the
+  # safety valves. Best-effort: missing binary or ungranted permissions
+  # just mean no guard, same as before this existed.
+  if [ -x "$HOME/.local/bin/claude-panel-keyblock" ]; then
+    "$HOME/.local/bin/claude-panel-keyblock" 6 >>"$LOG" 2>&1 &
+    log "attempt $attempt: keyboard guard started (pid $!, 6s)"
+  fi
 
   # Settle delay: frontmost can flip true right as a cold `open -na` launch
   # is still mid-activation-animation, before the window can reliably
@@ -942,3 +1059,11 @@ echo "any 'claude...' command — it'll auto-split right and start the panel."
 echo "Same goes for the 'Launch Claude Code in Ghostty' Finder Service, if"
 echo "you use one (patched above when present)."
 echo "Run the panel manually any time with: ~/.local/bin/ccusage-panel.sh"
+if [ -x "$BIN_DIR/claude-panel-keyblock" ]; then
+  echo
+  echo "The first auto-split will prompt macOS for two more permissions, for"
+  echo "claude-panel-keyblock this time — grant BOTH Accessibility and Input"
+  echo "Monitoring (System Settings > Privacy & Security) or the keyboard"
+  echo "guard silently no-ops and typing during window setup can interfere"
+  echo "again, same as before it existed."
+fi
