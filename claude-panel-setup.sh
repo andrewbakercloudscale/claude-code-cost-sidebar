@@ -394,12 +394,11 @@ PYEOF
   # input rate (0.1x read, 1.25x 5m write, 2x 1h write). Sonnet 5's launch
   # rate of $2/$10 was made permanent on 2026-08-10, cancelling the planned
   # increase to $3/$15; verify this has not changed again before trusting it.
-  header "THIS SESSION — PER TURN"
   if [ -n "$latest" ]; then
-    python3 - "$latest" "$TURN_ROWS" <<'PYEOF'
+    python3 - "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" <<'PYEOF'
 import json, sys
 
-path, max_rows = sys.argv[1], int(sys.argv[2])
+path, max_rows, c_head, c_reset = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-sonnet-5":   (2.00, 10.00),
@@ -478,10 +477,13 @@ for line in lines:
 total_n = len(turns)
 shown = turns[-max_rows:]
 if not shown:
+    print(f"{c_head}THIS SESSION{c_reset}")
     print("  (no assistant turns yet)")
 else:
     if total_n > len(shown):
-        print(f"  (showing last {len(shown)} of {total_n} turns)")
+        print(f"{c_head}THIS SESSION — Showing {len(shown)} of {total_n}{c_reset}")
+    else:
+        print(f"{c_head}THIS SESSION{c_reset}")
     print(f"  {'Turn':<6}{'Model':<12}{'Input':>8}{'Δ Context':>11}{'Cache':>8}{'Cost':>9}")
     start_idx = total_n - len(shown) + 1
     for i, (label, total_ctx, delta, cache_pct, cost) in enumerate(shown):
@@ -491,6 +493,7 @@ else:
     print(f"  est. session total: ${session_cost:.2f} (all {total_n} turns in this file)")
 PYEOF
   else
+    header "THIS SESSION"
     echo "  (no active Claude Code session found)"
   fi
   } )
