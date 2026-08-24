@@ -318,7 +318,7 @@ PYEOF
           # This is the burn rate across ALL sessions active in the current
           # 5h block, not just this one — ccusage's block totals are
           # already aggregated across every concurrent session.
-          printf '  🔥 All-Sessions Burn Rate: %s%s/hr%s (%s) → $%s/10h day\n' \
+          printf '  🔥 All Sessions Burn Rate: %s%s/hr%s (%s) → $%s/10h day\n' \
             "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label" "$(awk -v c="$blk_cph" 'BEGIN{ printf "%.2f", c*10 }')"
         else
           printf '  ⏳ Current Time Block Spend: (no active block)\n'
