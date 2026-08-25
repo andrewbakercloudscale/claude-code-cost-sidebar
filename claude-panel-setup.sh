@@ -1218,9 +1218,15 @@ RED_MULT=2.0
 PURPLE_MULT=3.0
 MIN_SESSION_ALERT=5.00  # never alert below this, no matter the multiple
 
-latest=$(ls -t ~/.claude/projects/*/*.jsonl 2>/dev/null | head -1)
-[ -z "$latest" ] && exit 0
-session_id=$(basename "$latest" .jsonl)
+# Claude Code passes this hook's own session_id on stdin as JSON (the
+# UserPromptSubmit payload) — read that instead of guessing "most recently
+# modified transcript file" via `ls -t ~/.claude/projects/*/*.jsonl`, which
+# picks up whichever session anywhere on the machine last wrote a line and
+# would alert on (or throttle-state-track) the WRONG session whenever a
+# second Claude Code window is active.
+hook_input=$(cat)
+session_id=$(jq -r '.session_id // empty' <<<"$hook_input" 2>/dev/null)
+[ -z "$session_id" ] && exit 0
 state_file="$STATE_DIR/$session_id.json"
 
 since7=$(date -v-7d +%Y%m%d 2>/dev/null || date -d '7 days ago' +%Y%m%d)
