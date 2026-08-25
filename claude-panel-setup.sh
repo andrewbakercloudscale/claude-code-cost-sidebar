@@ -65,9 +65,17 @@ export LC_ALL=C LC_NUMERIC=C
 
 REFRESH="${1:-5}"
 TURN_ROWS="${2:-20}"
+# Set by the autolaunch hook (~/.zshrc) for a bare `claude` invocation,
+# which it forces to run with a known --session-id — lets this panel open
+# that EXACT transcript instead of guessing "most recently modified file in
+# this project directory", which still can't tell two concurrent sessions
+# in the same directory apart. Empty for anything else (manual runs,
+# `claude --resume`, etc.), which fall back to the directory-scoped guess.
+PIN_SESSION_ID="${3:-}"
 
-C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
+C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
 
 fmt_num() {
   awk -v n="$1" 'BEGIN{
@@ -289,16 +297,28 @@ while true; do
   block_json=$(ccusage blocks --active --json --offline 2>/dev/null)
   has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
   if [ "${has_block:-0}" = "1" ]; then
-    IFS=$'\t' read -r blk_start blk_end blk_cost blk_tokens blk_cph blk_tpm blk_rem blk_projCost blk_projTokens blk_models <<<"$(jq -r '
+    IFS=$'\t' read -r blk_start blk_end blk_cost blk_tokens blk_elapsedSec blk_tpm blk_rem blk_projCost blk_projTokens blk_models <<<"$(jq -r '
       .blocks[0] |
       [
         (.startTime[0:19]+"Z" | fromdateiso8601 | strftime("%H:%M")),
         (.endTime[0:19]+"Z"   | fromdateiso8601 | strftime("%H:%M")),
-        .costUSD, .totalTokens, .burnRate.costPerHour, .burnRate.tokensPerMinute,
+        .costUSD, .totalTokens,
+        ((.startTime[0:19]+"Z" | fromdateiso8601) as $s | (now - $s)),
+        .burnRate.tokensPerMinute,
         .projection.remainingMinutes, .projection.totalCost, .projection.totalTokens,
         (.models | join(", "))
       ] | @tsv
     ' <<<"$block_json")"
+    # blk_cph is the block's TRUE average $/hr (cost ÷ elapsed time), not
+    # ccusage's own burnRate.costPerHour — that field is a seconds-scale
+    # instantaneous rate that spikes 10x+ right after any single pricey
+    # turn and decays within minutes (same failure mode already worked
+    # around for "Today's Predicted Spend" above), so it disagreed wildly
+    # with the block's actual spend-so-far (e.g. reported $18.93/hr while
+    # the block had spent $0.81 in 44 minutes — a true rate of ~$1.11/hr).
+    # Floor elapsed at 3 minutes for the same reason sess_elapsed_h does.
+    blk_elapsed_h=$(awk -v s="$blk_elapsedSec" 'BEGIN{ h=s/3600; if(h<0.05) h=0.05; print h }')
+    blk_cph=$(awk -v c="$blk_cost" -v h="$blk_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
     burn_color=$(threshold_color "$blk_cph" "$BURN_YELLOW" "$BURN_RED")
     burn_label="Normal"
     [ "$burn_color" = "$C_YELLOW" ] && burn_label="Elevated"
@@ -309,7 +329,27 @@ while true; do
   # guaranteed subshell below) so TOP SESSIONS TODAY, further down, can
   # mark which row is THIS session — a command-substitution subshell can
   # read these variables outside itself but never write them back out.
-  latest=$(ls -t ~/.claude/projects/*/*.jsonl 2>/dev/null | head -1)
+  #
+  # Scoped to THIS project's own transcript directory, not
+  # ~/.claude/projects/*/*.jsonl globally — with a second Claude Code
+  # session open in another repo, the global glob picks up whichever
+  # session most recently wrote a line, so "THIS SESSION" would flip
+  # between two unrelated conversations turn-count-and-all every few
+  # refreshes (e.g. jumping from turn 50 in this project back to turn 16
+  # in another one). The launcher (claude-panel-launch.sh) always opens
+  # this panel via a same-cwd Ghostty split, so $PWD reliably names the
+  # project this panel belongs to; Claude Code encodes that project's
+  # transcript directory as $PWD with every "/" replaced by "-".
+  project_dir="$HOME/.claude/projects/$(printf '%s' "$PWD" | tr '/' '-')"
+  if [ -n "$PIN_SESSION_ID" ]; then
+    latest="$project_dir/$PIN_SESSION_ID.jsonl"
+    # The pinned session may not have written its first line yet (osascript
+    # is still typing into the new pane) — treat "not there yet" as "no
+    # session", same as the unpinned case; the next 5s refresh picks it up.
+    [ -f "$latest" ] || latest=""
+  else
+    latest=$(ls -t "$project_dir"/*.jsonl 2>/dev/null | head -1)
+  fi
   if [ -n "$latest" ]; then
     IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(python3 - "$latest" <<'PYEOF'
 import datetime, json, os, sys
@@ -502,9 +542,12 @@ PYEOF
 
         if [ "${has_block:-0}" = "1" ]; then
           printf '  ⏳ Current Time Block: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
-          # This is the burn rate across ALL sessions active in the current
-          # 5h block, not just this one — ccusage's block totals are
-          # already aggregated across every concurrent session.
+          # This is the true average burn rate (blk_cost ÷ elapsed time)
+          # across ALL sessions active in the current 5h block, not just
+          # this one — ccusage's block cost total is already aggregated
+          # across every concurrent session; see blk_cph derivation above
+          # for why it's recomputed here instead of trusting ccusage's own
+          # burnRate.costPerHour.
           printf '  🔥 All Sessions Burn Rate: %s%s/hr%s (%s)\n' \
             "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label"
         else
@@ -570,10 +613,12 @@ PYEOF
   # rate of $2/$10 was made permanent on 2026-08-10, cancelling the planned
   # increase to $3/$15; verify this has not changed again before trusting it.
   if [ -n "$latest" ]; then
-    python3 - "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" <<'PYEOF'
+    python3 - "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
+      "$C_DIM" "$C_CYAN" "$C_GREEN" "$C_YELLOW" "$C_BLUE" "$C_RED" <<'PYEOF'
 import json, sys
 
 path, max_rows, c_head, c_reset = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+col_turn, col_model, col_input, col_delta, col_cache, col_cost = sys.argv[5:11]
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-sonnet-5":   (2.00, 10.00),
@@ -659,7 +704,13 @@ else:
         print(f"{c_head}THIS SESSION — Showing {len(shown)} of {total_n}{c_reset}")
     else:
         print(f"{c_head}THIS SESSION{c_reset}")
-    print(f"  {'Turn':<6}{'Model':<12}{'Input':>8}{'Δ Context':>11}{'Cache':>8}{'Cost':>9}")
+    turn_h = f"{col_turn}{'Turn':<6}{c_reset}"
+    model_h = f"{col_model}{'Model':<12}{c_reset}"
+    input_h = f"{col_input}{'Input':>8}{c_reset}"
+    delta_h = f"{col_delta}{'Δ Context':>11}{c_reset}"
+    cache_h = f"{col_cache}{'Cache':>8}{c_reset}"
+    cost_h = f"{col_cost}{'Cost':>9}{c_reset}"
+    print(f"  {turn_h}{model_h}{input_h}{delta_h}{cache_h}{cost_h}")
     start_idx = total_n - len(shown) + 1
     for i, (label, total_ctx, delta, cache_pct, cost) in enumerate(shown):
         turn_no = start_idx + i
@@ -888,7 +939,15 @@ log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RUN_ID" "$1" >> "
 
 panel_pids() { pgrep -f '[b]in/ccusage-panel\.sh' 2>/dev/null | sort; }
 
-log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} PWD=$PWD"
+# Passed by the autolaunch hook only for a bare `claude` invocation, which
+# it forces to run with this same ID via --session-id — lets the panel open
+# that exact transcript instead of guessing by mtime. Empty for anything
+# else, and the panel falls back to its own directory-scoped guess.
+PIN_SID="${1:-}"
+PANEL_CMD="~/.local/bin/ccusage-panel.sh"
+[ -n "$PIN_SID" ] && PANEL_CMD="~/.local/bin/ccusage-panel.sh 5 20 $PIN_SID"
+
+log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} PWD=$PWD PIN_SID=${PIN_SID:-none}"
 
 if [ "${TERM_PROGRAM:-}" != "ghostty" ]; then
   log "abort: not running inside Ghostty (TERM_PROGRAM=${TERM_PROGRAM:-unset})"
@@ -962,7 +1021,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
   # resize math, and every keystroke — happens inside ONE osascript call.
   # Splitting this across two calls previously let frontmost change out
   # from under the second one, and both halves would separately exit 0.
-  result=$(osascript <<'APPLESCRIPT' 2>&1
+  result=$(osascript <<APPLESCRIPT 2>&1
 tell application "System Events"
   set frontApp to first application process whose frontmost is true
   if name of frontApp is not "ghostty" then return "skip: frontmost is " & (name of frontApp)
@@ -973,7 +1032,7 @@ tell application "System Events"
     delay 0.3
     keystroke "d" using command down
     delay 0.6
-    keystroke "~/.local/bin/ccusage-panel.sh"
+    keystroke "$PANEL_CMD"
     key code 36
     delay 0.3
     keystroke "h" using control down
@@ -1026,8 +1085,38 @@ else
 # --- ccusage split-panel autolaunch (installed by claude-panel-setup.sh) ---
 # Fires once per terminal window, the first time a `claude*` command runs:
 # opens a right-hand Ghostty split running the live usage panel, then
-# returns focus to the left pane. Doesn't touch any existing `claude`
-# alias/function — hooks in via preexec instead.
+# returns focus to the left pane.
+#
+# A bare `claude` (no args — the common "fresh session in a new window"
+# case) is additionally pinned to a known session ID, so the panel can open
+# that EXACT transcript instead of guessing "most recently modified file in
+# this project directory" — a guess that still can't tell two concurrent
+# `claude` sessions in the SAME directory apart. preexec can't rewrite the
+# command it's about to run, so it exports CLAUDE_PANEL_PIN_SID instead; the
+# `claude` wrapper below injects --session-id and chains to whatever
+# `claude` function/alias already existed (e.g. an npm/AWS credential-check
+# wrapper some machines define) rather than replacing it. Any other
+# invocation (--resume, --print, --cloud, etc.) already has its own session
+# semantics and is left alone — the panel falls back to its directory-
+# scoped guess for those. The wrap-once guard uses an unexported variable
+# so each new shell re-captures whatever `claude` is currently defined,
+# instead of re-wrapping its own wrapper on a repeated `source ~/.zshrc`.
+if [ -z "${_CCUSAGE_CLAUDE_WRAPPED:-}" ]; then
+  (( $+functions[claude] )) && functions -c claude _ccusage_claude_orig
+  _CCUSAGE_CLAUDE_WRAPPED=1
+fi
+claude() {
+  local -a args
+  if [ -n "${CLAUDE_PANEL_PIN_SID:-}" ]; then
+    args=(--session-id "$CLAUDE_PANEL_PIN_SID")
+    unset CLAUDE_PANEL_PIN_SID
+  fi
+  if (( $+functions[_ccusage_claude_orig] )); then
+    _ccusage_claude_orig "${args[@]}" "$@"
+  else
+    command claude "${args[@]}" "$@"
+  fi
+}
 _ccusage_panel_autolaunch() {
   case "$1" in
     claude*) ;;
@@ -1035,7 +1124,13 @@ _ccusage_panel_autolaunch() {
   esac
   [ -n "${CCUSAGE_PANEL_LAUNCHED:-}" ] && return
   export CCUSAGE_PANEL_LAUNCHED=1
-  ~/.local/bin/claude-panel-launch.sh &
+
+  local pin_sid=""
+  if [ "$1" = "claude" ]; then
+    pin_sid=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    export CLAUDE_PANEL_PIN_SID="$pin_sid"
+  fi
+  ~/.local/bin/claude-panel-launch.sh "$pin_sid" &
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _ccusage_panel_autolaunch
