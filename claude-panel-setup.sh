@@ -712,7 +712,11 @@ else:
     cost_h = f"{col_cost}{'Cost':>9}{c_reset}"
     print(f"  {turn_h}{model_h}{input_h}{delta_h}{cache_h}{cost_h}")
     start_idx = total_n - len(shown) + 1
-    for i, (label, total_ctx, delta, cache_pct, cost) in enumerate(shown):
+    # Newest turn first — this table sits at a fixed position above the
+    # sections below it, so the most recent activity would otherwise be the
+    # one row that scrolls out of view first as the session grows.
+    for i in reversed(range(len(shown))):
+        label, total_ctx, delta, cache_pct, cost = shown[i]
         turn_no = start_idx + i
         print(f"  {turn_no:<6}{label:<12}{fmt_k(total_ctx):>8}{'+' + fmt_k(delta):>11}{cache_pct:>7.0f}%{'$' + format(cost, '.2f'):>9}")
     session_cost = sum(t[4] for t in turns)
