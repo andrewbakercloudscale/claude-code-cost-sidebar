@@ -145,7 +145,18 @@ while true; do
     list_json=$(opencode session list --format json 2>/dev/null)
     session_id=""
     if [ -n "$list_json" ]; then
-      session_id=$(jq -r "$FIND_LATEST" <<<"$list_json" 2>/dev/null)
+      # Scoped to sessions whose .directory matches THIS project — not the
+      # newest session across every opencode session on the machine. The
+      # launcher (opencode-panel-launch.sh) always opens this panel via a
+      # same-cwd Ghostty split, so $PWD reliably names the project this
+      # panel belongs to. Without this, a second opencode session open in
+      # another directory would hijack "session:" (and everything below
+      # it) the moment it became the most recently created session
+      # anywhere — the same cross-session bug fixed in ccusage-panel.sh.
+      project_list_json=$(jq -c --arg d "$PWD" '[ .[] | select((.directory // "") == $d) ]' <<<"$list_json" 2>/dev/null)
+      if [ -n "$project_list_json" ] && [ "$project_list_json" != "[]" ]; then
+        session_id=$(jq -r "$FIND_LATEST" <<<"$project_list_json" 2>/dev/null)
+      fi
     fi
 
     # ---- 7-day baseline, from the same list (no per-session export) ----
