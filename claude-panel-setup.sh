@@ -94,8 +94,9 @@ TIER_YELLOW_MULT=1.5
 TIER_RED_MULT=2.0
 BURN_YELLOW=3
 BURN_RED=6
-CTX_YELLOW=50
-CTX_RED=80
+CTX_YELLOW=40
+CTX_RED=60
+CTX_PURPLE=90
 # A value only gets colored once it clears an absolute floor — in a cheap
 # session (avg $0.05) a $0.13 turn is >2x average and would false-positive
 # red on money nobody would look twice at.
@@ -116,6 +117,15 @@ threshold_color() {
   local v="$1" yt="$2" rt="$3" color="$C_GREEN"
   awk -v v="$v" -v t="$yt" 'BEGIN{exit !(v+0>t)}' && color="$C_YELLOW"
   awk -v v="$v" -v t="$rt" 'BEGIN{exit !(v+0>t)}' && color="$C_RED"
+  printf '%s' "$color"
+}
+# value yellow_threshold red_threshold purple_threshold -> green/yellow/red/purple
+# <=yt green, >yt && <=rt yellow, >rt && <=pt red, >pt purple.
+ctx_tier_color() {
+  local v="$1" yt="$2" rt="$3" pt="$4" color="$C_GREEN"
+  awk -v v="$v" -v t="$yt" 'BEGIN{exit !(v+0>t)}' && color="$C_YELLOW"
+  awk -v v="$v" -v t="$rt" 'BEGIN{exit !(v+0>t)}' && color="$C_RED"
+  awk -v v="$v" -v t="$pt" 'BEGIN{exit !(v+0>t)}' && color="$C_MAGENTA"
   printf '%s' "$color"
 }
 # Only Sonnet 5 and Fable 5 have a native 1M window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1
@@ -563,13 +573,13 @@ PYEOF
         ctx_tokens="${BASH_REMATCH[1]//,/}"
         win_size=$(context_window_size "$model_id")
         ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
-        ctx_color=$(threshold_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED")
+        ctx_color=$(ctx_tier_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")
         forced_note=""
         if [ "$win_size" = "200000" ] && [[ "$model_id" == "claude-sonnet-5" || "$model_id" == "claude-fable-5" ]]; then
           forced_note=" [forced 200k]"
         fi
-        printf '  🧠 Context Usage: %s / %s tokens (%s%s%%%s)%s\n' \
-          "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_color" "$ctx_pct" "$C_RESET" "$forced_note"
+        printf '  🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
+          "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
       elif [ "$i" -ne 2 ] || [ "$n_segs" -lt 4 ]; then
         # Skip ccusage's own middle "burn rate" segment when present (i==2
         # of 4) — already printed above from the JSON fetch; anything else
