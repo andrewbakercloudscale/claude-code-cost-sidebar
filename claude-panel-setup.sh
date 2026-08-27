@@ -472,13 +472,6 @@ PYEOF
   guaranteed=$( {
   printf '%s%s Claude Code usage — %s (refresh %ss)%s\n' \
     "$C_BOLD" "──" "$(date '+%a %H:%M:%S')" "$REFRESH" "$C_RESET"
-  # ccusage prices every figure below at pay-as-you-go API rates regardless
-  # of the plan actually billing you (Pro/Max/Team pay a flat monthly fee),
-  # so "$X Spend" reads as a real charge when it's really "$X of API-rate
-  # equivalent value used" — said once here rather than repeating a long
-  # caveat on every "Value" line below.
-  printf '  %s(💵 figures = API-equivalent value, not a real bill on flat-rate plans)%s\n' "$C_DIM" "$C_RESET"
-
   # ---- baselines: average per-session cost over 7 days, total spend over
   # 30 days. Session average needs >=3 real sessions to trust — otherwise a
   # single earlier tiny/huge session would skew it.

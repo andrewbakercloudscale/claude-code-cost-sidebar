@@ -178,7 +178,6 @@ while true; do
   {
   printf '%s%s OpenCode usage — %s %s(refresh %ss)%s\n' \
     "$C_BOLD" "──" "$(date '+%a %H:%M:%S')" "$C_DIM" "$REFRESH" "$C_RESET"
-  printf '  %s(💵 figures = API-equivalent value, not a real bill on flat-rate plans)%s\n' "$C_DIM" "$C_RESET"
 
   if ! command -v opencode >/dev/null 2>&1; then
     echo "opencode CLI not found on PATH."
