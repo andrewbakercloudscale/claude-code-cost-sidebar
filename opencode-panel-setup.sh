@@ -47,7 +47,7 @@ set -uo pipefail
 export LC_ALL=C LC_NUMERIC=C
 
 REFRESH="${1:-5}"
-TURN_ROWS="${2:-20}"
+TURN_ROWS="${2:-12}"
 
 C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
@@ -63,7 +63,22 @@ header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RES
 # truncates to $COLS first: \033[K can't stop an over-long line from
 # wrapping onto an extra physical row, which in a narrow pane let a frame's
 # row count silently exceed $rows and desync the cursor-home redraw below.
-clear_eol() { awk -v w="${COLS:-999}" '{ if (length($0) > w) $0 = substr($0, 1, w); printf "%s\033[K\n", $0 }'; }
+#
+# Width must be measured on the VISIBLE text only. Raw $0 inflates past the
+# line's actual on-screen width two ways: ANSI color codes are invisible
+# bytes, and LC_ALL=C (needed for numeric formatting elsewhere) makes
+# awk's length() count bytes rather than characters, so every line's
+# leading multi-byte UTF-8 emoji counts as 3-4 "characters" instead of 1.
+# Both inflations made ordinary lines that would never have wrapped get
+# hard-truncated anyway, chopping real content off the end (e.g. losing a
+# trailing ")"). Strip ANSI codes, then subtract UTF-8 continuation bytes
+# (10xxxxxx, i.e. \200-\277) — each is one extra byte contributed by a
+# multi-byte character, not a visible column — to get the true visible
+# length before comparing to width. Only fall back to plain (uncolored)
+# truncated text in the genuine-overflow case, and correct the cut point
+# by the same continuation-byte count rather than slicing the raw
+# ANSI-laden string.
+clear_eol() { awk -v w="${COLS:-999}" '{ line = $0; plain = line; gsub(/\033\[[0-9;]*m/, "", plain); cont = plain; n_cont = gsub(/[\200-\277]/, "", cont); vis_len = length(plain) - n_cont; if (vis_len > w) plain = substr(plain, 1, w + n_cont); printf "%s\033[K\n", (vis_len > w ? plain : line) }'; }
 
 fmt_money() { printf '$%.2f' "${1:-0}"; }
 fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.1fM", n/1000000 }'; }
