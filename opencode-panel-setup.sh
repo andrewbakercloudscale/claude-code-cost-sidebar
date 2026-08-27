@@ -138,9 +138,17 @@ while true; do
   # only because clear_eol() (above) truncates every line to $COLS, so a
   # frame's physical row count can never silently exceed $rows.
   printf '\033[H'
-  cols=$(tput cols 2>/dev/null || echo 60)
+  # `tput cols`/`tput lines` run inside $(...) have their OWN stdout
+  # redirected to the capture pipe, so the ioctl they'd normally use to ask
+  # the terminal for its real size fails and they silently return the
+  # compiled-in terminfo default (80x24) regardless of the pane's actual
+  # height. `stty size` doesn't have this problem — it reads size off the
+  # fd it's given, so pointing it at /dev/tty (not stdout) gets the real,
+  # live pane dimensions.
+  read -r rows cols < <(stty size </dev/tty 2>/dev/null)
+  [ -z "$cols" ] && cols=60
+  [ -z "$rows" ] && rows=24
   (( cols < 40 )) && cols=40
-  rows=$(tput lines 2>/dev/null || echo 24)
   (( rows < 10 )) && rows=10
   export COLS="$cols"
 

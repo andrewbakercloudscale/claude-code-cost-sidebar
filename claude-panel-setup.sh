@@ -141,6 +141,17 @@ context_window_size() {
   fi
   printf '%s' "$size"
 }
+# model id -> green (cheapest tier, e.g. Haiku) / yellow (mid, e.g. Sonnet) /
+# red (most expensive, e.g. Opus/Fable/Mythos) — mirrors the PRICES table in
+# the per-turn-table python block below, but keyed on model-name substrings
+# since this runs in bash, before that table's exact $/1M figures are in scope.
+model_tier_color() {
+  case "${1,,}" in
+    *haiku*) printf '%s' "$C_GREEN" ;;
+    *opus*|*fable*|*mythos*) printf '%s' "$C_RED" ;;
+    *) printf '%s' "$C_YELLOW" ;;
+  esac
+}
 # A short colored title, not a full-width divider bar — a bar that's drawn
 # at $cols but rendered later in a narrower/resized pane just wraps into a
 # confusing second row of "=" or "-", which is worse than no rule at all.
@@ -306,9 +317,17 @@ while true; do
   # frame's physical row count can never silently exceed $rows and desync
   # this cursor-home overwrite against the previous frame.
   printf '\033[H'
-  cols=$(tput cols 2>/dev/null || echo 60)
+  # `tput cols`/`tput lines` run inside $(...) have their OWN stdout
+  # redirected to the capture pipe, so the ioctl they'd normally use to ask
+  # the terminal for its real size fails and they silently return the
+  # compiled-in terminfo default (80x24) — a fixed ceiling that has nothing
+  # to do with the pane's actual height. `stty size` doesn't have this
+  # problem because it reads the size off the fd it's given, so pointing it
+  # at /dev/tty (not stdout) gets the real, live pane dimensions.
+  read -r rows cols < <(stty size </dev/tty 2>/dev/null)
+  [ -z "$cols" ] && cols=60
+  [ -z "$rows" ] && rows=24
   (( cols < 40 )) && cols=40
-  rows=$(tput lines 2>/dev/null || echo 24)
   (( rows < 10 )) && rows=10
   export COLS="$cols"
 
@@ -498,7 +517,8 @@ PYEOF
         # "🤖 Sonnet 5" -> "🤖 Model: Sonnet 5" — every metric below gets
         # the same "icon  Label: value" shape, icons unchanged.
         m_emoji="${seg%% *}"; m_rest="${seg#* }"
-        printf '  %s Model: %s\n' "$m_emoji" "$m_rest"
+        mtc=$(model_tier_color "${model_id:-}")
+        printf '  %s Model: %s%s%s\n' "$m_emoji" "$mtc" "$m_rest" "$C_RESET"
       elif [ "$i" -eq 1 ]; then
         # The cost segment ("💰 $X session / $Y today / $Z block (...)")
         # is the widest one and the one most likely to wrap mid-word on a
@@ -518,14 +538,15 @@ PYEOF
         if [[ "$sess_part" =~ \$(-?[0-9.]+) ]]; then
           sess_amt="${BASH_REMATCH[1]}"
           sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
-          printf '  %s Session Value: %s$%s%s\n' "$sess_emoji" "$sc" "$sess_amt" "$C_RESET"
           # THIS session's own $/hr (spend so far ÷ time since its first
           # message) — separate from the block burn rate below, which is
           # every session's combined spend in the current 5h window, not
-          # just this one.
+          # just this one. Shown on the same row as the spend it's derived
+          # from rather than its own line.
           sess_rate=$(awk -v c="$sess_amt" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
           src=$(threshold_color "$sess_rate" "$BURN_YELLOW" "$BURN_RED")
-          printf '  📈 Session Burn Rate: %s$%s/hr%s\n' "$src" "$sess_rate" "$C_RESET"
+          printf '  %s Session Value: %s$%s%s (%s$%s/hr%s)\n' \
+            "$sess_emoji" "$sc" "$sess_amt" "$C_RESET" "$src" "$sess_rate" "$C_RESET"
         else
           printf '  %s\n' "$sess_part"
         fi
@@ -534,7 +555,6 @@ PYEOF
         if [[ "$today_part" =~ \$(-?[0-9.]+) ]]; then
           today_amt="${BASH_REMATCH[1]}"
           tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-          printf '  📅 Today Value: %s$%s%s\n' "$tc" "$today_amt" "$C_RESET"
           # today_amt (actual, already spent) + a forecast for the hours
           # still remaining today. Deliberately NOT a flat current-rate
           # extrapolation (blk_cph*10) — that rate is a seconds-scale figure
@@ -566,7 +586,8 @@ PYEOF
             printf "%.2f", b + ratio*ra
           }')
           pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-          printf '  🔮 Today'"'"'s Predicted Value: %s$%s%s\n' "$pc" "$today_pred" "$C_RESET"
+          printf '  📅 Today Value: %s$%s%s (proj %s$%s%s)\n' \
+            "$tc" "$today_amt" "$C_RESET" "$pc" "$today_pred" "$C_RESET"
         fi
 
         if [ "${has_block:-0}" = "1" ]; then
@@ -643,11 +664,11 @@ PYEOF
   # increase to $3/$15; verify this has not changed again before trusting it.
   if [ -n "$latest" ]; then
     python3 - "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
-      "$C_DIM" "$C_CYAN" "$C_GREEN" "$C_YELLOW" "$C_BLUE" "$C_RED" <<'PYEOF'
+      "$C_DIM" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" <<'PYEOF'
 import json, sys
 
 path, max_rows, c_head, c_reset = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
-col_turn, col_model, col_input, col_delta, col_cache, col_cost = sys.argv[5:11]
+col_turn, col_model, col_input, col_cache, col_cost, col_mid_tier = sys.argv[5:11]
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-sonnet-5":   (2.00, 10.00),
@@ -678,6 +699,14 @@ def fmt_k(n):
     if abs(n) >= 1000:
         return f"{n/1000:.0f}k"
     return str(n)
+
+def model_tier_color(model_id):
+    m = model_id.lower()
+    if "haiku" in m:
+        return col_input
+    if "opus" in m or "fable" in m or "mythos" in m:
+        return col_cost
+    return col_mid_tier
 
 turns, seen = [], set()
 try:
@@ -721,7 +750,7 @@ for line in lines:
         + cw_5m * price_in * CACHE_WRITE_5M_MULT
     ) / 1_000_000
 
-    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost))
+    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model))
 
 total_n = len(turns)
 shown = turns[-max_rows:]
@@ -735,19 +764,20 @@ else:
         print(f"{c_head}THIS SESSION{c_reset}")
     turn_h = f"{col_turn}{'Turn':<6}{c_reset}"
     model_h = f"{col_model}{'Model':<12}{c_reset}"
-    input_h = f"{col_input}{'Input':>8}{c_reset}"
-    delta_h = f"{col_delta}{'Δ Context':>11}{c_reset}"
+    input_h = f"{col_input}{'Input (Δ)':>16}{c_reset}"
     cache_h = f"{col_cache}{'Cache':>8}{c_reset}"
-    cost_h = f"{col_cost}{'Cost':>9}{c_reset}"
-    print(f"  {turn_h}{model_h}{input_h}{delta_h}{cache_h}{cost_h}")
+    cost_h = f"{col_cost}{'Cost':>12}{c_reset}"
+    print(f"  {turn_h}{model_h}{input_h}{cache_h}{cost_h}")
     start_idx = total_n - len(shown) + 1
     # Newest turn first — this table sits at a fixed position above the
     # sections below it, so the most recent activity would otherwise be the
     # one row that scrolls out of view first as the session grows.
     for i in reversed(range(len(shown))):
-        label, total_ctx, delta, cache_pct, cost = shown[i]
+        label, total_ctx, delta, cache_pct, cost, model = shown[i]
         turn_no = start_idx + i
-        print(f"  {turn_no:<6}{label:<12}{fmt_k(total_ctx):>8}{'+' + fmt_k(delta):>11}{cache_pct:>7.0f}%{'$' + format(cost, '.2f'):>9}")
+        input_cell = f"{fmt_k(total_ctx)} (+{fmt_k(delta)})"
+        label_cell = f"{model_tier_color(model)}{label:<12}{c_reset}"
+        print(f"  {turn_no:<6}{label_cell}{input_cell:>16}{cache_pct:>7.0f}%{'$' + format(cost, '.2f'):>12}")
     session_cost = sum(t[4] for t in turns)
     print(f"  est. session total: ${session_cost:.2f} (all {total_n} turns in this file)")
 PYEOF
@@ -1141,20 +1171,29 @@ else
 # opens a right-hand Ghostty split running the live usage panel, then
 # returns focus to the left pane.
 #
-# A bare `claude` (no args — the common "fresh session in a new window"
-# case) is additionally pinned to a known session ID, so the panel can open
-# that EXACT transcript instead of guessing "most recently modified file in
-# this project directory" — a guess that still can't tell two concurrent
-# `claude` sessions in the SAME directory apart. preexec can't rewrite the
-# command it's about to run, so it exports CLAUDE_PANEL_PIN_SID instead; the
-# `claude` wrapper below injects --session-id and chains to whatever
-# `claude` function/alias already existed (e.g. an npm/AWS credential-check
-# wrapper some machines define) rather than replacing it. Any other
-# invocation (--resume, --print, --cloud, etc.) already has its own session
-# semantics and is left alone — the panel falls back to its directory-
-# scoped guess for those. The wrap-once guard uses an unexported variable
-# so each new shell re-captures whatever `claude` is currently defined,
-# instead of re-wrapping its own wrapper on a repeated `source ~/.zshrc`.
+# A fresh `claude` invocation (no existing-session flag — the common
+# "fresh session in a new window" case) is additionally pinned to a known
+# session ID, so the panel can open that EXACT transcript instead of
+# guessing "most recently modified file in this project directory" — a
+# guess that still can't tell two concurrent `claude` sessions in the SAME
+# directory apart. This used to require the command to be the literal bare
+# word "claude" with NO arguments at all, which almost never happens in
+# practice — `claude --dangerously-skip-permissions`, `caffeinate -d claude`,
+# and similar everyday variants all failed the exact-string match, so
+# CLAUDE_PANEL_PIN_SID was never set and the panel silently fell back to the
+# directory-scoped guess on every real launch, occasionally showing a stale
+# session's turns when the project directory held more than one transcript.
+# Now any `claude ...` invocation is pinned UNLESS it already carries its
+# own session semantics (--resume/-r, --continue/-c, --session-id) — those
+# already know which transcript they mean and forcing a second --session-id
+# onto them would conflict. preexec can't rewrite the command it's about to
+# run, so it exports CLAUDE_PANEL_PIN_SID instead; the `claude` wrapper below
+# injects --session-id and chains to whatever `claude` function/alias
+# already existed (e.g. an npm/AWS credential-check wrapper some machines
+# define) rather than replacing it. The wrap-once guard uses an unexported
+# variable so each new shell re-captures whatever `claude` is currently
+# defined, instead of re-wrapping its own wrapper on a repeated `source
+# ~/.zshrc`.
 if [ -z "${_CCUSAGE_CLAUDE_WRAPPED:-}" ]; then
   (( $+functions[claude] )) && functions -c claude _ccusage_claude_orig
   _CCUSAGE_CLAUDE_WRAPPED=1
@@ -1180,10 +1219,14 @@ _ccusage_panel_autolaunch() {
   export CCUSAGE_PANEL_LAUNCHED=1
 
   local pin_sid=""
-  if [ "$1" = "claude" ]; then
-    pin_sid=$(uuidgen | tr '[:upper:]' '[:lower:]')
-    export CLAUDE_PANEL_PIN_SID="$pin_sid"
-  fi
+  case "$1" in
+    *--session-id*|*--resume*|*--continue*|*' -r '*|*' -r'|*' -c '*|*' -c')
+      ;;
+    *)
+      pin_sid=$(uuidgen | tr '[:upper:]' '[:lower:]')
+      export CLAUDE_PANEL_PIN_SID="$pin_sid"
+      ;;
+  esac
   ~/.local/bin/claude-panel-launch.sh "$pin_sid" &
 }
 autoload -Uz add-zsh-hook
