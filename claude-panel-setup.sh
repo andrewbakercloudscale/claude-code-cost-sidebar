@@ -309,6 +309,14 @@ BUCKET_PYEOF
   rmdir "$lock_dir" 2>/dev/null
 }
 
+# Save the real terminal fd BEFORE the loop ever redirects fd1 through a
+# command-substitution pipe — fd3 keeps pointing at the actual pane device
+# no matter what fd1 becomes inside a $(...), and unlike /dev/tty it still
+# works for a process with no controlling terminal at all (e.g. one
+# relaunched via `nohup ... &` with stdout pointed straight at a pty device
+# file) as long as that fd itself is a real tty.
+exec 3>&1
+
 while true; do
   # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
   # whole pane for one frame before the redraw lands, which reads as a
@@ -323,8 +331,8 @@ while true; do
   # compiled-in terminfo default (80x24) — a fixed ceiling that has nothing
   # to do with the pane's actual height. `stty size` doesn't have this
   # problem because it reads the size off the fd it's given, so pointing it
-  # at /dev/tty (not stdout) gets the real, live pane dimensions.
-  read -r rows cols < <(stty size </dev/tty 2>/dev/null)
+  # at fd3 (see above) gets the real, live pane dimensions.
+  read -r rows cols < <(stty size <&3 2>/dev/null)
   [ -z "$cols" ] && cols=60
   [ -z "$rows" ] && rows=24
   (( cols < 40 )) && cols=40
@@ -643,12 +651,14 @@ PYEOF
     # month's) — a baseline has no natural threshold of its own, but a
     # widening gap vs its own past is exactly the "am I burning through
     # tokens faster than before" signal worth a color for.
+    spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
     if awk -v a="$avg_daily_30" 'BEGIN{exit !(a>0)}'; then
       avgc=$(tier_color "$avg_daily_30" "$prev_avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-      printf '  📊 30-Day Avg Daily Value: %s%s%s\n' "$avgc" "$(fmt_money "$avg_daily_30")" "$C_RESET"
+      printf '  💵 30-Day Value: %s%s%s (avg %s%s/day%s)\n' \
+        "$spendc" "$(fmt_money "$spend30")" "$C_RESET" "$avgc" "$(fmt_money "$avg_daily_30")" "$C_RESET"
+    else
+      printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
     fi
-    spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-    printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
   else
     echo "no active Claude Code session found"
   fi

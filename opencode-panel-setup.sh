@@ -130,6 +130,14 @@ BASELINE_AVG='
   if length >= 3 then (add/length) else 0 end
 '
 
+# Save the real terminal fd BEFORE the loop ever redirects fd1 through a
+# command-substitution pipe — fd3 keeps pointing at the actual pane device
+# no matter what fd1 becomes inside a $(...), and unlike /dev/tty it still
+# works for a process with no controlling terminal at all (e.g. one
+# relaunched via `nohup ... &` with stdout pointed straight at a pty device
+# file) as long as that fd itself is a real tty.
+exec 3>&1
+
 while true; do
   SECONDS=0
   # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
@@ -143,9 +151,9 @@ while true; do
   # the terminal for its real size fails and they silently return the
   # compiled-in terminfo default (80x24) regardless of the pane's actual
   # height. `stty size` doesn't have this problem — it reads size off the
-  # fd it's given, so pointing it at /dev/tty (not stdout) gets the real,
-  # live pane dimensions.
-  read -r rows cols < <(stty size </dev/tty 2>/dev/null)
+  # fd it's given, so pointing it at fd3 (see above) gets the real, live
+  # pane dimensions.
+  read -r rows cols < <(stty size <&3 2>/dev/null)
   [ -z "$cols" ] && cols=60
   [ -z "$rows" ] && rows=24
   (( cols < 40 )) && cols=40
