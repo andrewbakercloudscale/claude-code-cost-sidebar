@@ -59,8 +59,11 @@ header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RES
 # Erases to end of line after every printed row before the newline, so a
 # frame whose lines are shorter than the previous frame's (e.g. right after
 # a pane resize) never leaves trailing characters from the old frame
-# ghosting through the new one — same fix as ccusage-panel.sh.
-clear_eol() { awk '{ printf "%s\033[K\n", $0 }'; }
+# ghosting through the new one — same fix as ccusage-panel.sh. Also
+# truncates to $COLS first: \033[K can't stop an over-long line from
+# wrapping onto an extra physical row, which in a narrow pane let a frame's
+# row count silently exceed $rows and desync the cursor-home redraw below.
+clear_eol() { awk -v w="${COLS:-999}" '{ if (length($0) > w) $0 = substr($0, 1, w); printf "%s\033[K\n", $0 }'; }
 
 fmt_money() { printf '$%.2f' "${1:-0}"; }
 fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.1fM", n/1000000 }'; }
@@ -129,15 +132,22 @@ BASELINE_AVG='
 
 while true; do
   SECONDS=0
+  # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
+  # whole pane for one frame before the redraw lands, which reads as a
+  # visible flicker every refresh. This stays purely additive-overwrite
+  # only because clear_eol() (above) truncates every line to $COLS, so a
+  # frame's physical row count can never silently exceed $rows.
   printf '\033[H'
   cols=$(tput cols 2>/dev/null || echo 60)
   (( cols < 40 )) && cols=40
   rows=$(tput lines 2>/dev/null || echo 24)
   (( rows < 10 )) && rows=10
+  export COLS="$cols"
 
   {
   printf '%s%s OpenCode usage — %s %s(refresh %ss)%s\n' \
     "$C_BOLD" "──" "$(date '+%a %H:%M:%S')" "$C_DIM" "$REFRESH" "$C_RESET"
+  printf '  %s(💵 figures = API-equivalent value, not a real bill on flat-rate plans)%s\n' "$C_DIM" "$C_RESET"
 
   if ! command -v opencode >/dev/null 2>&1; then
     echo "opencode CLI not found on PATH."
@@ -249,7 +259,7 @@ PYEOF
       printf '  🤖 Model: %s\n' "${model_label:-unknown}"
 
       sc=$(threshold_color "${session_cost:-0}" 1 5)
-      printf '  💰 Session Spend: %s%s%s\n' "$sc" "$(fmt_money "${session_cost:-0}")" "$C_RESET"
+      printf '  💰 Session Value: %s%s%s\n' "$sc" "$(fmt_money "${session_cost:-0}")" "$C_RESET"
 
       sess_rate=$(awk -v c="${session_cost:-0}" -v h="${sess_elapsed_h:-0.05}" 'BEGIN{ printf "%.2f", (h>0? c/h:0) }')
       rc=$(threshold_color "$sess_rate" 2 5)
@@ -258,14 +268,14 @@ PYEOF
       today_cost=$(stats_field "$today_stats" "Total Cost")
       [ -z "$today_cost" ] && today_cost=0
       tc=$(threshold_color "$today_cost" 5 20)
-      printf '  📅 Today Spend: %s%s%s\n' "$tc" "$(fmt_money "$today_cost")" "$C_RESET"
+      printf '  📅 Today Value: %s%s%s\n' "$tc" "$(fmt_money "$today_cost")" "$C_RESET"
 
       # Projects the CURRENT session's burn rate across a flat 10h work
       # day — same convention as the Claude Code panel's predicted-spend
       # line, standing in for a per-block rate since there's no block here.
       today_pred=$(awk -v r="$sess_rate" 'BEGIN{ printf "%.2f", r*10 }')
       pc=$(threshold_color "$today_pred" 5 20)
-      printf '  🔮 Today'"'"'s Predicted Spend: %s%s%s\n' "$pc" "$(fmt_money "$today_pred")" "$C_RESET"
+      printf '  🔮 Today'"'"'s Predicted Value: %s%s%s\n' "$pc" "$(fmt_money "$today_pred")" "$C_RESET"
 
       if [ "${last_ctx_tokens:-0}" -gt 0 ] 2>/dev/null; then
         ctx_limit=$(model_context_limit "${provider_id:-}" "${model_id:-}")
@@ -285,13 +295,13 @@ PYEOF
       week_avg_cost=$(stats_field "$week_stats" "Avg Cost.Day")
       if [ -n "$week_avg_cost" ]; then
         wc=$(threshold_color "$week_avg_cost" 5 20)
-        printf '  📊 7-Day Avg Daily Spend: %s%s%s\n' "$wc" "$(fmt_money "$week_avg_cost")" "$C_RESET"
+        printf '  📊 7-Day Avg Daily Value: %s%s%s\n' "$wc" "$(fmt_money "$week_avg_cost")" "$C_RESET"
       fi
 
       month_cost=$(stats_field "$month_stats" "Total Cost")
       if [ -n "$month_cost" ]; then
         mc=$(threshold_color "$month_cost" 50 200)
-        printf '  💵 30-Day Spend: %s%s%s\n' "$mc" "$(fmt_money "$month_cost")" "$C_RESET"
+        printf '  💵 30-Day Value: %s%s%s\n' "$mc" "$(fmt_money "$month_cost")" "$C_RESET"
       fi
       echo
     fi
@@ -444,7 +454,28 @@ log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RUN_ID" "$1" >> "
 
 panel_pids() { pgrep -f '[b]in/opencode-panel\.sh' 2>/dev/null | sort; }
 
-log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} PWD=$PWD"
+log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} TMUX=${TMUX:-unset} PWD=$PWD"
+
+# Inside tmux, TERM_PROGRAM gets overridden (often to "tmux") regardless of
+# the outer terminal, so the Ghostty check below never sees "ghostty" even
+# when Ghostty is the real host — the launcher aborted silently for every
+# tmux user. tmux has its own native split primitive that needs no
+# Accessibility permission and no keystroke simulation, so prefer it
+# whenever we're inside a tmux client at all, before falling through to the
+# Ghostty/osascript path. Same fix as claude-panel-launch.sh.
+if [ -n "${TMUX:-}" ]; then
+  if ! command -v tmux >/dev/null 2>&1; then
+    log "abort: TMUX is set but tmux binary not found"
+    exit 0
+  fi
+  if tmux split-window -h -l 33% "~/.local/bin/opencode-panel.sh" 2>>"$LOG"; then
+    tmux select-pane -L >>"$LOG" 2>&1
+    log "done: tmux split-window succeeded"
+  else
+    log "done: tmux split-window FAILED"
+  fi
+  exit 0
+fi
 
 if [ "${TERM_PROGRAM:-}" != "ghostty" ]; then
   log "abort: not running inside Ghostty (TERM_PROGRAM=${TERM_PROGRAM:-unset})"

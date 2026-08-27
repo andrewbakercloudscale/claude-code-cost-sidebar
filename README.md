@@ -15,8 +15,8 @@ Two independent installers, one per agent. Run either or both.
 Installs a live panel for [Claude Code](https://claude.com/claude-code), built on top of [`ccusage`](https://github.com/ryoppippi/ccusage):
 
 - **Per-turn breakdown of the current session** — turn number, model, context size, context growth (Δ) since the last turn, cache hit %, and estimated cost per turn, read straight out of the session transcript and priced against Anthropic's published per-model rates (including cache read/write multipliers).
-- **Live status line** — current session cost, today's spend, active-block burn rate, 7-day average session cost, 30-day spend, and the current project folder.
-- **Active block** — start/end time, spend so far, burn rate ($/hr and tokens/min, color-coded green/yellow/red), and a projected total for the block.
+- **Live status line** — current session value, today's value, active-block burn rate, 7-day average session cost, 30-day value, and the current project folder. ("Value" because these are priced at pay-as-you-go API rates regardless of what plan you're actually on — see note below.)
+- **Active block** — start/end time, value so far, burn rate ($/hr and tokens/min, color-coded green/yellow/red), and a projected total for the block.
 - **Today** — total cost/tokens, input/output split, cache new/read split, and a per-model breakdown.
 - **Last 3 days** — a simple cost bar chart.
 - **Week / month totals.**
@@ -36,9 +36,10 @@ Same idea for [OpenCode](https://opencode.ai/):
 
 ### Shared behaviour (both installers)
 
-- **Auto-launch on first use per window.** A `preexec` hook in `~/.zshrc` watches for the first `claude...` / `opencode...` command typed in a terminal window and opens the panel automatically in a right-hand Ghostty split — you never have to remember to start it.
-- **Auto-resize** to roughly 1/3 of the window width via Ghostty keybinds (`ctrl+shift+h` / `ctrl+shift+l`, added to `~/.config/ghostty/config` if missing), then focus returns to your original pane.
-- **Verified, not assumed.** The launcher drives Ghostty via `osascript`/System Events, retries up to 3 times, and confirms success by checking that a new panel *process* actually exists — not just that AppleScript returned exit code 0, which it will happily do even when nothing happened.
+- **Auto-launch on first use per window.** A `preexec` hook in `~/.zshrc` watches for the first `claude...` / `opencode...` command typed in a terminal window and opens the panel automatically — you never have to remember to start it.
+- **tmux-aware.** If you're inside a tmux session, the launcher uses tmux's own `split-window` instead of driving Ghostty via AppleScript — no Accessibility permission or keystroke simulation needed. This matters because tmux overrides `$TERM_PROGRAM` to `tmux` regardless of the outer terminal, so without this check the Ghostty path below would silently fail to detect Ghostty even when Ghostty is the real host.
+- **Auto-resize** to roughly 1/3 of the window width — via tmux's `split-window -l 33%` inside tmux, or Ghostty keybinds (`ctrl+shift+h` / `ctrl+shift+l`, added to `~/.config/ghostty/config` if missing) otherwise — then focus returns to your original pane.
+- **Verified, not assumed (Ghostty path).** The launcher drives Ghostty via `osascript`/System Events, retries up to 3 times, and confirms success by checking that a new panel *process* actually exists — not just that AppleScript returned exit code 0, which it will happily do even when nothing happened.
 - **Logged.** Every launch attempt is logged with a shared run ID (`~/.cache/claude-panel-launch.log` / `~/.cache/opencode-panel-launch.log`) so a failed auto-launch is diagnosable instead of just silently missing.
 - **Idempotent.** Safe to re-run any time — it overwrites the two generated scripts with the latest version and skips any `.zshrc`/config block that's already present.
 - **Finder Service aware.** If you launch Claude Code via a Finder Service / Automator workflow (`ghostty-claude-launcher`) rather than an interactive shell, the Claude installer patches that script too, since the `preexec` hook never fires for it.
@@ -56,9 +57,9 @@ Both installers follow the same shape: a **panel script** (the thing that render
 
 ## Requirements
 
-- macOS + [Ghostty](https://ghostty.org/) (for the auto-split part — the panel scripts themselves work in any terminal if you just run them manually)
+- macOS + [Ghostty](https://ghostty.org/) for the auto-split part — unless you run inside tmux, in which case tmux's own split is used instead and Ghostty isn't required. The panel scripts themselves work in any terminal if you just run them manually.
 - `jq`
-- Accessibility permission granted to Ghostty (macOS will prompt the first time the launcher tries to drive it via System Events)
+- Accessibility permission granted to Ghostty (macOS will prompt the first time the launcher tries to drive it via System Events) — not needed for the tmux path
 - For the Claude Code panel: Node.js (for [`ccusage`](https://github.com/ryoppippi/ccusage)) and Python 3
 - For the OpenCode panel: the `opencode` CLI on your `PATH`
 
@@ -89,9 +90,10 @@ You can also run either panel manually at any time, in any terminal:
 
 ## Troubleshooting
 
-- **Panel never opens automatically** — check `~/.cache/claude-panel-launch.log` or `~/.cache/opencode-panel-launch.log`. The most common cause is Ghostty missing Accessibility permission (System Settings → Privacy & Security → Accessibility).
-- **Split opens but stays 50/50** — make sure `~/.config/ghostty/config` has the `resize_split` keybinds the installer adds (`ctrl+shift+h` / `ctrl+shift+l`); if that file didn't exist when you installed, create it and re-run the installer.
+- **Panel never opens automatically** — check `~/.cache/claude-panel-launch.log` or `~/.cache/opencode-panel-launch.log`. If you're outside tmux, the most common cause is Ghostty missing Accessibility permission (System Settings → Privacy & Security → Accessibility). If you're inside tmux, confirm `tmux` is actually on `$PATH` for that shell (the log will say `TMUX is set but tmux binary not found` if not).
+- **Split opens but stays 50/50** — outside tmux, make sure `~/.config/ghostty/config` has the `resize_split` keybinds the installer adds (`ctrl+shift+h` / `ctrl+shift+l`); if that file didn't exist when you installed, create it and re-run the installer. Inside tmux this shouldn't happen — the launcher opens the split at 1/3 width directly via `split-window -l 33%`.
 - **Context % looks wrong / costs look off** — the Claude panel infers the model ID from the live transcript to price each turn and size the context window correctly; if pricing changes on Anthropic's side, update the `PRICES` table inside `ccusage-panel.sh`.
+- **"Value" figures don't match my actual bill** — expected on Pro/Max/Team plans. Every $ figure in both panels is `local token count × pay-as-you-go API rate`, not a real charge — it's a proxy for how much of the model you're using, not an invoice. Flat-rate subscribers will see numbers well above (or below) what they're actually billed.
 
 ## License
 

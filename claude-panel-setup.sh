@@ -149,9 +149,15 @@ header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RES
 # frame whose lines are shorter than the previous frame's (e.g. right after
 # a pane resize, or just because the numbers got shorter) never leaves
 # trailing characters from the old frame ghosting through the new one.
-clear_eol() { awk '{ printf "%s\033[K\n", $0 }'; }
+# Also truncates to $COLS first: \033[K only erases stray characters
+# trailing on the SAME physical row, it can't stop an over-long line from
+# wrapping onto an extra physical row. In a narrow pane that wrapping let a
+# frame's physical row count silently exceed $rows, so the next frame's
+# cursor-home (below) landed mid old-content instead of at the true top,
+# gluing fragments of consecutive frames together.
+clear_eol() { awk -v w="${COLS:-999}" '{ if (length($0) > w) $0 = substr($0, 1, w); printf "%s\033[K\n", $0 }'; }
 
-# ---- persisted hourly-cost buckets, used by "Today's Predicted Spend" ----
+# ---- persisted hourly-cost buckets, used by "Today's Predicted Value" ----
 # Forecasts the rest of today from this machine's own historical hour-of-day
 # spend pattern, instead of extrapolating ccusage's live burnRate.costPerHour
 # (a seconds-scale figure that spikes hugely right after any single pricey
@@ -293,11 +299,18 @@ BUCKET_PYEOF
 }
 
 while true; do
+  # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
+  # whole pane for one frame before the redraw lands, which reads as a
+  # visible flicker every refresh. Staying purely additive-overwrite only
+  # works because clear_eol() (above) truncates every line to $COLS, so a
+  # frame's physical row count can never silently exceed $rows and desync
+  # this cursor-home overwrite against the previous frame.
   printf '\033[H'
   cols=$(tput cols 2>/dev/null || echo 60)
   (( cols < 40 )) && cols=40
   rows=$(tput lines 2>/dev/null || echo 24)
   (( rows < 10 )) && rows=10
+  export COLS="$cols"
 
   refresh_hourly_buckets
 
@@ -323,7 +336,7 @@ while true; do
     # ccusage's own burnRate.costPerHour — that field is a seconds-scale
     # instantaneous rate that spikes 10x+ right after any single pricey
     # turn and decays within minutes (same failure mode already worked
-    # around for "Today's Predicted Spend" above), so it disagreed wildly
+    # around for "Today's Predicted Value" above), so it disagreed wildly
     # with the block's actual spend-so-far (e.g. reported $18.93/hr while
     # the block had spent $0.81 in 44 minutes — a true rate of ~$1.11/hr).
     # Floor elapsed at 3 minutes for the same reason sess_elapsed_h does.
@@ -417,6 +430,12 @@ PYEOF
   guaranteed=$( {
   printf '%s%s Claude Code usage — %s (refresh %ss)%s\n' \
     "$C_BOLD" "──" "$(date '+%a %H:%M:%S')" "$REFRESH" "$C_RESET"
+  # ccusage prices every figure below at pay-as-you-go API rates regardless
+  # of the plan actually billing you (Pro/Max/Team pay a flat monthly fee),
+  # so "$X Spend" reads as a real charge when it's really "$X of API-rate
+  # equivalent value used" — said once here rather than repeating a long
+  # caveat on every "Value" line below.
+  printf '  %s(💵 figures = API-equivalent value, not a real bill on flat-rate plans)%s\n' "$C_DIM" "$C_RESET"
 
   # ---- baselines: average per-session cost over 7 days, total spend over
   # 30 days. Session average needs >=3 real sessions to trust — otherwise a
@@ -499,7 +518,7 @@ PYEOF
         if [[ "$sess_part" =~ \$(-?[0-9.]+) ]]; then
           sess_amt="${BASH_REMATCH[1]}"
           sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
-          printf '  %s Session Spend: %s$%s%s\n' "$sess_emoji" "$sc" "$sess_amt" "$C_RESET"
+          printf '  %s Session Value: %s$%s%s\n' "$sess_emoji" "$sc" "$sess_amt" "$C_RESET"
           # THIS session's own $/hr (spend so far ÷ time since its first
           # message) — separate from the block burn rate below, which is
           # every session's combined spend in the current 5h window, not
@@ -515,7 +534,7 @@ PYEOF
         if [[ "$today_part" =~ \$(-?[0-9.]+) ]]; then
           today_amt="${BASH_REMATCH[1]}"
           tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-          printf '  📅 Today Spend: %s$%s%s\n' "$tc" "$today_amt" "$C_RESET"
+          printf '  📅 Today Value: %s$%s%s\n' "$tc" "$today_amt" "$C_RESET"
           # today_amt (actual, already spent) + a forecast for the hours
           # still remaining today. Deliberately NOT a flat current-rate
           # extrapolation (blk_cph*10) — that rate is a seconds-scale figure
@@ -547,7 +566,7 @@ PYEOF
             printf "%.2f", b + ratio*ra
           }')
           pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-          printf '  🔮 Today'"'"'s Predicted Spend: %s$%s%s\n' "$pc" "$today_pred" "$C_RESET"
+          printf '  🔮 Today'"'"'s Predicted Value: %s$%s%s\n' "$pc" "$today_pred" "$C_RESET"
         fi
 
         if [ "${has_block:-0}" = "1" ]; then
@@ -605,10 +624,10 @@ PYEOF
     # tokens faster than before" signal worth a color for.
     if awk -v a="$avg_daily_30" 'BEGIN{exit !(a>0)}'; then
       avgc=$(tier_color "$avg_daily_30" "$prev_avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-      printf '  📊 30-Day Avg Daily Spend: %s%s%s\n' "$avgc" "$(fmt_money "$avg_daily_30")" "$C_RESET"
+      printf '  📊 30-Day Avg Daily Value: %s%s%s\n' "$avgc" "$(fmt_money "$avg_daily_30")" "$C_RESET"
     fi
     spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-    printf '  💵 30-Day Spend: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
+    printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
   else
     echo "no active Claude Code session found"
   fi
@@ -961,7 +980,28 @@ PIN_SID="${1:-}"
 PANEL_CMD="~/.local/bin/ccusage-panel.sh"
 [ -n "$PIN_SID" ] && PANEL_CMD="~/.local/bin/ccusage-panel.sh 5 20 $PIN_SID"
 
-log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} PWD=$PWD PIN_SID=${PIN_SID:-none}"
+log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} TMUX=${TMUX:-unset} PWD=$PWD PIN_SID=${PIN_SID:-none}"
+
+# Inside tmux, TERM_PROGRAM gets overridden (often to "tmux") regardless of
+# the outer terminal, so the Ghostty check below never sees "ghostty" even
+# when Ghostty is the real host — the launcher aborted silently for every
+# tmux user. tmux has its own native split primitive that needs no
+# Accessibility permission and no keystroke simulation, so prefer it
+# whenever we're inside a tmux client at all, before falling through to the
+# Ghostty/osascript path.
+if [ -n "${TMUX:-}" ]; then
+  if ! command -v tmux >/dev/null 2>&1; then
+    log "abort: TMUX is set but tmux binary not found"
+    exit 0
+  fi
+  if tmux split-window -h -l 33% "$PANEL_CMD" 2>>"$LOG"; then
+    tmux select-pane -L >>"$LOG" 2>&1
+    log "done: tmux split-window succeeded"
+  else
+    log "done: tmux split-window FAILED"
+  fi
+  exit 0
+fi
 
 if [ "${TERM_PROGRAM:-}" != "ghostty" ]; then
   log "abort: not running inside Ghostty (TERM_PROGRAM=${TERM_PROGRAM:-unset})"
