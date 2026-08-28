@@ -813,15 +813,12 @@ if not shown:
     print(head_label)
     print("  (no assistant turns yet)")
 else:
-    if total_n > len(shown):
-        print(f"{head_label} — Showing {len(shown)} of {total_n}")
-    else:
-        print(head_label)
-    turn_h = f"{col_turn}{'Turn':<6}{c_reset}"
-    model_h = f"{col_model}{'Model':<12}{c_reset}"
-    input_h = f"{col_input}{'Input (Δ)':>14}{c_reset}"
-    cache_h = f"{col_cache}{'Cache':>8}{c_reset}"
-    cost_h = f"{col_cost}{'Cost':>12}{c_reset}"
+    print(head_label)
+    turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
+    model_h = f"{col_model}{'Model':<10}{c_reset}"
+    input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
+    cache_h = f"{col_cache}{'Cache':>6}{c_reset}"
+    cost_h = f"{col_cost}{'Cost':>8}{c_reset}"
     print(f"  {turn_h}{model_h}{input_h}{cache_h}{cost_h}")
     start_idx = total_n - len(shown) + 1
     # Newest turn first — this table sits at a fixed position above the
@@ -831,8 +828,8 @@ else:
         label, total_ctx, delta, cache_pct, cost, model = shown[i]
         turn_no = start_idx + i
         input_cell = f"{fmt_k(total_ctx)} (+{fmt_k(delta)})"
-        label_cell = f"{model_tier_color(model)}{label:<12}{c_reset}"
-        print(f"  {turn_no:<6}{label_cell}{input_cell:>14}{cache_pct:>7.0f}%{'$' + format(cost, '.2f'):>12}")
+        label_cell = f"{model_tier_color(model)}{label:<10}{c_reset}"
+        print(f"  {turn_no:<5}{label_cell}{input_cell:>12}{cache_pct:>5.0f}%{'$' + format(cost, '.2f'):>8}")
 PYEOF
   else
     header "THIS SESSION"
@@ -858,8 +855,7 @@ PYEOF
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
       .totals | [.totalCost, .totalTokens, .inputTokens, .outputTokens, .cacheCreationTokens, .cacheReadTokens] | @tsv
     ' <<<"$daily_json")"
-    printf '  today    %s  %s tok   in/out %s / %s\n' \
-      "$(fmt_money "$tCost")" "$(fmt_m "$tTok")" "$(fmt_num "$tIn")" "$(fmt_num "$tOut")"
+    printf '  today    %s  %s tok\n' "$(fmt_money "$tCost")" "$(fmt_m "$tTok")"
     models_line=""
     while IFS=$'\t' read -r mname mcost mtok; do
       [ -z "$mname" ] && continue
@@ -895,7 +891,7 @@ PYEOF
       lasthm=$(jq -rn --arg t "$slast" '($t[0:19]+"Z") | fromdateiso8601 | strftime("%H:%M")' 2>/dev/null)
       row=$(printf '%-10s %8s  %s tok  last %s' "${sid:0:10}" "$(fmt_money "$scost")" "$(fmt_m "$stok")" "$lasthm")
       if [ "$sid" = "${sess_id:-}" ]; then
-        printf '  %s%s → this session%s\n' "$C_BOLD" "$row" "$C_RESET"
+        printf '  %s%s *this%s\n' "$C_BOLD" "$row" "$C_RESET"
       else
         printf '  %s\n' "$row"
       fi
