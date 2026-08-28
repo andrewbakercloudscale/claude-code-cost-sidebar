@@ -72,6 +72,10 @@ TURN_ROWS="${2:-12}"
 # in the same directory apart. Empty for anything else (manual runs,
 # `claude --resume`, etc.), which fall back to the directory-scoped guess.
 PIN_SESSION_ID="${3:-}"
+# Recorded once so the unpinned session-detection fallback below can tell
+# "a session that started after I did" from "a session that was already
+# running when I started" — see that fallback for why this matters.
+PANEL_START_EPOCH=$(date +%s)
 
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
@@ -413,7 +417,33 @@ while true; do
     # session", same as the unpinned case; the next 5s refresh picks it up.
     [ -f "$latest" ] || latest=""
   else
-    latest=$(ls -t "$project_dir"/*.jsonl 2>/dev/null | head -1)
+    # "Most recently modified" picks whichever session is actively being
+    # chatted with — including one that's NOT this pane's, if another
+    # session in this same project dir is currently mid-conversation. That
+    # misattributes an unrelated, already-running session's cost/turns to a
+    # brand-new, still-empty session opened without going through the
+    # PIN_SESSION_ID launcher path (e.g. a GUI window, `claude --resume`,
+    # an IDE-embedded terminal).
+    #
+    # Prefer instead the newest transcript file CREATED after this panel
+    # process itself started (birth time, via macOS `stat -f %B`, not
+    # mtime) — a file that didn't exist yet when this panel launched can
+    # only be a session that started alongside or after it, which is the
+    # best available guess for "the session in this pane" without an
+    # explicit pin. Falls back to the old mtime guess only when no such
+    # post-launch file exists (e.g. this panel outlived every session it
+    # ever watched).
+    latest=""
+    newest_birth=0
+    for f in "$project_dir"/*.jsonl; do
+      [ -f "$f" ] || continue
+      birth=$(stat -f %B "$f" 2>/dev/null) || continue
+      if (( birth > PANEL_START_EPOCH && birth > newest_birth )); then
+        newest_birth=$birth
+        latest="$f"
+      fi
+    done
+    [ -n "$latest" ] || latest=$(ls -t "$project_dir"/*.jsonl 2>/dev/null | head -1)
   fi
   if [ -n "$latest" ]; then
     IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(python3 - "$latest" <<'PYEOF'
@@ -561,7 +591,7 @@ PYEOF
           # from rather than its own line.
           sess_rate=$(awk -v c="$sess_amt" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
           src=$(threshold_color "$sess_rate" "$BURN_YELLOW" "$BURN_RED")
-          printf '  %s Session Value: %s$%s%s (%s$%s/hr%s)\n' \
+          printf '  %s Session: %s$%s%s, Burn %s$%s/hr%s\n' \
             "$sess_emoji" "$sc" "$sess_amt" "$C_RESET" "$src" "$sess_rate" "$C_RESET"
         else
           printf '  %s\n' "$sess_part"
@@ -653,7 +683,11 @@ PYEOF
     if [ "${#folder_disp}" -gt "$folder_maxw" ]; then
       folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
     fi
-    printf '  📁 Folder: %s\n' "$folder_disp"
+    if [ "${has_block:-0}" = "1" ]; then
+      printf '  📁 Folder: %s   proj. %s\n' "$folder_disp" "$(fmt_money "$blk_projCost")"
+    else
+      printf '  📁 Folder: %s\n' "$folder_disp"
+    fi
     # Both trend lines below are colored against the SAME window one period
     # earlier (this week's avg vs last week's, this month's spend vs last
     # month's) — a baseline has no natural threshold of its own, but a
@@ -682,11 +716,13 @@ PYEOF
   # increase to $3/$15; verify this has not changed again before trusting it.
   if [ -n "$latest" ]; then
     python3 - "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
-      "$C_DIM" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" <<'PYEOF'
+      "$C_DIM" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
+      "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" <<'PYEOF'
 import json, sys
 
 path, max_rows, c_head, c_reset = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 col_turn, col_model, col_input, col_cache, col_cost, col_mid_tier = sys.argv[5:11]
+burn_color, burn_str = sys.argv[11], sys.argv[12]
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-sonnet-5":   (2.00, 10.00),
@@ -772,17 +808,18 @@ for line in lines:
 
 total_n = len(turns)
 shown = turns[-max_rows:]
+head_label = f"{c_head}This Session{c_reset}, Burn  {burn_color}{burn_str}/hr{c_reset}"
 if not shown:
-    print(f"{c_head}THIS SESSION{c_reset}")
+    print(head_label)
     print("  (no assistant turns yet)")
 else:
     if total_n > len(shown):
-        print(f"{c_head}THIS SESSION — Showing {len(shown)} of {total_n}{c_reset}")
+        print(f"{head_label} — Showing {len(shown)} of {total_n}")
     else:
-        print(f"{c_head}THIS SESSION{c_reset}")
+        print(head_label)
     turn_h = f"{col_turn}{'Turn':<6}{c_reset}"
     model_h = f"{col_model}{'Model':<12}{c_reset}"
-    input_h = f"{col_input}{'Input (Δ)':>16}{c_reset}"
+    input_h = f"{col_input}{'Input (Δ)':>14}{c_reset}"
     cache_h = f"{col_cache}{'Cache':>8}{c_reset}"
     cost_h = f"{col_cost}{'Cost':>12}{c_reset}"
     print(f"  {turn_h}{model_h}{input_h}{cache_h}{cost_h}")
@@ -795,9 +832,7 @@ else:
         turn_no = start_idx + i
         input_cell = f"{fmt_k(total_ctx)} (+{fmt_k(delta)})"
         label_cell = f"{model_tier_color(model)}{label:<12}{c_reset}"
-        print(f"  {turn_no:<6}{label_cell}{input_cell:>16}{cache_pct:>7.0f}%{'$' + format(cost, '.2f'):>12}")
-    session_cost = sum(t[4] for t in turns)
-    print(f"  est. session total: ${session_cost:.2f} (all {total_n} turns in this file)")
+        print(f"  {turn_no:<6}{label_cell}{input_cell:>14}{cache_pct:>7.0f}%{'$' + format(cost, '.2f'):>12}")
 PYEOF
   else
     header "THIS SESSION"
@@ -812,63 +847,43 @@ PYEOF
   {
   echo
 
-  # ---- active 5h block: burn rate + projection ----
-  # block_json/blk_*/burn_color/burn_label were already fetched once, up
-  # top before the summary line, so this section and the summary agree.
-  header "ACTIVE BLOCK"
-  if [ "${has_block:-0}" = "1" ]; then
-    printf '  window   %s – %s  (%s left)\n' "$blk_start" "$blk_end" "$(fmt_hm "$blk_rem")"
-    printf '  spent    %s   %s tok\n' "$(fmt_money "$blk_cost")" "$(fmt_num "$blk_tokens")"
-    printf '  burn     %s%s/hr (%s)%s   %s tok/min\n' "$burn_color" "$(fmt_money "$blk_cph")" "$burn_label" "$C_RESET" "$(fmt_num "$blk_tpm")"
-    printf '  proj.    %s total   %s tok\n' "$(fmt_money "$blk_projCost")" "$(fmt_num "$blk_projTokens")"
-    printf '  models   %s\n' "$blk_models"
-  else
-    echo "  (no active block)"
-  fi
-  echo
-
-  # ---- today: totals + per-model breakdown ----
-  header "TODAY"
+  # ---- recent: today's totals/models + 3-day trend + week/month, one
+  # header. Was three separate headers (TODAY, LAST 3 DAYS, WEEK / MONTH)
+  # with a bar chart eating 3 rows for 3 numbers — merged so this whole
+  # block reliably fits above the fold instead of scrolling off a short
+  # pane.
+  header "Recent"
   daily_json=$(ccusage daily --json --last 1 --offline 2>/dev/null)
   if [ -n "$daily_json" ] && [ "$(jq -r '.daily | length' <<<"$daily_json" 2>/dev/null)" != "0" ]; then
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
       .totals | [.totalCost, .totalTokens, .inputTokens, .outputTokens, .cacheCreationTokens, .cacheReadTokens] | @tsv
     ' <<<"$daily_json")"
-    printf '  total    %s   %s tok\n' "$(fmt_money "$tCost")" "$(fmt_num "$tTok")"
-    printf '  in/out   %s / %s   cache new/read %s / %s\n' \
-      "$(fmt_num "$tIn")" "$(fmt_num "$tOut")" "$(fmt_num "$tCacheC")" "$(fmt_num "$tCacheR")"
+    printf '  today    %s  %s tok   in/out %s / %s\n' \
+      "$(fmt_money "$tCost")" "$(fmt_m "$tTok")" "$(fmt_num "$tIn")" "$(fmt_num "$tOut")"
+    models_line=""
     while IFS=$'\t' read -r mname mcost mtok; do
       [ -z "$mname" ] && continue
-      printf '    %-24s %8s  %s tok\n' "$mname" "$(fmt_money "$mcost")" "$(fmt_num "$mtok")"
+      seg="${mname#claude-} $(fmt_money "$mcost") ($(fmt_m "$mtok"))"
+      models_line="${models_line:+$models_line  |  }$seg"
     done < <(jq -r '.daily[0].modelBreakdowns[]? | [.modelName, .cost, (.inputTokens+.outputTokens+.cacheCreationTokens+.cacheReadTokens)] | @tsv' <<<"$daily_json")
+    printf '  %s\n' "$models_line"
   else
     echo "  (no usage yet today)"
   fi
-  echo
-
-  # ---- 3-day trend ----
-  header "LAST 3 DAYS"
   since3=$(date -v-2d +%Y%m%d 2>/dev/null || date -d '2 days ago' +%Y%m%d)
   trend_json=$(ccusage daily --json --since "$since3" --offline 2>/dev/null)
   if [ -n "$trend_json" ]; then
-    barw=$((cols - 22)); (( barw < 10 )) && barw=10
-    maxcost=$(jq -r '[.daily[].totalCost] | max // 1' <<<"$trend_json")
-    awk -v m="$maxcost" 'BEGIN{if(m<=0) print 1; else print m}' >/dev/null
+    trend_line=""
     while IFS=$'\t' read -r day dcost dtok; do
       [ -z "$day" ] && continue
-      n=$(awk -v c="$dcost" -v m="$maxcost" -v w="$barw" 'BEGIN{ if(m<=0) m=1; n=int((c/m)*w+0.5); if(n<0)n=0; print n }')
-      bar=$(printf '%*s' "$n" '' | tr ' ' '#')
-      printf '  %-5s %-*s %s\n' "${day:5}" "$barw" "$bar" "$(fmt_money "$dcost")"
+      seg="${day:5} $(fmt_money "$dcost")"
+      trend_line="${trend_line:+$trend_line  }$seg"
     done < <(jq -r '.daily[] | [.period, .totalCost, .totalTokens] | @tsv' <<<"$trend_json")
+    printf '  3d    %s\n' "$trend_line"
   fi
-  echo
-
-  # ---- week / month totals ----
-  header "WEEK / MONTH"
   week_cost=$(ccusage weekly --json --last 1 --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
   month_cost=$(ccusage monthly --json --last 1 --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
-  printf '  this week   %s\n' "$(fmt_money "$week_cost")"
-  printf '  this month  %s\n' "$(fmt_money "$month_cost")"
+  printf '  week  %s   month  %s\n' "$(fmt_money "$week_cost")" "$(fmt_money "$month_cost")"
   echo
 
   # ---- top sessions today: which session is consuming the day's spend ----
@@ -878,8 +893,7 @@ PYEOF
     while IFS=$'\t' read -r sid scost stok slast; do
       [ -z "$sid" ] && continue
       lasthm=$(jq -rn --arg t "$slast" '($t[0:19]+"Z") | fromdateiso8601 | strftime("%H:%M")' 2>/dev/null)
-      pct=$(awk -v c="$scost" -v t="${tCost:-0}" 'BEGIN{ print (t>0? c/t*100:0) }')
-      row=$(printf '%-10s %8s (%3.0f%% of today)  %s tok  last %s' "${sid:0:10}" "$(fmt_money "$scost")" "$pct" "$(fmt_num "$stok")" "$lasthm")
+      row=$(printf '%-10s %8s  %s tok  last %s' "${sid:0:10}" "$(fmt_money "$scost")" "$(fmt_m "$stok")" "$lasthm")
       if [ "$sid" = "${sess_id:-}" ]; then
         printf '  %s%s → this session%s\n' "$C_BOLD" "$row" "$C_RESET"
       else
