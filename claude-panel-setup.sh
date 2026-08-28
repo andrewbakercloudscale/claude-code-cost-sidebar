@@ -100,7 +100,7 @@ BURN_YELLOW=3
 BURN_RED=6
 CTX_YELLOW=40
 CTX_RED=60
-CTX_PURPLE=90
+CTX_PURPLE=80
 # A value only gets colored once it clears an absolute floor — in a cheap
 # session (avg $0.05) a $0.13 turn is >2x average and would false-positive
 # red on money nobody would look twice at.
@@ -683,11 +683,16 @@ PYEOF
     if [ "${#folder_disp}" -gt "$folder_maxw" ]; then
       folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
     fi
-    if [ "${has_block:-0}" = "1" ]; then
-      printf '  📁 Folder: %s   proj. %s\n' "$folder_disp" "$(fmt_money "$blk_projCost")"
-    else
-      printf '  📁 Folder: %s\n' "$folder_disp"
-    fi
+    # Total spend attributed to THIS project — every session whose
+    # transcript lives under $project_dir, summed via ccusage's own
+    # per-session costs (not a token-repricing estimate) — shown next to
+    # the folder name rather than the account-wide block projection that
+    # used to sit here.
+    proj_ids_json=$(ls "$project_dir"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | jq -R -s -c 'split("\n") | map(select(length>0))')
+    proj_spend=$(ccusage session --json --offline 2>/dev/null | jq -r --argjson ids "$proj_ids_json" '
+      [.session[] | select(.period as $p | $ids | index($p) != null) | .totalCost] | add // 0
+    ')
+    printf '  📁 Folder: %s (%s)\n' "$folder_disp" "$(fmt_money "$proj_spend")"
     # Both trend lines below are colored against the SAME window one period
     # earlier (this week's avg vs last week's, this month's spend vs last
     # month's) — a baseline has no natural threshold of its own, but a
