@@ -93,6 +93,32 @@ fmt_money() { printf '$%.2f' "${1:-0}"; }
 fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.1fM", n/1000000 }'; }
 fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 
+# Claude Burst (https://github.com/andrewbakercloudscale/claude-burst) is a
+# personal, opt-in local proxy -- most people running this panel won't have
+# it installed. Print nothing at all (not even a placeholder row) unless
+# both the binary and its config are actually present, so the panel stays
+# identical for everyone else.
+proxy_state_line() {
+  command -v claude-burst >/dev/null 2>&1 || return
+  local cfg="$HOME/.config/claude-burst/config.json"
+  [ -f "$cfg" ] || return
+  local state="$HOME/.config/claude-burst/state.json"
+  local primary secondary overflow_until now route_label route_color
+  primary=$(jq -r '.primary.provider // "?"' "$cfg" 2>/dev/null)
+  secondary=$(jq -r '.secondary.provider // "?"' "$cfg" 2>/dev/null)
+  primary="${primary%-passthrough}"
+  secondary="${secondary%-passthrough}"
+  overflow_until=0
+  [ -f "$state" ] && overflow_until=$(jq -r '.overflow_until // 0' "$state" 2>/dev/null)
+  now=$(date +%s)
+  if [ "${overflow_until:-0}" -gt "$now" ] 2>/dev/null; then
+    route_label="SECONDARY ($secondary)"; route_color="$C_YELLOW"
+  else
+    route_label="PRIMARY ($primary)"; route_color="$C_GREEN"
+  fi
+  printf '  🔀 Proxy State: %s%s%s\n' "$route_color" "$route_label" "$C_RESET"
+}
+
 # ---- traffic-light thresholds, shared by every colored figure in the panel ----
 TIER_YELLOW_MULT=1.5
 TIER_RED_MULT=2.0
@@ -637,14 +663,14 @@ PYEOF
         fi
 
         if [ "${has_block:-0}" = "1" ]; then
-          printf '  ⏳ Current Time Block: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
+          printf '  ⏳ Current Block: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
           # This is the true average burn rate (blk_cost ÷ elapsed time)
           # across ALL sessions active in the current 5h block, not just
           # this one — ccusage's block cost total is already aggregated
           # across every concurrent session; see blk_cph derivation above
           # for why it's recomputed here instead of trusting ccusage's own
           # burnRate.costPerHour.
-          printf '  🔥 All Sessions Burn Rate: %s%s/hr%s (%s)\n' \
+          printf '  🔥 All Sessions: %s%s/hr%s (%s)\n' \
             "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label"
         else
           printf '  ⏳ Current Time Block: (no active block)\n'
@@ -706,6 +732,7 @@ PYEOF
     else
       printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
     fi
+    proxy_state_line
   else
     echo "no active Claude Code session found"
   fi
