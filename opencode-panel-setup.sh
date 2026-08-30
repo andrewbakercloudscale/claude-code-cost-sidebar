@@ -81,7 +81,7 @@ header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RES
 clear_eol() { awk -v w="${COLS:-999}" '{ line = $0; plain = line; gsub(/\033\[[0-9;]*m/, "", plain); cont = plain; n_cont = gsub(/[\200-\277]/, "", cont); vis_len = length(plain) - n_cont; if (vis_len > w) plain = substr(plain, 1, w + n_cont); printf "%s\033[K\n", (vis_len > w ? plain : line) }'; }
 
 fmt_money() { printf '$%.2f' "${1:-0}"; }
-fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.1fM", n/1000000 }'; }
+fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.2fM", n/1000000 }'; }
 # value yellow_threshold red_threshold -> green/yellow/red. No historical
 # baseline to compare against (unlike the Claude Code panel's ccusage-backed
 # tier_color) — Together AI/opencode has no equivalent of ccusage's flexible

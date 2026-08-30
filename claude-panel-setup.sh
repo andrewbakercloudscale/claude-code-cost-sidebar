@@ -90,7 +90,7 @@ fmt_num() {
   }'
 }
 fmt_money() { printf '$%.2f' "${1:-0}"; }
-fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.1fM", n/1000000 }'; }
+fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.2fM", n/1000000 }'; }
 fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 
 # Claude Burst (https://github.com/andrewbakercloudscale/claude-burst) is a
@@ -658,7 +658,7 @@ PYEOF
             printf "%.2f", b + ratio*ra
           }')
           pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-          printf '  📅 Today Value: %s$%s%s (proj %s$%s%s)\n' \
+          printf '  📅 Today: %s$%s%s (by EOD: %s$%s%s)\n' \
             "$tc" "$today_amt" "$C_RESET" "$pc" "$today_pred" "$C_RESET"
         fi
 
@@ -675,23 +675,30 @@ PYEOF
         else
           printf '  ⏳ Current Time Block: (no active block)\n'
         fi
-      elif [ "$i" -eq $((n_segs - 1)) ] && [[ "$seg" =~ ([0-9,]+)\ \(([0-9]+)%\) ]]; then
-        # Context segment — recompute the window size and % ourselves
-        # rather than trust ccusage's own %. ccusage assumes each model's
-        # native window (1M for Sonnet 5) regardless of whether
-        # CLAUDE_CODE_DISABLE_1M_CONTEXT forced the real active boundary
-        # back to 200k, which is exactly the mismatch that made context
-        # usage impossible to keep in check this week.
-        ctx_tokens="${BASH_REMATCH[1]//,/}"
-        win_size=$(context_window_size "$model_id")
-        ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
-        ctx_color=$(ctx_tier_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")
-        forced_note=""
-        if [ "$win_size" = "200000" ] && [[ "$model_id" == "claude-sonnet-5" || "$model_id" == "claude-fable-5" ]]; then
-          forced_note=" [forced 200k]"
+      elif [ "$i" -eq $((n_segs - 1)) ]; then
+        if [[ "$seg" =~ ([0-9,]+)\ \(([0-9]+)%\) ]]; then
+          # Context segment — recompute the window size and % ourselves
+          # rather than trust ccusage's own %. ccusage assumes each model's
+          # native window (1M for Sonnet 5) regardless of whether
+          # CLAUDE_CODE_DISABLE_1M_CONTEXT forced the real active boundary
+          # back to 200k, which is exactly the mismatch that made context
+          # usage impossible to keep in check this week.
+          ctx_tokens="${BASH_REMATCH[1]//,/}"
+          win_size=$(context_window_size "$model_id")
+          ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
+          ctx_color=$(ctx_tier_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")
+          forced_note=""
+          if [ "$win_size" = "200000" ] && [[ "$model_id" == "claude-sonnet-5" || "$model_id" == "claude-fable-5" ]]; then
+            forced_note=" [forced 200k]"
+          fi
+          printf '  🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
+            "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
+        else
+          # ccusage couldn't compute context this round (e.g. bare "N/A") —
+          # keep our row label instead of dropping to the raw segment, which
+          # printed as a naked "N/A" with no indication of what it meant.
+          printf '  🧠 Context Usage: %s\n' "${seg#🧠 }"
         fi
-        printf '  🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
-          "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
       elif [ "$i" -ne 2 ] || [ "$n_segs" -lt 4 ]; then
         # Skip ccusage's own middle "burn rate" segment when present (i==2
         # of 4) — already printed above from the JSON fetch; anything else
@@ -887,13 +894,13 @@ PYEOF
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
       .totals | [.totalCost, .totalTokens, .inputTokens, .outputTokens, .cacheCreationTokens, .cacheReadTokens] | @tsv
     ' <<<"$daily_json")"
-    printf '  today    %s  %s tok\n' "$(fmt_money "$tCost")" "$(fmt_m "$tTok")"
+    printf '  today    %s  %s tokens\n' "$(fmt_money "$tCost")" "$(fmt_m "$tTok")"
     models_line=""
-    while IFS=$'\t' read -r mname mcost mtok; do
+    while IFS=$'\t' read -r mname mcost; do
       [ -z "$mname" ] && continue
-      seg="${mname#claude-} $(fmt_money "$mcost") ($(fmt_m "$mtok"))"
-      models_line="${models_line:+$models_line  |  }$seg"
-    done < <(jq -r '.daily[0].modelBreakdowns[]? | [.modelName, .cost, (.inputTokens+.outputTokens+.cacheCreationTokens+.cacheReadTokens)] | @tsv' <<<"$daily_json")
+      seg="${mname#claude-} $(fmt_money "$mcost")"
+      models_line="${models_line:+$models_line | }$seg"
+    done < <(jq -r '.daily[0].modelBreakdowns[]? | [.modelName, .cost] | @tsv' <<<"$daily_json")
     printf '  %s\n' "$models_line"
   else
     echo "  (no usage yet today)"
@@ -918,16 +925,51 @@ PYEOF
   header "TOP SESSIONS TODAY"
   session_json=$(ccusage session --json --since "$(date +%Y%m%d)" --offline 2>/dev/null)
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
+    # ccusage's per-session totalCost/totalTokens are all-time-per-session,
+    # not date-scoped — `--since` only decides which sessions get *listed*
+    # (any with activity today), so a session spanning multiple days shows
+    # its FULL history here, which can exceed the whole day's real total
+    # (ccusage daily). Recompute today's slice from that session's own
+    # deduped entry list (`-i <id>`, which matches ccusage's authoritative
+    # totalTokens exactly — re-parsing the raw JSONL ourselves double-counts
+    # branches/retries). Entry-level costUSD is 0 for this account (ccusage
+    # prices from its model-rate table, not per-entry), so today's cost is
+    # estimated as a share of the session's all-time cost proportional to
+    # its token share.
+    today_str=$(date +%Y-%m-%d)
+    tmpdir=$(mktemp -d)
+    while IFS=$'\t' read -r sid _ _ _; do
+      [ -z "$sid" ] && continue
+      ( ccusage session --json -i "$sid" --offline 2>/dev/null > "$tmpdir/$sid.json" ) &
+    done < <(jq -r '.session[] | [.period, .totalCost, .totalTokens, .metadata.lastActivity] | @tsv' <<<"$session_json")
+    wait
+
+    top_rows=$(while IFS=$'\t' read -r sid all_cost all_tok slast; do
+      [ -z "$sid" ] && continue
+      ef="$tmpdir/$sid.json"
+      today_tok=""
+      if [ -s "$ef" ]; then
+        today_tok=$(jq -r --arg d "$today_str" '
+          [.entries[]? | select(.timestamp | startswith($d)) |
+            .inputTokens+.outputTokens+.cacheCreationTokens+.cacheReadTokens] | add // 0
+        ' "$ef" 2>/dev/null)
+      fi
+      [ -z "$today_tok" ] && today_tok="$all_tok"
+      today_cost=$(awk -v c="$all_cost" -v tt="$today_tok" -v at="$all_tok" 'BEGIN{ printf "%.10f", (at>0 ? c*tt/at : 0) }')
+      printf '%s\t%s\t%s\t%s\n' "$sid" "$today_cost" "$today_tok" "$slast"
+    done < <(jq -r '.session[] | [.period, .totalCost, .totalTokens, .metadata.lastActivity] | @tsv' <<<"$session_json"))
+    rm -rf "$tmpdir"
+
     while IFS=$'\t' read -r sid scost stok slast; do
       [ -z "$sid" ] && continue
       lasthm=$(jq -rn --arg t "$slast" '($t[0:19]+"Z") | fromdateiso8601 | strftime("%H:%M")' 2>/dev/null)
-      row=$(printf '%-10s %8s  %s tok  last %s' "${sid:0:10}" "$(fmt_money "$scost")" "$(fmt_m "$stok")" "$lasthm")
+      row=$(printf '%-10s %8s  %s tokens  last %s' "${sid:0:10}" "$(fmt_money "$scost")" "$(fmt_m "$stok")" "$lasthm")
       if [ "$sid" = "${sess_id:-}" ]; then
         printf '  %s%s *this%s\n' "$C_BOLD" "$row" "$C_RESET"
       else
         printf '  %s\n' "$row"
       fi
-    done < <(jq -r '.session | sort_by(-.totalCost) | .[0:5][] | [.period, .totalCost, .totalTokens, .metadata.lastActivity] | @tsv' <<<"$session_json")
+    done < <(printf '%s\n' "$top_rows" | sort -t $'\t' -k2,2 -rn | head -5)
   else
     echo "  (none)"
   fi
