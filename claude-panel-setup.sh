@@ -457,9 +457,7 @@ while true; do
     # mtime) — a file that didn't exist yet when this panel launched can
     # only be a session that started alongside or after it, which is the
     # best available guess for "the session in this pane" without an
-    # explicit pin. Falls back to the old mtime guess only when no such
-    # post-launch file exists (e.g. this panel outlived every session it
-    # ever watched).
+    # explicit pin.
     latest=""
     newest_birth=0
     for f in "$project_dir"/*.jsonl; do
@@ -470,7 +468,22 @@ while true; do
         latest="$f"
       fi
     done
-    [ -n "$latest" ] || latest=$(ls -t "$project_dir"/*.jsonl 2>/dev/null | head -1)
+    # No post-launch file yet — e.g. a brand-new session whose first line
+    # (or even --session-id pin) hasn't landed on disk. Only fall back to
+    # "most recently modified in this directory" when that guess is
+    # unambiguous (exactly one transcript here); with more than one it's a
+    # coin flip which session is actively being chatted with, and guessing
+    # wrong means showing someone else's live turns/cost as this pane's —
+    # worse than the honest "no session found" this pane would otherwise
+    # show for the few seconds until its own file exists. A long-lived
+    # project directory can easily hold a dozen-plus past transcripts, so
+    # "more than one file" is the common case here, not an edge case.
+    if [ -z "$latest" ]; then
+      other_jsonls=("$project_dir"/*.jsonl)
+      if [ "${#other_jsonls[@]}" -eq 1 ] && [ -f "${other_jsonls[0]}" ]; then
+        latest="${other_jsonls[0]}"
+      fi
+    fi
   fi
   if [ -n "$latest" ]; then
     IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(python3 - "$latest" <<'PYEOF'
