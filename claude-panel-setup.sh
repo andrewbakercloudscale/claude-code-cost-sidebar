@@ -923,6 +923,19 @@ PYEOF
   fi
   } )
   printf '%s\n' "$guaranteed" | clear_eol
+  # Clear-to-end HERE, not just once at the very end of the loop (below).
+  # The guaranteed block is promised to render in full, fast, every frame —
+  # but the trailing Recent/Top Sessions section makes several sequential
+  # `ccusage ...` calls that can stall (e.g. on a flaky network), and the
+  # loop's only other \033[0J sits after that section. If this frame's
+  # guaranteed block is shorter than the previous frame's (e.g. switching
+  # from a session with a full turn table to a brand-new "no assistant
+  # turns yet" one) and the trailing section then hangs, the previous
+  # frame's leftover rows sit uncleared below the new, correct block for
+  # as long as the stall lasts — stale data glued under fresh headline
+  # stats. Clearing right here makes the guaranteed block's own promise
+  # (always fully rendered, never stale) independent of anything slower.
+  printf '\033[0J'
   used_lines=$(printf '%s\n' "$guaranteed" | wc -l | tr -d ' ')
   remaining=$(( rows - 1 - used_lines ))
 
