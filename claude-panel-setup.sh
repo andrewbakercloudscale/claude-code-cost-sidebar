@@ -133,6 +133,7 @@ CTX_PURPLE=80
 MIN_SESSION_ALERT=5.00
 MIN_DAILY_ALERT=15.00
 MIN_TREND_ALERT=2.00
+MIN_DELTA_ALERT=1000
 
 # value baseline yellow_mult red_mult floor -> green/yellow/red
 tier_color() {
@@ -756,12 +757,17 @@ PYEOF
   if [ -n "$latest" ]; then
     python3 - "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
       "$C_DIM" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
-      "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" <<'PYEOF'
-import json, sys
+      "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" \
+      "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
+      "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" <<'PYEOF'
+import json, os, sys
 
 path, max_rows, c_head, c_reset = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 col_turn, col_model, col_input, col_cache, col_cost, col_mid_tier = sys.argv[5:11]
 burn_color, burn_str = sys.argv[11], sys.argv[12]
+col_purple = sys.argv[13]
+ctx_yellow_t, ctx_red_t, ctx_purple_t = (float(x) for x in sys.argv[14:17])
+delta_yellow_mult, delta_red_mult, delta_floor = (float(x) for x in sys.argv[17:20])
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-sonnet-5":   (2.00, 10.00),
@@ -800,6 +806,40 @@ def model_tier_color(model_id):
     if "opus" in m or "fable" in m or "mythos" in m:
         return col_cost
     return col_mid_tier
+
+# Mirrors context_window_size() in the bash panel — kept in sync manually,
+# same as the PRICES table above, since this heredoc is its own process.
+def context_window_size(model_id):
+    size = 1_000_000 if model_id in ("claude-sonnet-5", "claude-fable-5") else 200_000
+    if size == 1_000_000 and os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0") == "1":
+        size = 200_000
+    return size
+
+# Same green/yellow/red/purple bands as the "Context Usage" line above the
+# table (CTX_YELLOW/RED/PURPLE), so a turn whose running total is already
+# eating most of the window reads the same way here as it does up there.
+def ctx_pct_color(pct):
+    if pct > ctx_purple_t:
+        return col_purple
+    if pct > ctx_red_t:
+        return col_cost
+    if pct > ctx_yellow_t:
+        return col_mid_tier
+    return col_input
+
+# RAG against this session's own average turn-over-turn growth (same
+# baseline-ratio shape as tier_color() in bash: 1.5x avg -> yellow, 2x avg ->
+# red) so a turn that blew up context relative to this session's own pattern
+# stands out, rather than against an absolute token count that means
+# something different in a 200k vs 1M window.
+def delta_color(d, avg):
+    if avg <= 0 or d < delta_floor:
+        return col_input
+    if d > avg * delta_red_mult:
+        return col_cost
+    if d > avg * delta_yellow_mult:
+        return col_mid_tier
+    return col_input
 
 turns, seen = [], set()
 try:
@@ -847,6 +887,7 @@ for line in lines:
 
 total_n = len(turns)
 shown = turns[-max_rows:]
+avg_delta = (sum(t[2] for t in turns) / total_n) if total_n else 0.0
 head_label = f"{c_head}This Session{c_reset}, Burn  {burn_color}{burn_str}/hr{c_reset}"
 if not shown:
     print(head_label)
@@ -866,9 +907,15 @@ else:
     for i in reversed(range(len(shown))):
         label, total_ctx, delta, cache_pct, cost, model = shown[i]
         turn_no = start_idx + i
-        input_cell = f"{fmt_k(total_ctx)} (+{fmt_k(delta)})"
+        total_str, delta_str = fmt_k(total_ctx), fmt_k(delta)
+        plain_cell = f"{total_str} (+{delta_str})"
+        pad = " " * max(0, 12 - len(plain_cell))
+        ctx_pct = total_ctx / context_window_size(model) * 100
+        total_colored = f"{ctx_pct_color(ctx_pct)}{total_str}{c_reset}"
+        delta_colored = f"{delta_color(delta, avg_delta)}{delta_str}{c_reset}"
+        input_cell = f"{pad}{total_colored} (+{delta_colored})"
         label_cell = f"{model_tier_color(model)}{label:<10}{c_reset}"
-        print(f"  {turn_no:<5}{label_cell}{input_cell:>12}{cache_pct:>5.0f}%{'$' + format(cost, '.2f'):>8}")
+        print(f"  {turn_no:<5}{label_cell}{input_cell}{cache_pct:>5.0f}%{'$' + format(cost, '.2f'):>8}")
 PYEOF
   else
     header "This Session"
