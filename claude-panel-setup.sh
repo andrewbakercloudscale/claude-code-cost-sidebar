@@ -935,25 +935,20 @@ PYEOF
     echo "  (no active Claude Code session found)"
   fi
   } )
-  printf '%s\n' "$guaranteed" | clear_eol
-  # Clear-to-end HERE, not just once at the very end of the loop (below).
-  # The guaranteed block is promised to render in full, fast, every frame —
-  # but the trailing Recent/Top Sessions section makes several sequential
-  # `ccusage ...` calls that can stall (e.g. on a flaky network), and the
-  # loop's only other \033[0J sits after that section. If this frame's
-  # guaranteed block is shorter than the previous frame's (e.g. switching
-  # from a session with a full turn table to a brand-new "no assistant
-  # turns yet" one) and the trailing section then hangs, the previous
-  # frame's leftover rows sit uncleared below the new, correct block for
-  # as long as the stall lasts — stale data glued under fresh headline
-  # stats. Clearing right here makes the guaranteed block's own promise
-  # (always fully rendered, never stale) independent of anything slower.
-  printf '\033[0J'
   used_lines=$(printf '%s\n' "$guaranteed" | wc -l | tr -d ' ')
   remaining=$(( rows - 1 - used_lines ))
 
+  # Both blocks are fully computed into variables and only written to the
+  # terminal once, together, below — previously the guaranteed block was
+  # printed immediately and the trailing Recent/Top Sessions block followed
+  # seconds later (once its several sequential `ccusage ...` calls
+  # finished), so every refresh visibly redrew in two separate passes. A
+  # slow trailing fetch now delays the whole frame instead of half-updating
+  # it: the previous frame just stays up a little longer, which reads as a
+  # pause, not a tear.
+  trailing=""
   if (( remaining > 0 )); then
-  {
+  trailing=$( {
   echo
 
   # ---- recent: today's totals/models + 3-day trend + week/month, one
@@ -1046,8 +1041,11 @@ PYEOF
   else
     echo "  (none)"
   fi
-  } | head -n "$remaining" | clear_eol
+  } | head -n "$remaining" )
   fi
+
+  printf '%s\n' "$guaranteed" | clear_eol
+  [ -n "$trailing" ] && printf '%s\n' "$trailing" | clear_eol
   printf '\033[0J'
 
   sleep "$REFRESH"
