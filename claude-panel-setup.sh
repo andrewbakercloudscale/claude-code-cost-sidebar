@@ -526,8 +526,8 @@ PYEOF
   # the sections below it (active block onward, less essential) compete
   # for whatever pane height is left over.
   guaranteed=$( {
-  printf '%s%s Claude Code usage — %s (refresh %ss)%s\n' \
-    "$C_BOLD" "──" "$(date '+%a %H:%M:%S')" "$REFRESH" "$C_RESET"
+  printf '%sClaude Code Usage — %s (refresh %ss)%s\n' \
+    "$C_BOLD$C_CYAN" "$(date '+%a %H:%M:%S')" "$REFRESH" "$C_RESET"
   # ---- baselines: average per-session cost over 7 days, total spend over
   # 30 days. Session average needs >=3 real sessions to trust — otherwise a
   # single earlier tiny/huge session would skew it.
@@ -871,7 +871,7 @@ else:
         print(f"  {turn_no:<5}{label_cell}{input_cell:>12}{cache_pct:>5.0f}%{'$' + format(cost, '.2f'):>8}")
 PYEOF
   else
-    header "THIS SESSION"
+    header "This Session"
     echo "  (no active Claude Code session found)"
   fi
   } )
@@ -922,7 +922,7 @@ PYEOF
   echo
 
   # ---- top sessions today: which session is consuming the day's spend ----
-  header "TOP SESSIONS TODAY"
+  header "Top Sessions Today"
   session_json=$(ccusage session --json --since "$(date +%Y%m%d)" --offline 2>/dev/null)
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     # ccusage's per-session totalCost/totalTokens are all-time-per-session,
