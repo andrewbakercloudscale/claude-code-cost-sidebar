@@ -364,6 +364,138 @@ BUCKET_PYEOF
   rmdir "$lock_dir" 2>/dev/null
 }
 
+# ---- shared ccusage cache/lock, used by every `ccusage` call below ----
+# Every open panel forked its OWN `ccusage` process for every one of ~13
+# sequential calls per refresh, PLUS one more forked in parallel per session
+# file on disk for "Top Sessions" -- with a few terminals open and a few
+# dozen sessions, that's 100+ node processes spawned every 5s, several
+# caught mid-fork pegged at 100%+ CPU. That's the battery drain. This wraps
+# every call in a cache keyed by its exact arguments, shared across every
+# panel via the filesystem, so at most one panel actually runs a given query
+# per $CCUSAGE_CACHE_TTL -- everyone else (including this same panel on its
+# next refresh) just reads the file. Same mkdir-lock pattern as
+# refresh_hourly_buckets() above (atomic on POSIX, no flock dependency),
+# generalized from one fixed python rebuild to arbitrary ccusage subcommands.
+CCUSAGE_CACHE_DIR="$HOME/.cache/ccusage-panel-cache"
+CCUSAGE_CACHE_TTL=10
+mkdir -p "$CCUSAGE_CACHE_DIR"
+
+# $1... = ccusage subcommand + args, e.g. `blocks --active --json --offline`.
+# Prints the (possibly cached) JSON to stdout.
+ccusage_cached() {
+  local key cache_file lock_dir now_epoch cache_mtime lock_age waited out have_lock
+  key=$(printf '%s' "$*" | shasum -a 256 | cut -c1-16)
+  cache_file="$CCUSAGE_CACHE_DIR/$key.json"
+  lock_dir="$cache_file.lock"
+  now_epoch=$(date +%s)
+
+  if [ -f "$cache_file" ]; then
+    cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+    if (( now_epoch - cache_mtime < CCUSAGE_CACHE_TTL )); then
+      cat "$cache_file"
+      return
+    fi
+  fi
+
+  have_lock=1
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    have_lock=0
+    # A real ccusage call finishes in well under this -- a lock this old was
+    # left behind by a panel that died mid-fetch. Reclaim it rather than
+    # leaving every panel serving a permanently stale cache forever.
+    lock_age=$(( now_epoch - $(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo "$now_epoch") ))
+    if (( lock_age > 30 )); then
+      rmdir "$lock_dir" 2>/dev/null
+      mkdir "$lock_dir" 2>/dev/null && have_lock=1
+    fi
+  fi
+
+  if [ "$have_lock" = 0 ]; then
+    # Another panel is already refetching this exact query -- serve the
+    # stale-but-recent copy rather than block this panel's whole refresh on
+    # someone else's in-flight fetch.
+    if [ -f "$cache_file" ]; then
+      cat "$cache_file"
+      return
+    fi
+    # No cache at all yet for this key (its very first fetch, e.g. two
+    # panels launched together) -- briefly wait for the winner instead of
+    # rendering this row blank for a whole refresh cycle.
+    waited=0
+    while [ -d "$lock_dir" ] && [ ! -f "$cache_file" ] && (( waited < 10 )); do
+      sleep 0.1
+      waited=$(( waited + 1 ))
+    done
+    if [ -f "$cache_file" ]; then
+      cat "$cache_file"
+      return
+    fi
+    # Still nothing -- fetch it ourselves, unlocked, rather than wait
+    # indefinitely; an occasional duplicate fetch beats a stuck panel.
+  fi
+
+  out=$(ccusage "$@" 2>/dev/null)
+  printf '%s' "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
+  printf '%s' "$out"
+}
+
+# Same cache/lock as ccusage_cached(), for the one call (statusline) that
+# needs a JSON payload piped to ccusage's stdin instead of plain args. Kept
+# as a separate function rather than teaching ccusage_cached() to read
+# stdin: the panel's own stdin is the terminal, not a pipe, on every OTHER
+# call site, so a shared `cat`-from-stdin path would hang those forever
+# waiting for input that will never arrive. $1 = payload, $2... = ccusage
+# args; the payload is folded into the cache key since it carries the
+# session id/transcript path/model that make the answer session-specific.
+ccusage_cached_stdin() {
+  local payload="$1"; shift
+  local key cache_file lock_dir now_epoch cache_mtime lock_age waited out have_lock
+  key=$(printf '%s\x00%s' "$payload" "$*" | shasum -a 256 | cut -c1-16)
+  cache_file="$CCUSAGE_CACHE_DIR/$key.json"
+  lock_dir="$cache_file.lock"
+  now_epoch=$(date +%s)
+
+  if [ -f "$cache_file" ]; then
+    cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+    if (( now_epoch - cache_mtime < CCUSAGE_CACHE_TTL )); then
+      cat "$cache_file"
+      return
+    fi
+  fi
+
+  have_lock=1
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    have_lock=0
+    lock_age=$(( now_epoch - $(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo "$now_epoch") ))
+    if (( lock_age > 30 )); then
+      rmdir "$lock_dir" 2>/dev/null
+      mkdir "$lock_dir" 2>/dev/null && have_lock=1
+    fi
+  fi
+
+  if [ "$have_lock" = 0 ]; then
+    if [ -f "$cache_file" ]; then
+      cat "$cache_file"
+      return
+    fi
+    waited=0
+    while [ -d "$lock_dir" ] && [ ! -f "$cache_file" ] && (( waited < 10 )); do
+      sleep 0.1
+      waited=$(( waited + 1 ))
+    done
+    if [ -f "$cache_file" ]; then
+      cat "$cache_file"
+      return
+    fi
+  fi
+
+  out=$(printf '%s' "$payload" | ccusage "$@" 2>/dev/null)
+  printf '%s' "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
+  printf '%s' "$out"
+}
+
 # Save the real terminal fd BEFORE the loop ever redirects fd1 through a
 # command-substitution pipe — fd3 keeps pointing at the actual pane device
 # no matter what fd1 becomes inside a $(...), and unlike /dev/tty it still
@@ -399,7 +531,7 @@ while true; do
   # ---- active 5h block: fetched once here (not down in the ACTIVE BLOCK
   # section) so the summary line above can show the same burn-rate-derived
   # color as the detailed section — one source of truth, one API call.
-  block_json=$(ccusage blocks --active --json --offline 2>/dev/null)
+  block_json=$(ccusage_cached blocks --active --json --offline)
   has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
   if [ "${has_block:-0}" = "1" ]; then
     # `localtime` before `strftime` is required — fromdateiso8601 hands back
@@ -576,7 +708,7 @@ PYEOF
   # 30 days. Session average needs >=3 real sessions to trust — otherwise a
   # single earlier tiny/huge session would skew it.
   since7=$(date -v-7d +%Y%m%d 2>/dev/null || date -d '7 days ago' +%Y%m%d)
-  baseline_json=$(ccusage session --json --since "$since7" --offline 2>/dev/null)
+  baseline_json=$(ccusage_cached session --json --since "$since7" --offline)
   avg_session_cost=$(jq -r '
     [.session[].totalCost] | map(select(. > 0.05)) |
     if length >= 3 then (add/length) else 0 end
@@ -584,7 +716,7 @@ PYEOF
   [ -z "$avg_session_cost" ] && avg_session_cost=0
 
   since30=$(date -v-29d +%Y%m%d 2>/dev/null || date -d '29 days ago' +%Y%m%d)
-  spend30=$(ccusage daily --json --since "$since30" --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
+  spend30=$(ccusage_cached daily --json --since "$since30" --offline | jq -r '.totals.totalCost // 0')
   [ -z "$spend30" ] && spend30=0
   avg_daily_30=$(awk -v s="$spend30" 'BEGIN{ printf "%.4f", s/29 }')
 
@@ -594,7 +726,7 @@ PYEOF
   # themselves (a baseline has nothing to compare to but its own past).
   prev7_since=$(date -v-14d +%Y%m%d 2>/dev/null || date -d '14 days ago' +%Y%m%d)
   prev7_until=$(date -v-8d +%Y%m%d 2>/dev/null || date -d '8 days ago' +%Y%m%d)
-  prev7_avg=$(ccusage session --json --since "$prev7_since" --until "$prev7_until" --offline 2>/dev/null | jq -r '
+  prev7_avg=$(ccusage_cached session --json --since "$prev7_since" --until "$prev7_until" --offline | jq -r '
     [.session[].totalCost] | map(select(. > 0.05)) |
     if length >= 3 then (add/length) else 0 end
   ' 2>/dev/null)
@@ -602,7 +734,7 @@ PYEOF
 
   prev30_since=$(date -v-58d +%Y%m%d 2>/dev/null || date -d '58 days ago' +%Y%m%d)
   prev30_until=$(date -v-30d +%Y%m%d 2>/dev/null || date -d '30 days ago' +%Y%m%d)
-  prev_spend30=$(ccusage daily --json --since "$prev30_since" --until "$prev30_until" --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
+  prev_spend30=$(ccusage_cached daily --json --since "$prev30_since" --until "$prev30_until" --offline | jq -r '.totals.totalCost // 0')
   [ -z "$prev_spend30" ] && prev_spend30=0
   prev_avg_daily_30=$(awk -v s="$prev_spend30" 'BEGIN{ printf "%.4f", s/29 }')
 
@@ -613,7 +745,7 @@ PYEOF
   # now only gates the three fields — Model, Session, Context Usage —
   # that genuinely can't be known without one). Was nested inside the
   # statusline cost-segment parsing below; pulled out here unchanged.
-  today_daily_json=$(ccusage daily --json --last 1 --offline 2>/dev/null)
+  today_daily_json=$(ccusage_cached daily --json --last 1 --offline)
   today_amt="0.00"
   if [ -n "$today_daily_json" ] && [ "$(jq -r '.daily | length' <<<"$today_daily_json" 2>/dev/null)" != "0" ]; then
     today_amt=$(jq -r '.totals.totalCost // 0' <<<"$today_daily_json" | awk '{printf "%.2f", $1+0}')
@@ -667,7 +799,7 @@ PYEOF
   if [ -n "$latest" ]; then
     payload=$(printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","model":{"id":"%s","display_name":"%s"},"workspace":{"current_dir":"%s","project_dir":"%s"},"version":"1.0","output_style":{"name":"default"}}' \
       "$sess_id" "$latest" "$PWD" "$model_id" "$model_label" "$PWD" "$PWD")
-    statusline_out=$(echo "$payload" | ccusage statusline -B text 2>/dev/null)
+    statusline_out=$(ccusage_cached_stdin "$payload" statusline -B text)
     # One metric per line rather than piping the whole thing through `fold`
     # — a fold-wrapped line breaks mid-word depending on pane width, which
     # reads badly at 1/3 width. ccusage joins fields with " | "; split on
@@ -791,7 +923,7 @@ PYEOF
   # the folder name rather than the account-wide block projection that
   # used to sit here. $project_dir needs no resolved session either.
   proj_ids_json=$(ls "$project_dir"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | jq -R -s -c 'split("\n") | map(select(length>0))')
-  proj_spend=$(ccusage session --json --offline 2>/dev/null | jq -r --argjson ids "$proj_ids_json" '
+  proj_spend=$(ccusage_cached session --json --offline | jq -r --argjson ids "$proj_ids_json" '
     [.session[] | select(.period as $p | $ids | index($p) != null) | .totalCost] | add // 0
   ')
   printf '  📁 Folder: %s (%s)\n' "$folder_disp" "$(fmt_money "$proj_spend")"
@@ -1016,7 +1148,12 @@ PYEOF
   # block reliably fits above the fold instead of scrolling off a short
   # pane.
   header "Recent"
-  daily_json=$(ccusage daily --json --last 1 --offline 2>/dev/null)
+  # Same query as today_daily_json above ("today's spend + EOD forecast") —
+  # that's computed inside the separate `guaranteed=$( { ... } )` subshell
+  # above, so its value doesn't survive into this one; re-fetching here
+  # goes through ccusage_cached, so within the same $CCUSAGE_CACHE_TTL
+  # window this is a cache read, not a second ccusage fork.
+  daily_json=$(ccusage_cached daily --json --last 1 --offline)
   if [ -n "$daily_json" ] && [ "$(jq -r '.daily | length' <<<"$daily_json" 2>/dev/null)" != "0" ]; then
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
       .totals | [.totalCost, .totalTokens, .inputTokens, .outputTokens, .cacheCreationTokens, .cacheReadTokens] | @tsv
@@ -1033,7 +1170,7 @@ PYEOF
     echo "  (no usage yet today)"
   fi
   since3=$(date -v-2d +%Y%m%d 2>/dev/null || date -d '2 days ago' +%Y%m%d)
-  trend_json=$(ccusage daily --json --since "$since3" --offline 2>/dev/null)
+  trend_json=$(ccusage_cached daily --json --since "$since3" --offline)
   if [ -n "$trend_json" ]; then
     trend_line=""
     while IFS=$'\t' read -r day dcost dtok; do
@@ -1043,14 +1180,14 @@ PYEOF
     done < <(jq -r '.daily[] | [.period, .totalCost, .totalTokens] | @tsv' <<<"$trend_json")
     printf '  3d    %s\n' "$trend_line"
   fi
-  week_cost=$(ccusage weekly --json --last 1 --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
-  month_cost=$(ccusage monthly --json --last 1 --offline 2>/dev/null | jq -r '.totals.totalCost // 0')
+  week_cost=$(ccusage_cached weekly --json --last 1 --offline | jq -r '.totals.totalCost // 0')
+  month_cost=$(ccusage_cached monthly --json --last 1 --offline | jq -r '.totals.totalCost // 0')
   printf '  week  %s   month  %s\n' "$(fmt_money "$week_cost")" "$(fmt_money "$month_cost")"
   echo
 
   # ---- top sessions today: which session is consuming the day's spend ----
   header "Top Sessions Today"
-  session_json=$(ccusage session --json --since "$(date +%Y%m%d)" --offline 2>/dev/null)
+  session_json=$(ccusage_cached session --json --since "$(date +%Y%m%d)" --offline)
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     # ccusage's per-session totalCost/totalTokens are all-time-per-session,
     # not date-scoped — `--since` only decides which sessions get *listed*
@@ -1067,7 +1204,7 @@ PYEOF
     tmpdir=$(mktemp -d)
     while IFS=$'\t' read -r sid _ _ _; do
       [ -z "$sid" ] && continue
-      ( ccusage session --json -i "$sid" --offline 2>/dev/null > "$tmpdir/$sid.json" ) &
+      ( ccusage_cached session --json -i "$sid" --offline > "$tmpdir/$sid.json" ) &
     done < <(jq -r '.session[] | [.period, .totalCost, .totalTokens, .metadata.lastActivity] | @tsv' <<<"$session_json")
     wait
 
