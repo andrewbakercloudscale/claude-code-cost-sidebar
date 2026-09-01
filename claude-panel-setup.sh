@@ -1482,16 +1482,50 @@ elif [ -f "$GCL" ]; then
   echo "Patching ~/.local/bin/ghostty-claude-launcher (Finder Service launch path) ..."
   tmp=$(mktemp)
   gcl_lines=$(wc -l < "$GCL")
-  head -n "$((gcl_lines - 1))" "$GCL" > "$tmp"
+  # Keep a comment line directly above the final exec line attached to
+  # it — splitting purely on "all but the last line" strands that
+  # comment above the newly inserted block instead of above the command
+  # it actually describes.
+  tail_start=$gcl_lines
+  second_last=$(sed -n "$((gcl_lines - 1))p" "$GCL")
+  trimmed="${second_last#"${second_last%%[![:space:]]*}"}"
+  case "$trimmed" in
+    '#'*) tail_start=$((gcl_lines - 1)) ;;
+  esac
+  head -n "$((tail_start - 1))" "$GCL" > "$tmp"
   cat >> "$tmp" <<'GCL_EOF'
 
-# Auto-open the live ccusage stats panel in a right-hand split. This
-# window is always freshly created by the Finder Service (`open -na`), so
-# there's no risk of double-launching — runs in the background so it
-# doesn't delay Claude Code starting.
-[ -x "$HOME/.local/bin/claude-panel-launch.sh" ] && "$HOME/.local/bin/claude-panel-launch.sh" &
+# Auto-open the live ccusage stats panel in a right-hand split, pinned to
+# the exact session ID `claude` is about to start with (--session-id,
+# injected into the launch line below) — this path execs `claude` directly
+# as caffeinate's own argument, never typed at an interactive zsh prompt,
+# so the zshrc preexec hook (and its pin-vs-guess decision) never sees it
+# and never fires. Every session launched this way was unpinned, 100% of
+# the time, forcing the panel to guess which transcript was this pane's by
+# birth-time/recency — provably wrong whenever a second, already-open pane
+# in the same project directory is concurrently active: confirmed live, a
+# brand-new blank pane displayed a different, already-running pane's
+# 47-turn/$3.99 conversation as its own "This Session" table. This window
+# is always freshly created by the Finder Service (`open -na`), so there's
+# no risk of double-launching — runs in the background so it doesn't delay
+# Claude Code starting.
+PIN_SID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+[ -x "$HOME/.local/bin/claude-panel-launch.sh" ] && "$HOME/.local/bin/claude-panel-launch.sh" "$PIN_SID" &
 GCL_EOF
-  tail -n 1 "$GCL" >> "$tmp"
+  while IFS= read -r tail_line; do
+    case "$tail_line" in
+      *'"$CLAUDE"'*)
+        # Inject --session-id right after $CLAUDE so this pane's claude
+        # starts with the exact ID the panel was just pinned to above.
+        printf '%s\n' "${tail_line/\"\$CLAUDE\"/\"\$CLAUDE\" --session-id \"\$PIN_SID\"}" >> "$tmp"
+        ;;
+      *)
+        printf '%s\n' "$tail_line" >> "$tmp"
+        ;;
+    esac
+  done < <(tail -n "$((gcl_lines - tail_start + 1))" "$GCL")
+  grep -qF '"$CLAUDE" --session-id "$PIN_SID"' "$tmp" ||
+    echo "  (warning: couldn't find a \$CLAUDE invocation to pin --session-id onto — panel will still fall back to guessing for this launch path)" >&2
   mv "$tmp" "$GCL"
   chmod +x "$GCL"
 else
