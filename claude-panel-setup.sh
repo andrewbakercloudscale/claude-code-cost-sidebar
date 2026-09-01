@@ -323,8 +323,17 @@ for path in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
         cr_tok = usage.get("cache_read_input_tokens", 0)
         cc_tok = usage.get("cache_creation_input_tokens", 0)
         cc = usage.get("cache_creation") or {}
-        cw_1h = cc.get("ephemeral_1h_input_tokens", cc_tok if not cc else 0)
-        cw_5m = cc.get("ephemeral_5m_input_tokens", 0)
+        # No nested breakdown means the write used the default 5-minute TTL
+        # (the 1h breakdown only appears when the extended-cache beta was
+        # actually used) — defaulting the whole cc_tok count to the 2x 1h
+        # multiplier instead overstated cache-write cost ~60% on every such
+        # entry.
+        if cc:
+            cw_1h = cc.get("ephemeral_1h_input_tokens", 0)
+            cw_5m = cc.get("ephemeral_5m_input_tokens", 0)
+        else:
+            cw_1h = 0
+            cw_5m = cc_tok
 
         price_in, price_out = PRICES.get(model, DEFAULT_PRICE)
         cost = (
@@ -393,11 +402,16 @@ while true; do
   block_json=$(ccusage blocks --active --json --offline 2>/dev/null)
   has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
   if [ "${has_block:-0}" = "1" ]; then
+    # `localtime` before `strftime` is required — fromdateiso8601 hands back
+    # a UTC broken-down time and strftime formats whatever it's given with
+    # no zone conversion of its own, so without it these clock times render
+    # in UTC while everything else in the panel (the header, "This Session"
+    # times) is local — a 2h-off block window on any UTC+2 machine.
     IFS=$'\t' read -r blk_start blk_end blk_cost blk_tokens blk_elapsedSec blk_tpm blk_rem blk_projCost blk_projTokens blk_models <<<"$(jq -r '
       .blocks[0] |
       [
-        (.startTime[0:19]+"Z" | fromdateiso8601 | strftime("%H:%M")),
-        (.endTime[0:19]+"Z"   | fromdateiso8601 | strftime("%H:%M")),
+        (.startTime[0:19]+"Z" | fromdateiso8601 | localtime | strftime("%H:%M")),
+        (.endTime[0:19]+"Z"   | fromdateiso8601 | localtime | strftime("%H:%M")),
         .costUSD, .totalTokens,
         ((.startTime[0:19]+"Z" | fromdateiso8601) as $s | (now - $s)),
         .burnRate.tokensPerMinute,
@@ -482,6 +496,27 @@ while true; do
       other_jsonls=("$project_dir"/*.jsonl)
       if [ "${#other_jsonls[@]}" -eq 1 ] && [ -f "${other_jsonls[0]}" ]; then
         latest="${other_jsonls[0]}"
+      fi
+    fi
+    # Still nothing — the panel itself was (re)started mid-conversation
+    # (Ctrl+C + rerun, or a crash-relaunch), not launched fresh alongside a
+    # new session, so PANEL_START_EPOCH is newer than even the transcript
+    # this pane has been chatting in all along and birth-time can never
+    # match it again. Fall back to "modified in the last 30 minutes" —
+    # long enough to survive a normal thinking pause, short enough that
+    # stale, hours-old transcripts from earlier sessions in the same
+    # project dir don't count. Still only trusted when exactly one
+    # transcript qualifies, for the same misattribution reason as above.
+    if [ -z "$latest" ]; then
+      recent_cutoff=$(( $(date +%s) - 1800 ))
+      recent_jsonls=()
+      for f in "$project_dir"/*.jsonl; do
+        [ -f "$f" ] || continue
+        mtime=$(stat -f %m "$f" 2>/dev/null) || continue
+        (( mtime >= recent_cutoff )) && recent_jsonls+=("$f")
+      done
+      if [ "${#recent_jsonls[@]}" -eq 1 ]; then
+        latest="${recent_jsonls[0]}"
       fi
     fi
   fi
@@ -755,6 +790,12 @@ PYEOF
     fi
     proxy_state_line
   else
+    # Session detection failed, but which directory this pane is even
+    # scoped to shouldn't be a mystery while it's stuck this way — the
+    # folder-name line normally comes from the transcript's own "cwd"
+    # field (unavailable here), so fall back to $PWD itself, which this
+    # panel is always launched into via a same-cwd split.
+    printf '  📁 Folder: %s\n' "$PWD"
     echo "no active Claude Code session found"
   fi
   echo
@@ -881,8 +922,14 @@ for line in lines:
     cr_tok = usage.get("cache_read_input_tokens", 0)
     cc_tok = usage.get("cache_creation_input_tokens", 0)
     cc = usage.get("cache_creation") or {}
-    cw_1h = cc.get("ephemeral_1h_input_tokens", cc_tok if not cc else 0)
-    cw_5m = cc.get("ephemeral_5m_input_tokens", 0)
+    # See the same fix in the hourly-bucket PYEOF block above: no nested
+    # breakdown means the default 5-minute TTL was used, not the 1h beta.
+    if cc:
+        cw_1h = cc.get("ephemeral_1h_input_tokens", 0)
+        cw_5m = cc.get("ephemeral_5m_input_tokens", 0)
+    else:
+        cw_1h = 0
+        cw_5m = cc_tok
 
     total_ctx = in_tok + cr_tok + cc_tok
     cache_pct = (cr_tok / total_ctx * 100) if total_ctx else 0.0
@@ -1030,7 +1077,9 @@ PYEOF
 
     while IFS=$'\t' read -r sid scost stok slast; do
       [ -z "$sid" ] && continue
-      lasthm=$(jq -rn --arg t "$slast" '($t[0:19]+"Z") | fromdateiso8601 | strftime("%H:%M")' 2>/dev/null)
+      # localtime before strftime — see the same fix on the active-block
+      # start/end times above; without it this reads ~2h behind on UTC+2.
+      lasthm=$(jq -rn --arg t "$slast" '($t[0:19]+"Z") | fromdateiso8601 | localtime | strftime("%H:%M")' 2>/dev/null)
       row=$(printf '%-10s %8s  %s tokens  last %s' "${sid:0:10}" "$(fmt_money "$scost")" "$(fmt_m "$stok")" "$lasthm")
       if [ "$sid" = "${sess_id:-}" ]; then
         printf '  %s%s *this%s\n' "$C_BOLD" "$row" "$C_RESET"
@@ -1356,6 +1405,13 @@ else
 # CLAUDE_PANEL_PIN_SID was never set and the panel silently fell back to the
 # directory-scoped guess on every real launch, occasionally showing a stale
 # session's turns when the project directory held more than one transcript.
+# That fix only reached the pin/no-pin decision below though — the launch
+# gate right above it (deciding whether to run the launcher AT ALL) was
+# still `claude*`, anchored to the start of the command line, so any prefix
+# at all (`caffeinate -d claude`, `nohup claude`, `sudo claude`, an
+# env-var-prefixed call) skipped the split entirely, with no pin decision
+# to reach in the first place. Matches "claude" as a whole word anywhere in
+# the command now, not just as its first token.
 # Now any `claude ...` invocation is pinned UNLESS it already carries its
 # own session semantics (--resume/-r, --continue/-c, --session-id) — those
 # already know which transcript they mean and forcing a second --session-id
@@ -1384,10 +1440,7 @@ claude() {
   fi
 }
 _ccusage_panel_autolaunch() {
-  case "$1" in
-    claude*) ;;
-    *) return ;;
-  esac
+  [[ "$1" =~ '(^|[[:space:]])claude([[:space:]]|$)' ]] || return
   [ -n "${CCUSAGE_PANEL_LAUNCHED:-}" ] && return
   export CCUSAGE_PANEL_LAUNCHED=1
 
