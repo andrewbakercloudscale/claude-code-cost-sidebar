@@ -498,27 +498,22 @@ while true; do
         latest="${other_jsonls[0]}"
       fi
     fi
-    # Still nothing — the panel itself was (re)started mid-conversation
-    # (Ctrl+C + rerun, or a crash-relaunch), not launched fresh alongside a
-    # new session, so PANEL_START_EPOCH is newer than even the transcript
-    # this pane has been chatting in all along and birth-time can never
-    # match it again. Fall back to "modified in the last 30 minutes" —
-    # long enough to survive a normal thinking pause, short enough that
-    # stale, hours-old transcripts from earlier sessions in the same
-    # project dir don't count. Still only trusted when exactly one
-    # transcript qualifies, for the same misattribution reason as above.
-    if [ -z "$latest" ]; then
-      recent_cutoff=$(( $(date +%s) - 1800 ))
-      recent_jsonls=()
-      for f in "$project_dir"/*.jsonl; do
-        [ -f "$f" ] || continue
-        mtime=$(stat -f %m "$f" 2>/dev/null) || continue
-        (( mtime >= recent_cutoff )) && recent_jsonls+=("$f")
-      done
-      if [ "${#recent_jsonls[@]}" -eq 1 ]; then
-        latest="${recent_jsonls[0]}"
-      fi
-    fi
+    # A "restarted mid-conversation" fallback (most-recently-modified
+    # file within the last 30 minutes) used to sit here, on the theory
+    # that the panel itself was (re)started mid-conversation rather than
+    # launched fresh, so PANEL_START_EPOCH is newer than even the
+    # transcript this pane has been chatting in all along. Reverted:
+    # "only one transcript modified recently" is NOT the same claim as
+    # "only one transcript modified recently in this exact pane" — a
+    # second, already-open pane in the same project directory that's
+    # mid-conversation makes that file the ONLY recent one project-wide
+    # while this pane is a completely different, still-blank session
+    # (nothing written yet, so it can't out-recency the other pane's
+    # file no matter how the window is sized). That showed a live,
+    # unrelated 47-turn/$3.99 session's data in a brand-new empty pane —
+    # confidently wrong, which the guessing rule this whole function
+    # exists to avoid explicitly calls worse than the honest "no active
+    # session found" this now falls back to instead.
   fi
   if [ -n "$latest" ]; then
     IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(python3 - "$latest" <<'PYEOF'
@@ -1453,6 +1448,11 @@ _ccusage_panel_autolaunch() {
       export CLAUDE_PANEL_PIN_SID="$pin_sid"
       ;;
   esac
+  # Diagnostic: the pin/no-pin split is a silent decision with no other
+  # trace of it anywhere — when "no pin" turns out to be the overwhelming
+  # common case in practice, this is the only way to see the raw command
+  # line that drove it instead of guessing at which flag matched.
+  print -r -- "$(date '+%Y-%m-%d %H:%M:%S') [hook] cmd=[$1] pin_sid=${pin_sid:-none}" >> ~/.cache/claude-panel-launch.log
   ~/.local/bin/claude-panel-launch.sh "$pin_sid" &
 }
 autoload -Uz add-zsh-hook
