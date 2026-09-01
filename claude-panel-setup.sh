@@ -606,6 +606,48 @@ PYEOF
   [ -z "$prev_spend30" ] && prev_spend30=0
   prev_avg_daily_30=$(awk -v s="$prev_spend30" 'BEGIN{ printf "%.4f", s/29 }')
 
+  # ---- today's spend + EOD forecast: computed unconditionally, not
+  # scraped from ccusage's own statusline text — it's the same
+  # account-wide total either way, so it renders fine with no session
+  # resolved yet (see the "live status line" section right below, which
+  # now only gates the three fields — Model, Session, Context Usage —
+  # that genuinely can't be known without one). Was nested inside the
+  # statusline cost-segment parsing below; pulled out here unchanged.
+  today_daily_json=$(ccusage daily --json --last 1 --offline 2>/dev/null)
+  today_amt="0.00"
+  if [ -n "$today_daily_json" ] && [ "$(jq -r '.daily | length' <<<"$today_daily_json" 2>/dev/null)" != "0" ]; then
+    today_amt=$(jq -r '.totals.totalCost // 0' <<<"$today_daily_json" | awk '{printf "%.2f", $1+0}')
+  fi
+  # today_amt (actual, already spent) + a forecast for the hours still
+  # remaining today. Deliberately NOT a flat current-rate extrapolation
+  # (blk_cph*10) — that rate is a seconds-scale figure that spikes 10x+
+  # right after a single pricey turn and decays within minutes, which
+  # made this line swing wildly (e.g. $350 -> $46 -> $22 across three 5s
+  # refreshes with nothing unusual happening).
+  #
+  # The remaining-hours forecast itself is the persisted bucket cache's
+  # historical average per hour-of-day, SCALED by how today's pace
+  # compares to a typical day's pace so far — not used unscaled. An
+  # unscaled historical average ignores today entirely: on a quiet day
+  # (e.g. $17.93 spent by 14:48 against a ~$274 historical average for
+  # hours 0-14) it forecast $215 for the day, back near the 30-day
+  # average, regardless of how light today had actually been. pace_ratio
+  # = today_amt ÷ the same buckets' historical average for hours 0..now;
+  # ratio 1 (no scaling) when there's no historical baseline yet (cold
+  # cache).
+  current_hour=$(( 10#$(date +%H) ))
+  IFS=$'\t' read -r typical_so_far remaining_avg <<<"$(jq -r --argjson ch "$current_hour" '
+    ( [.buckets[]? | select(.hour <= $ch) | .avgCost] | add // 0 ) as $ts |
+    ( [.buckets[]? | select(.hour >  $ch) | .avgCost] | add // 0 ) as $ra |
+    [$ts, $ra] | @tsv
+  ' "$HOURLY_BUCKET_CACHE" 2>/dev/null)"
+  [ -z "$typical_so_far" ] && typical_so_far=0
+  [ -z "$remaining_avg" ] && remaining_avg=0
+  today_pred=$(awk -v b="$today_amt" -v ts="$typical_so_far" -v ra="$remaining_avg" 'BEGIN{
+    ratio = (ts > 0) ? b/ts : 1
+    printf "%.2f", b + ratio*ra
+  }')
+
   # ---- live status line (current session) ----
   # sess_id/model_id/model_label/folder_name/sess_start_epoch were already
   # resolved once, up top, before this subshell — needs the REAL
@@ -613,6 +655,15 @@ PYEOF
   # recorded session (session cost silently comes back $-0.00), and an
   # unset model.id makes ccusage assume an old 200k context window instead
   # of Sonnet 5's actual 1M, so context% reads >100%.
+  #
+  # Only Model, Session, and Context Usage below actually need that
+  # resolved session — everything else in this block (Today, Current
+  # Block, All Sessions, Folder, 30-Day Value, Proxy State) was always
+  # independently computable, but used to be gated behind the SAME
+  # session check as these three, so a brand-new pane with nothing typed
+  # into it yet — the overwhelmingly common first few seconds of every
+  # session — showed nothing at all except "no active session found"
+  # instead of the account-wide context it could show all along.
   if [ -n "$latest" ]; then
     payload=$(printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","model":{"id":"%s","display_name":"%s"},"workspace":{"current_dir":"%s","project_dir":"%s"},"version":"1.0","output_style":{"name":"default"}}' \
       "$sess_id" "$latest" "$PWD" "$model_id" "$model_label" "$PWD" "$PWD")
@@ -625,174 +676,140 @@ PYEOF
     IFS='|' read -ra statusline_segs <<< "$statusline_out"
     IFS="$old_ifs"
     n_segs=${#statusline_segs[@]}
-    for i in "${!statusline_segs[@]}"; do
-      seg="${statusline_segs[$i]}"
+    # Each segment carries the " | " separator's own leading/trailing
+    # space — trim both, or a leading space eats the emoji entirely
+    # below (`${seg%% *}` on a string that STARTS with a space matches
+    # the whole string, not just the part after it).
+    for si in "${!statusline_segs[@]}"; do
+      seg="${statusline_segs[$si]}"
       seg="${seg#"${seg%%[![:space:]]*}"}"
       seg="${seg%"${seg##*[![:space:]]}"}"
-      if [ "$i" -eq 0 ]; then
-        # "🤖 Sonnet 5" -> "🤖 Model: Sonnet 5" — every metric below gets
-        # the same "icon  Label: value" shape, icons unchanged.
-        m_emoji="${seg%% *}"; m_rest="${seg#* }"
-        mtc=$(model_tier_color "${model_id:-}")
-        printf '  %s Model: %s%s%s\n' "$m_emoji" "$mtc" "$m_rest" "$C_RESET"
-      elif [ "$i" -eq 1 ]; then
-        # The cost segment ("💰 $X session / $Y today / $Z block (...)")
-        # is the widest one and the one most likely to wrap mid-word on a
-        # narrow pane — give session/today/block their own lines. Split
-        # only on " / " (space-slash-space), the separator ccusage uses
-        # between those three fields — a bare "/" also turns up inside
-        # the trailing burn rate, e.g. "$2.10/hr", and must not be split.
-        IFS=$'\n' read -rd '' -a cost_parts < <(printf '%s' "$seg" | sed 's# / #\n#g'; printf '\0')
-        # Session/today $ figures are colored against their own baselines
-        # (7-day avg session, 30-day daily avg); ccusage's own text for the
-        # third ("block") field is discarded here — the block/burn lines
-        # below are reconstructed from the JSON block fetch above instead,
-        # since that's the same real number the ACTIVE BLOCK section uses
-        # and doesn't depend on scraping ccusage's rendered string.
-        sess_part="${cost_parts[0]}"
-        sess_emoji="${sess_part%% *}"
-        if [[ "$sess_part" =~ \$(-?[0-9.]+) ]]; then
-          sess_amt="${BASH_REMATCH[1]}"
-          sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
-          # THIS session's own $/hr (spend so far ÷ time since its first
-          # message) — separate from the block burn rate below, which is
-          # every session's combined spend in the current 5h window, not
-          # just this one. Shown on the same row as the spend it's derived
-          # from rather than its own line.
-          sess_rate=$(awk -v c="$sess_amt" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
-          src=$(threshold_color "$sess_rate" "$BURN_YELLOW" "$BURN_RED")
-          printf '  %s Session: %s$%s%s, Burn %s$%s/hr%s\n' \
-            "$sess_emoji" "$sc" "$sess_amt" "$C_RESET" "$src" "$sess_rate" "$C_RESET"
-        else
-          printf '  %s\n' "$sess_part"
-        fi
-
-        today_part="${cost_parts[1]:-}"
-        if [[ "$today_part" =~ \$(-?[0-9.]+) ]]; then
-          today_amt="${BASH_REMATCH[1]}"
-          tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-          # today_amt (actual, already spent) + a forecast for the hours
-          # still remaining today. Deliberately NOT a flat current-rate
-          # extrapolation (blk_cph*10) — that rate is a seconds-scale figure
-          # that spikes 10x+ right after a single pricey turn and decays
-          # within minutes, which made this line swing wildly (e.g.
-          # $350 -> $46 -> $22 across three 5s refreshes with nothing
-          # unusual happening).
-          #
-          # The remaining-hours forecast itself is the persisted bucket
-          # cache's historical average per hour-of-day, SCALED by how
-          # today's pace compares to a typical day's pace so far — not used
-          # unscaled. An unscaled historical average ignores today entirely:
-          # on a quiet day (e.g. $17.93 spent by 14:48 against a ~$274
-          # historical average for hours 0-14) it forecast $215 for the
-          # day, back near the 30-day average, regardless of how light
-          # today had actually been. pace_ratio = today_amt ÷ the same
-          # buckets' historical average for hours 0..now; ratio 1 (no
-          # scaling) when there's no historical baseline yet (cold cache).
-          current_hour=$(( 10#$(date +%H) ))
-          IFS=$'\t' read -r typical_so_far remaining_avg <<<"$(jq -r --argjson ch "$current_hour" '
-            ( [.buckets[]? | select(.hour <= $ch) | .avgCost] | add // 0 ) as $ts |
-            ( [.buckets[]? | select(.hour >  $ch) | .avgCost] | add // 0 ) as $ra |
-            [$ts, $ra] | @tsv
-          ' "$HOURLY_BUCKET_CACHE" 2>/dev/null)"
-          [ -z "$typical_so_far" ] && typical_so_far=0
-          [ -z "$remaining_avg" ] && remaining_avg=0
-          today_pred=$(awk -v b="$today_amt" -v ts="$typical_so_far" -v ra="$remaining_avg" 'BEGIN{
-            ratio = (ts > 0) ? b/ts : 1
-            printf "%.2f", b + ratio*ra
-          }')
-          pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-          printf '  📅 Today: %s$%s%s (by EOD: %s$%s%s)\n' \
-            "$tc" "$today_amt" "$C_RESET" "$pc" "$today_pred" "$C_RESET"
-        fi
-
-        if [ "${has_block:-0}" = "1" ]; then
-          printf '  ⏳ Current Block: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
-          # This is the true average burn rate (blk_cost ÷ elapsed time)
-          # across ALL sessions active in the current 5h block, not just
-          # this one — ccusage's block cost total is already aggregated
-          # across every concurrent session; see blk_cph derivation above
-          # for why it's recomputed here instead of trusting ccusage's own
-          # burnRate.costPerHour.
-          printf '  🔥 All Sessions: %s%s/hr%s (%s)\n' \
-            "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label"
-        else
-          printf '  ⏳ Current Time Block: (no active block)\n'
-        fi
-      elif [ "$i" -eq $((n_segs - 1)) ]; then
-        if [[ "$seg" =~ ([0-9,]+)\ \(([0-9]+)%\) ]]; then
-          # Context segment — recompute the window size and % ourselves
-          # rather than trust ccusage's own %. ccusage assumes each model's
-          # native window (1M for Sonnet 5) regardless of whether
-          # CLAUDE_CODE_DISABLE_1M_CONTEXT forced the real active boundary
-          # back to 200k, which is exactly the mismatch that made context
-          # usage impossible to keep in check this week.
-          ctx_tokens="${BASH_REMATCH[1]//,/}"
-          win_size=$(context_window_size "$model_id")
-          ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
-          ctx_color=$(ctx_tier_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")
-          forced_note=""
-          if [ "$win_size" = "200000" ] && [[ "$model_id" == "claude-sonnet-5" || "$model_id" == "claude-fable-5" ]]; then
-            forced_note=" [forced 200k]"
-          fi
-          printf '  🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
-            "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
-        else
-          # ccusage couldn't compute context this round (e.g. bare "N/A") —
-          # keep our row label instead of dropping to the raw segment, which
-          # printed as a naked "N/A" with no indication of what it meant.
-          printf '  🧠 Context Usage: %s\n' "${seg#🧠 }"
-        fi
-      elif [ "$i" -ne 2 ] || [ "$n_segs" -lt 4 ]; then
-        # Skip ccusage's own middle "burn rate" segment when present (i==2
-        # of 4) — already printed above from the JSON fetch; anything else
-        # prints as-is (nothing currently falls here besides the two cases
-        # above, but kept as a safety net if ccusage adds a segment).
-        printf '  %s\n' "$seg"
-      fi
+      statusline_segs[$si]="$seg"
     done
-    # Show just the project folder name (from the transcript's own "cwd"
-    # field), not Claude Code's sanitized full-path directory name — the
-    # latter is the whole path with slashes turned into dashes and can run
-    # well past a narrow 1/3-width split.
-    folder_disp="${folder_name:-unknown}"
-    folder_maxw=$(( cols - 12 )); (( folder_maxw < 10 )) && folder_maxw=10
-    if [ "${#folder_disp}" -gt "$folder_maxw" ]; then
-      folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
-    fi
-    # Total spend attributed to THIS project — every session whose
-    # transcript lives under $project_dir, summed via ccusage's own
-    # per-session costs (not a token-repricing estimate) — shown next to
-    # the folder name rather than the account-wide block projection that
-    # used to sit here.
-    proj_ids_json=$(ls "$project_dir"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | jq -R -s -c 'split("\n") | map(select(length>0))')
-    proj_spend=$(ccusage session --json --offline 2>/dev/null | jq -r --argjson ids "$proj_ids_json" '
-      [.session[] | select(.period as $p | $ids | index($p) != null) | .totalCost] | add // 0
-    ')
-    printf '  📁 Folder: %s (%s)\n' "$folder_disp" "$(fmt_money "$proj_spend")"
-    # Both trend lines below are colored against the SAME window one period
-    # earlier (this week's avg vs last week's, this month's spend vs last
-    # month's) — a baseline has no natural threshold of its own, but a
-    # widening gap vs its own past is exactly the "am I burning through
-    # tokens faster than before" signal worth a color for.
-    spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-    if awk -v a="$avg_daily_30" 'BEGIN{exit !(a>0)}'; then
-      avgc=$(tier_color "$avg_daily_30" "$prev_avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-      printf '  💵 30-Day Value: %s%s%s (avg %s%s/day%s)\n' \
-        "$spendc" "$(fmt_money "$spend30")" "$C_RESET" "$avgc" "$(fmt_money "$avg_daily_30")" "$C_RESET"
+
+    # "🤖 Sonnet 5" -> "🤖 Model: Sonnet 5" — every metric below gets the
+    # same "icon  Label: value" shape, icons unchanged.
+    model_seg="${statusline_segs[0]:-}"
+    m_emoji="${model_seg%% *}"; m_rest="${model_seg#* }"
+    mtc=$(model_tier_color "${model_id:-}")
+    printf '  %s Model: %s%s%s\n' "${m_emoji:-🤖}" "$mtc" "${m_rest:-Unknown}" "$C_RESET"
+
+    # The cost segment ("💰 $X session / $Y today / $Z block (...)") —
+    # only its first (session) field is used here now; the today/block
+    # fields it also carries are ignored in favor of the independent
+    # computations above/below, which are the same real numbers without
+    # depending on scraping ccusage's rendered string.
+    cost_seg="${statusline_segs[1]:-}"
+    IFS=$'\n' read -rd '' -a cost_parts < <(printf '%s' "$cost_seg" | sed 's# / #\n#g'; printf '\0')
+    sess_part="${cost_parts[0]:-}"
+    sess_emoji="${sess_part%% *}"
+    if [[ "$sess_part" =~ \$(-?[0-9.]+) ]]; then
+      sess_amt="${BASH_REMATCH[1]}"
+      sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
+      # THIS session's own $/hr (spend so far ÷ time since its first
+      # message) — separate from the block burn rate below, which is
+      # every session's combined spend in the current 5h window, not
+      # just this one. Shown on the same row as the spend it's derived
+      # from rather than its own line.
+      sess_rate=$(awk -v c="$sess_amt" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
+      src=$(threshold_color "$sess_rate" "$BURN_YELLOW" "$BURN_RED")
+      printf '  %s Session: %s$%s%s, Burn %s$%s/hr%s\n' \
+        "$sess_emoji" "$sc" "$sess_amt" "$C_RESET" "$src" "$sess_rate" "$C_RESET"
     else
-      printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
+      printf '  %s\n' "${sess_part:-💰 Session: \$-0.00, Burn \$0.00/hr}"
     fi
-    proxy_state_line
   else
-    # Session detection failed, but which directory this pane is even
-    # scoped to shouldn't be a mystery while it's stuck this way — the
-    # folder-name line normally comes from the transcript's own "cwd"
-    # field (unavailable here), so fall back to $PWD itself, which this
-    # panel is always launched into via a same-cwd split.
-    printf '  📁 Folder: %s\n' "$PWD"
-    echo "no active Claude Code session found"
+    printf '  🤖 Model: %sUnknown%s\n' "$C_DIM" "$C_RESET"
+    printf '  💰 Session: $-0.00, Burn $0.00/hr\n'
   fi
+
+  tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
+  pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
+  printf '  📅 Today: %s$%s%s (by EOD: %s$%s%s)\n' \
+    "$tc" "$today_amt" "$C_RESET" "$pc" "$today_pred" "$C_RESET"
+
+  if [ "${has_block:-0}" = "1" ]; then
+    printf '  ⏳ Current Block: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
+    # This is the true average burn rate (blk_cost ÷ elapsed time) across
+    # ALL sessions active in the current 5h block, not just this one —
+    # ccusage's block cost total is already aggregated across every
+    # concurrent session; see blk_cph derivation above for why it's
+    # recomputed here instead of trusting ccusage's own
+    # burnRate.costPerHour.
+    printf '  🔥 All Sessions: %s%s/hr%s (%s)\n' \
+      "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label"
+  else
+    printf '  ⏳ Current Time Block: (no active block)\n'
+  fi
+
+  if [ -n "$latest" ]; then
+    ctx_seg="${statusline_segs[$((n_segs - 1))]:-}"
+    if [[ "$ctx_seg" =~ ([0-9,]+)\ \(([0-9]+)%\) ]]; then
+      # Context segment — recompute the window size and % ourselves rather
+      # than trust ccusage's own %. ccusage assumes each model's native
+      # window (1M for Sonnet 5) regardless of whether
+      # CLAUDE_CODE_DISABLE_1M_CONTEXT forced the real active boundary
+      # back to 200k, which is exactly the mismatch that made context
+      # usage impossible to keep in check this week.
+      ctx_tokens="${BASH_REMATCH[1]//,/}"
+      win_size=$(context_window_size "$model_id")
+      ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
+      ctx_color=$(ctx_tier_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")
+      forced_note=""
+      if [ "$win_size" = "200000" ] && [[ "$model_id" == "claude-sonnet-5" || "$model_id" == "claude-fable-5" ]]; then
+        forced_note=" [forced 200k]"
+      fi
+      printf '  🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
+        "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
+    else
+      # ccusage couldn't compute context this round (e.g. bare "N/A") —
+      # keep our row label instead of dropping to the raw segment, which
+      # printed as a naked "N/A" with no indication of what it meant.
+      printf '  🧠 Context Usage: %s\n' "${ctx_seg#🧠 }"
+    fi
+  else
+    printf '  🧠 Context Usage: N/A\n'
+  fi
+
+  # Show just the project folder name — the transcript's own "cwd" field
+  # when a session is resolved (not Claude Code's sanitized full-path
+  # directory name, which can run well past a narrow 1/3-width split), or
+  # $PWD's own basename otherwise, since this panel is always launched
+  # into a same-cwd split either way.
+  if [ -n "$latest" ]; then
+    folder_disp="${folder_name:-unknown}"
+  else
+    folder_disp="$(basename "$PWD")"
+  fi
+  folder_maxw=$(( cols - 12 )); (( folder_maxw < 10 )) && folder_maxw=10
+  if [ "${#folder_disp}" -gt "$folder_maxw" ]; then
+    folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
+  fi
+  # Total spend attributed to THIS project — every session whose
+  # transcript lives under $project_dir, summed via ccusage's own
+  # per-session costs (not a token-repricing estimate) — shown next to
+  # the folder name rather than the account-wide block projection that
+  # used to sit here. $project_dir needs no resolved session either.
+  proj_ids_json=$(ls "$project_dir"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | jq -R -s -c 'split("\n") | map(select(length>0))')
+  proj_spend=$(ccusage session --json --offline 2>/dev/null | jq -r --argjson ids "$proj_ids_json" '
+    [.session[] | select(.period as $p | $ids | index($p) != null) | .totalCost] | add // 0
+  ')
+  printf '  📁 Folder: %s (%s)\n' "$folder_disp" "$(fmt_money "$proj_spend")"
+  # Both trend lines below are colored against the SAME window one period
+  # earlier (this week's avg vs last week's, this month's spend vs last
+  # month's) — a baseline has no natural threshold of its own, but a
+  # widening gap vs its own past is exactly the "am I burning through
+  # tokens faster than before" signal worth a color for.
+  spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
+  if awk -v a="$avg_daily_30" 'BEGIN{exit !(a>0)}'; then
+    avgc=$(tier_color "$avg_daily_30" "$prev_avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
+    printf '  💵 30-Day Value: %s%s%s (avg %s%s/day%s)\n' \
+      "$spendc" "$(fmt_money "$spend30")" "$C_RESET" "$avgc" "$(fmt_money "$avg_daily_30")" "$C_RESET"
+  else
+    printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
+  fi
+  proxy_state_line
+  [ -z "$latest" ] && echo "no active session — turns appear after first message"
   echo
 
   # ---- per-turn breakdown of the current session ----
