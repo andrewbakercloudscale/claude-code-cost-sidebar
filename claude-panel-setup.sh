@@ -1435,6 +1435,13 @@ claude() {
   fi
 }
 _ccusage_panel_autolaunch() {
+  # Unconditional, BEFORE either early-return — real launches (via a
+  # genuinely typed command, not a direct function call) have never once
+  # produced the pin-decision log line below despite the launcher
+  # provably running every time, so this checks whether the function is
+  # even being reached for real preexec events at all, and with what raw
+  # $1, before anything else about it can be blamed.
+  print -r -- "$(date '+%Y-%m-%d %H:%M:%S') [hook-entry] cmd=[$1] CCUSAGE_PANEL_LAUNCHED=${CCUSAGE_PANEL_LAUNCHED:-unset}" >> ~/.cache/claude-panel-launch.log
   [[ "$1" =~ '(^|[[:space:]])claude([[:space:]]|$)' ]] || return
   [ -n "${CCUSAGE_PANEL_LAUNCHED:-}" ] && return
   export CCUSAGE_PANEL_LAUNCHED=1
