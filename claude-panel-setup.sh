@@ -1038,6 +1038,20 @@ def delta_color(d, avg):
         return col_mid_tier
     return col_input
 
+# Ranks the two independent per-cell colors above (context %, delta vs
+# session average) onto one scale so a row can be colored as a whole by
+# whichever signal is worse, instead of only the one cell that tripped it —
+# a row that's fine on context but has an outsized delta (or vice versa)
+# should still read as elevated at a glance, not just in one column.
+def severity_rank(color):
+    if color == col_purple:
+        return 3
+    if color == col_cost:
+        return 2
+    if color == col_mid_tier:
+        return 1
+    return 0
+
 turns, seen = [], set()
 try:
     with open(path) as f:
@@ -1111,11 +1125,27 @@ if shown:
         plain_cell = f"{total_str} (+{delta_str})"
         pad = " " * max(0, 12 - len(plain_cell))
         ctx_pct = total_ctx / context_window_size(model) * 100
-        total_colored = f"{ctx_pct_color(ctx_pct)}{total_str}{c_reset}"
-        delta_colored = f"{delta_color(delta, avg_delta)}{delta_str}{c_reset}"
-        input_cell = f"{pad}{total_colored} (+{delta_colored})"
-        label_cell = f"{model_tier_color(model)}{label:<10}{c_reset}"
-        print(f"  {turn_no:<5}{label_cell}{input_cell}{cache_pct:>5.0f}%{'$' + format(cost, '.2f'):>8}")
+        # Cache hit % is the odd one out: low is bad (unlike ctx_pct/delta,
+        # where high is bad), so its bands run the opposite direction —
+        # below 95% red, below 90% purple, 95%+ reads as normal.
+        cache_c = col_purple if cache_pct < 90 else (col_cost if cache_pct < 95 else col_input)
+        ctx_c, delta_c = ctx_pct_color(ctx_pct), delta_color(delta, avg_delta)
+        rank = max(severity_rank(ctx_c), severity_rank(delta_c), severity_rank(cache_c))
+        cost_cell = "$" + format(cost, ".2f")
+        if rank > 0:
+            # Whole row in the single worst-offending color, not just the
+            # one cell that tripped it — a turn that's fine on context but
+            # blew its delta (or vice versa) should still stand out at a
+            # glance across every column, not just its one flagged cell.
+            row_c = (col_input, col_mid_tier, col_cost, col_purple)[rank]
+            print(f"  {row_c}{turn_no:<5}{label:<10}{pad}{total_str} (+{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
+        else:
+            total_colored = f"{ctx_c}{total_str}{c_reset}"
+            delta_colored = f"{delta_c}{delta_str}{c_reset}"
+            input_cell = f"{pad}{total_colored} (+{delta_colored})"
+            label_cell = f"{model_tier_color(model)}{label:<10}{c_reset}"
+            cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
+            print(f"  {turn_no:<5}{label_cell}{input_cell}{cache_cell}{cost_cell:>8}")
 PYEOF
   else
     header "This Session"
@@ -1154,11 +1184,11 @@ PYEOF
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
       .totals | [.totalCost, .totalTokens, .inputTokens, .outputTokens, .cacheCreationTokens, .cacheReadTokens] | @tsv
     ' <<<"$daily_json")"
-    printf '  today    %s  %s tokens\n' "$(fmt_money "$tCost")" "$(fmt_m "$tTok")"
+    printf '  %stoday:%s %s | %s tokens\n' "$C_DIM" "$C_RESET" "$(fmt_money "$tCost")" "$(fmt_m "$tTok")"
     models_line=""
     while IFS=$'\t' read -r mname mcost; do
       [ -z "$mname" ] && continue
-      seg="${mname#claude-} $(fmt_money "$mcost")"
+      seg="${C_DIM}${mname#claude-}:${C_RESET} $(fmt_money "$mcost")"
       models_line="${models_line:+$models_line | }$seg"
     done < <(jq -r '.daily[0].modelBreakdowns[]? | [.modelName, .cost] | @tsv' <<<"$daily_json")
     printf '  %s\n' "$models_line"
@@ -1171,14 +1201,15 @@ PYEOF
     trend_line=""
     while IFS=$'\t' read -r day dcost dtok; do
       [ -z "$day" ] && continue
-      seg="${day:5} $(fmt_money "$dcost")"
-      trend_line="${trend_line:+$trend_line  }$seg"
+      seg="${C_DIM}${day:5}:${C_RESET} $(fmt_money "$dcost")"
+      trend_line="${trend_line:+$trend_line | }$seg"
     done < <(jq -r '.daily[] | [.period, .totalCost, .totalTokens] | @tsv' <<<"$trend_json")
-    printf '  3d    %s\n' "$trend_line"
+    printf '  %s3d:%s %s\n' "$C_DIM" "$C_RESET" "$trend_line"
   fi
   week_cost=$(ccusage_cached weekly --json --last 1 --offline | jq -r '.totals.totalCost // 0')
   month_cost=$(ccusage_cached monthly --json --last 1 --offline | jq -r '.totals.totalCost // 0')
-  printf '  week  %s   month  %s\n' "$(fmt_money "$week_cost")" "$(fmt_money "$month_cost")"
+  printf '  %sweek:%s %s | %smonth:%s %s\n' \
+    "$C_DIM" "$C_RESET" "$(fmt_money "$week_cost")" "$C_DIM" "$C_RESET" "$(fmt_money "$month_cost")"
   echo
 
   # ---- top sessions today: which session is consuming the day's spend ----
