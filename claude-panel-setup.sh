@@ -579,6 +579,99 @@ ccusage_cached_stdin() {
   printf '%s' "$out"
 }
 
+# ---- one daily+weekly+monthly load instead of four separate ones ----
+# `daily --last 1`, `weekly --last 1`, `monthly --last 1` and `daily --since
+# <30d>` were four independent ccusage invocations per refresh, and since
+# EVERY invocation reparses the whole transcript corpus (which reaches hundreds of MB) to
+# answer, that was four full scans for four numbers. ccusage's own
+# `--sections` flag emits all three reports from a single load, so ask for
+# that once and pick the wanted period out of each: ~4x less CPU, and no
+# reimplementation of ccusage's week/month boundary rules -- deriving these
+# from a daily window by hand would have meant hardcoding "weeks start
+# Monday", which is ccusage's business to define, not ours.
+#
+# Deliberately NO `--since` here. `--since` truncates the weekly and monthly
+# ROWS as well as the daily ones -- with a mid-month `--since`,
+# ccusage's own monthly row for that month reads only the tail of it, not
+# the month's true total -- so
+# passing the 30-day bound to save payload would have silently understated
+# month-to-date on the 31st of any 31-day month, when the 29-day window no
+# longer reaches the 1st. Full range costs the same scan (the scan is the
+# cost, not the serialization) and cannot be wrong. spend30 is recovered by
+# filtering the daily rows below, which matches `daily --since <30d>`
+# exactly.
+recent_sections() { ccusage_cached daily --json --sections daily,weekly,monthly --offline; }
+
+# The full session report, fetched once and sliced locally. Every windowed
+# `session --since/--until` variant the panel used to ask for (7-day
+# baseline, previous 7-day baseline, today's sessions) is the SAME report
+# with a date filter applied -- and since each ccusage invocation reparses
+# the whole corpus, asking four times cost four full scans for four views of
+# one dataset. Verified equivalent: a windowed `session --since` returns the same
+# session set as filtering this payload does, and the computed averages
+# match exactly.
+all_sessions() { ccusage_cached session --json --offline; }
+
+# $1 = all_sessions payload, $2 = since (YYYY-MM-DD, day-inclusive),
+# $3 = until (YYYY-MM-DD, day-EXCLUSIVE) or "" for no upper bound.
+# Emits {session:[...]} so callers keep reading `.session[]` unchanged.
+#
+# The until bound is day-EXCLUSIVE because that is what ccusage does, which
+# is NOT what it does for `daily --until` (inclusive there -- see
+# daily_window below). Established by testing four windows whose end date
+# actually had sessions on it: ccusage's own count matched day-exclusive
+# filtering in every one, and never the day-inclusive count. Guessing
+# symmetry here would have quietly shifted the previous-7-day baseline and
+# with it the trend colours.
+#
+# lastActivity is a full ISO timestamp ("YYYY-MM-DDTHH:MM:SS.sssZ"), so the
+# comparison is on its [0:10] date prefix -- a bare string compare against a
+# plain "YYYY-MM-DD" bound would exclude every session ON that date by accident.
+sessions_window() {
+  jq -c --arg a "$2" --arg b "$3" '
+    { session: [ .session[]?
+        | select($a == "" or (.metadata.lastActivity[0:10]) >= $a)
+        | select($b == "" or (.metadata.lastActivity[0:10]) <  $b) ] }
+  ' <<<"$1" 2>/dev/null
+}
+
+# $1 = recent_sections payload, $2 = since (YYYY-MM-DD),
+# $3 = until (YYYY-MM-DD, day-INCLUSIVE) or "" for no upper bound.
+# Emits {daily:[...], totals:{totalCost}} -- the two shapes the daily-window
+# callers read. Inclusive upper bound verified against a fixed
+# historical window, which totals identically derived and direct.
+daily_window() {
+  jq -c --arg a "$2" --arg b "$3" '
+    [ .daily[]? | select(.period >= $a) | select($b == "" or .period <= $b) ] as $rows |
+    { daily: $rows, totals: { totalCost: ([ $rows[].totalCost ] | add // 0) } }
+  ' <<<"$1" 2>/dev/null
+}
+
+# $1 = a recent_sections payload. Rebuilds the exact shape that
+# `daily --json --last 1` returned -- {daily:[row], totals:{...}} -- so both
+# downstream call sites keep working untouched (one reads .totals.totalCost,
+# the other also reads .daily[0].modelBreakdowns).
+#
+# Selects TODAY's row BY DATE rather than taking the most recent row that
+# exists. ccusage omits zero-usage days from the report entirely (real
+# multi-day gaps do occur in practice), so `--last 1` on a
+# morning before the first turn returned YESTERDAY's figures under a line
+# labelled "today:". No row means no usage today, which is exactly what the
+# callers' empty-`.daily` branch already prints.
+today_daily_shape() {
+  jq -c --arg t "$(date +%Y-%m-%d)" '
+    [ .daily[]? | select(.period == $t) ] as $rows |
+    { daily: $rows,
+      totals: ( ($rows[0] // {}) |
+        { totalCost:           (.totalCost // 0),
+          totalTokens:         (.totalTokens // 0),
+          inputTokens:         (.inputTokens // 0),
+          outputTokens:        (.outputTokens // 0),
+          cacheCreationTokens: (.cacheCreationTokens // 0),
+          cacheReadTokens:     (.cacheReadTokens // 0) } ) }
+  ' <<<"$1" 2>/dev/null
+}
+
 # ---- transcript-scan cache, keyed by mtime+size not TTL ----
 # Both python parses below read the WHOLE transcript file every refresh —
 # fine for a small session, but for a multi-million-token one (see the
@@ -595,6 +688,53 @@ transcript_stamp() {
   m=$(stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || echo 0)
   s=$(stat -f %z "$path" 2>/dev/null || stat -c %s "$path" 2>/dev/null || echo 0)
   printf '%s:%s' "$m" "$s"
+}
+
+# $1 = session id, $2 = today's date (YYYY-MM-DD). Prints that session's
+# token count for today.
+#
+# The underlying `ccusage session --json -i <sid>` parses EVERY transcript
+# under ~/.claude/projects to answer -- the `-i` only filters the OUTPUT, it
+# does not narrow the scan. So the unconditional fan-out that used to live at
+# the "Top Sessions Today" block re-scanned the entire corpus once per
+# active session, concurrently, every refresh: 8 sessions today meant 8 full
+# scans every 10s, each pegging a core. That was the single largest CPU cost
+# in this panel by a wide margin, and ccusage_cached() could not help --
+# every sid is a DIFFERENT cache key, so the TTL and the mkdir-lock only
+# dedupe a query against itself, never the eight against each other.
+#
+# A session's today-slice can only change when that session's own transcript
+# is written to, which is an exact signal rather than a guess -- so key on
+# mtime+size like session_identity_cached() above instead of a TTL. An idle
+# session then pays nothing at all, and an ordinary tick rescans only the one
+# session actually being typed into. $today is folded into the stamp so the
+# slice invalidates by itself at midnight rather than serving yesterday's.
+session_today_tokens_cached() {
+  local sid="$1" today="$2" path key cache_file stamp cached out
+  path=""
+  for c in "$HOME"/.claude/projects/*/"$sid".jsonl; do
+    [ -f "$c" ] && { path="$c"; break; }
+  done
+  [ -n "$path" ] || return
+  key=$(printf '%s' "$sid" | shasum -a 256 | cut -c1-16)
+  cache_file="$CCUSAGE_CACHE_DIR/todaytok-$key.tsv"
+  stamp=$(transcript_stamp "$path")
+  if [ -f "$cache_file" ]; then
+    IFS=$'\t' read -r cached _ < "$cache_file"
+    if [ "$cached" = "$stamp:$today" ]; then
+      cut -f2- "$cache_file"
+      return
+    fi
+  fi
+  out=$(ccusage session --json -i "$sid" --offline 2>/dev/null | jq -r --arg d "$today" '
+    [.entries[]? | select(.timestamp | startswith($d)) |
+      .inputTokens+.outputTokens+.cacheCreationTokens+.cacheReadTokens] | add // 0
+  ' 2>/dev/null)
+  # Only a real answer gets cached -- caching "" on a failed/interrupted
+  # fetch would pin the empty result until the next turn landed.
+  [ -n "$out" ] || return
+  printf '%s\t%s\n' "$stamp:$today" "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  printf '%s' "$out"
 }
 
 # $1 = transcript path. Prints the cached "sid\tmodel\tlabel\tfolder\tepoch"
@@ -1069,7 +1209,8 @@ while true; do
   # 30 days. Session average needs >=3 real sessions to trust — otherwise a
   # single earlier tiny/huge session would skew it.
   since7=$(date -v-7d +%Y%m%d 2>/dev/null || date -d '7 days ago' +%Y%m%d)
-  baseline_json=$(ccusage_cached session --json --since "$since7" --offline)
+  since7_iso=$(date -v-7d +%Y-%m-%d 2>/dev/null || date -d '7 days ago' +%Y-%m-%d)
+  baseline_json=$(sessions_window "$(all_sessions)" "$since7_iso" "")
   avg_session_cost=$(jq -r '
     [.session[].totalCost] | map(select(. > 0.05)) |
     if length >= 3 then (add/length) else 0 end
@@ -1077,7 +1218,11 @@ while true; do
   [ -z "$avg_session_cost" ] && avg_session_cost=0
 
   since30=$(date -v-29d +%Y%m%d 2>/dev/null || date -d '29 days ago' +%Y%m%d)
-  spend30=$(ccusage_cached daily --json --since "$since30" --offline | jq -r '.totals.totalCost // 0')
+  since30_iso=$(date -v-29d +%Y-%m-%d 2>/dev/null || date -d '29 days ago' +%Y-%m-%d)
+  recent_json=$(recent_sections)
+  # Same 30-day window `daily --since "$since30"` covered; summing the rows
+  # reproduces that call's .totals.totalCost exactly (verified).
+  spend30=$(jq -r --arg d "$since30_iso" '[.daily[]? | select(.period >= $d) | .totalCost] | add // 0' <<<"$recent_json" 2>/dev/null)
   [ -z "$spend30" ] && spend30=0
   avg_daily_30=$(awk -v s="$spend30" 'BEGIN{ printf "%.4f", s/29 }')
 
@@ -1087,7 +1232,9 @@ while true; do
   # themselves (a baseline has nothing to compare to but its own past).
   prev7_since=$(date -v-14d +%Y%m%d 2>/dev/null || date -d '14 days ago' +%Y%m%d)
   prev7_until=$(date -v-8d +%Y%m%d 2>/dev/null || date -d '8 days ago' +%Y%m%d)
-  prev7_avg=$(ccusage_cached session --json --since "$prev7_since" --until "$prev7_until" --offline | jq -r '
+  prev7_since_iso=$(date -v-14d +%Y-%m-%d 2>/dev/null || date -d '14 days ago' +%Y-%m-%d)
+  prev7_until_iso=$(date -v-8d +%Y-%m-%d 2>/dev/null || date -d '8 days ago' +%Y-%m-%d)
+  prev7_avg=$(sessions_window "$(all_sessions)" "$prev7_since_iso" "$prev7_until_iso" | jq -r '
     [.session[].totalCost] | map(select(. > 0.05)) |
     if length >= 3 then (add/length) else 0 end
   ' 2>/dev/null)
@@ -1095,7 +1242,9 @@ while true; do
 
   prev30_since=$(date -v-58d +%Y%m%d 2>/dev/null || date -d '58 days ago' +%Y%m%d)
   prev30_until=$(date -v-30d +%Y%m%d 2>/dev/null || date -d '30 days ago' +%Y%m%d)
-  prev_spend30=$(ccusage_cached daily --json --since "$prev30_since" --until "$prev30_until" --offline | jq -r '.totals.totalCost // 0')
+  prev30_since_iso=$(date -v-58d +%Y-%m-%d 2>/dev/null || date -d '58 days ago' +%Y-%m-%d)
+  prev30_until_iso=$(date -v-30d +%Y-%m-%d 2>/dev/null || date -d '30 days ago' +%Y-%m-%d)
+  prev_spend30=$(daily_window "$(recent_sections)" "$prev30_since_iso" "$prev30_until_iso" | jq -r '.totals.totalCost // 0')
   [ -z "$prev_spend30" ] && prev_spend30=0
   prev_avg_daily_30=$(awk -v s="$prev_spend30" 'BEGIN{ printf "%.4f", s/29 }')
 
@@ -1106,7 +1255,7 @@ while true; do
   # now only gates the three fields — Model, Session, Context Usage —
   # that genuinely can't be known without one). Was nested inside the
   # statusline cost-segment parsing below; pulled out here unchanged.
-  today_daily_json=$(ccusage_cached daily --json --last 1 --offline)
+  today_daily_json=$(today_daily_shape "$recent_json")
   today_amt="0.00"
   if [ -n "$today_daily_json" ] && [ "$(jq -r '.daily | length' <<<"$today_daily_json" 2>/dev/null)" != "0" ]; then
     today_amt=$(jq -r '.totals.totalCost // 0' <<<"$today_daily_json" | awk '{printf "%.2f", $1+0}')
@@ -1288,7 +1437,7 @@ while true; do
   # the folder name rather than the account-wide block projection that
   # used to sit here. $project_dir needs no resolved session either.
   proj_ids_json=$(ls "$project_dir"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | jq -R -s -c 'split("\n") | map(select(length>0))')
-  proj_spend=$(ccusage_cached session --json --offline | jq -r --argjson ids "$proj_ids_json" '
+  proj_spend=$(all_sessions | jq -r --argjson ids "$proj_ids_json" '
     [.session[] | select(.period as $p | $ids | index($p) != null) | .totalCost] | add // 0
   ')
   printf '  📁 Folder: %s (%s)\n' "$folder_disp" "$(fmt_money "$proj_spend")"
@@ -1359,7 +1508,7 @@ while true; do
   # above, so its value doesn't survive into this one; re-fetching here
   # goes through ccusage_cached, so within the same $CCUSAGE_CACHE_TTL
   # window this is a cache read, not a second ccusage fork.
-  daily_json=$(ccusage_cached daily --json --last 1 --offline)
+  daily_json=$(today_daily_shape "$(recent_sections)")
   if [ -n "$daily_json" ] && [ "$(jq -r '.daily | length' <<<"$daily_json" 2>/dev/null)" != "0" ]; then
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
       .totals | [.totalCost, .totalTokens, .inputTokens, .outputTokens, .cacheCreationTokens, .cacheReadTokens] | @tsv
@@ -1376,7 +1525,8 @@ while true; do
     echo "  (no usage yet today)"
   fi
   since3=$(date -v-2d +%Y%m%d 2>/dev/null || date -d '2 days ago' +%Y%m%d)
-  trend_json=$(ccusage_cached daily --json --since "$since3" --offline)
+  since3_iso=$(date -v-2d +%Y-%m-%d 2>/dev/null || date -d '2 days ago' +%Y-%m-%d)
+  trend_json=$(daily_window "$(recent_sections)" "$since3_iso" "")
   if [ -n "$trend_json" ]; then
     trend_line=""
     while IFS=$'\t' read -r day dcost dtok; do
@@ -1386,15 +1536,24 @@ while true; do
     done < <(jq -r '.daily[] | [.period, .totalCost, .totalTokens] | @tsv' <<<"$trend_json")
     printf '  %s3d:%s %s\n' "$C_CYAN" "$C_RESET" "$trend_line"
   fi
-  week_cost=$(ccusage_cached weekly --json --last 1 --offline | jq -r '.totals.totalCost // 0')
-  month_cost=$(ccusage_cached monthly --json --last 1 --offline | jq -r '.totals.totalCost // 0')
+  # Current period selected by computed key, not by taking the last row:
+  # a week or month with no usage yet has no row at all, and [-1] would then
+  # silently report the PREVIOUS one. Absent means $0, which is the truth.
+  # Week keys are Mondays -- verified against five consecutive `ccusage
+  # weekly` periods and against `weekly --last 1` for the current week.
+  week_start=$(date -v-$(( $(date +%u) - 1 ))d +%Y-%m-%d 2>/dev/null || date -d "$(( $(date +%u) - 1 )) days ago" +%Y-%m-%d)
+  recent_json=$(recent_sections)
+  week_cost=$(jq -r --arg w "$week_start" '[.weekly[]? | select(.period == $w) | .totalCost][0] // 0' <<<"$recent_json" 2>/dev/null)
+  [ -z "$week_cost" ] && week_cost=0
+  month_cost=$(jq -r --arg m "$(date +%Y-%m)" '[.monthly[]? | select(.period == $m) | .totalCost][0] // 0' <<<"$recent_json" 2>/dev/null)
+  [ -z "$month_cost" ] && month_cost=0
   printf '  %sweek:%s %s | %smonth:%s %s\n' \
     "$C_CYAN" "$C_RESET" "$(fmt_money "$week_cost")" "$C_CYAN" "$C_RESET" "$(fmt_money "$month_cost")"
   echo
 
   # ---- top sessions today: which session is consuming the day's spend ----
   header "Top Sessions Today"
-  session_json=$(ccusage_cached session --json --since "$(date +%Y%m%d)" --offline)
+  session_json=$(sessions_window "$(all_sessions)" "$(date +%Y-%m-%d)" "")
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     # ccusage's per-session totalCost/totalTokens are all-time-per-session,
     # not date-scoped — `--since` only decides which sessions get *listed*
@@ -1411,20 +1570,18 @@ while true; do
     tmpdir=$(mktemp -d)
     while IFS=$'\t' read -r sid _ _ _; do
       [ -z "$sid" ] && continue
-      ( ccusage_cached session --json -i "$sid" --offline > "$tmpdir/$sid.json" ) &
+      ( session_today_tokens_cached "$sid" "$today_str" > "$tmpdir/$sid.tok" ) &
     done < <(jq -r '.session[] | [.period, .totalCost, .totalTokens, .metadata.lastActivity] | @tsv' <<<"$session_json")
     wait
 
     top_rows=$(while IFS=$'\t' read -r sid all_cost all_tok slast; do
       [ -z "$sid" ] && continue
-      ef="$tmpdir/$sid.json"
+      ef="$tmpdir/$sid.tok"
       today_tok=""
-      if [ -s "$ef" ]; then
-        today_tok=$(jq -r --arg d "$today_str" '
-          [.entries[]? | select(.timestamp | startswith($d)) |
-            .inputTokens+.outputTokens+.cacheCreationTokens+.cacheReadTokens] | add // 0
-        ' "$ef" 2>/dev/null)
-      fi
+      [ -s "$ef" ] && today_tok=$(cat "$ef")
+      # Falling back to the session's ALL-TIME total is deliberate and
+      # unchanged: better to overstate a multi-day session's today-slice
+      # than to silently drop it out of the ranking entirely.
       [ -z "$today_tok" ] && today_tok="$all_tok"
       today_cost=$(awk -v c="$all_cost" -v tt="$today_tok" -v at="$all_tok" 'BEGIN{ printf "%.10f", (at>0 ? c*tt/at : 0) }')
       printf '%s\t%s\t%s\t%s\n' "$sid" "$today_cost" "$today_tok" "$slast"
@@ -1947,14 +2104,67 @@ session_id=$(jq -r '.session_id // empty' <<<"$hook_input" 2>/dev/null)
 [ -z "$session_id" ] && exit 0
 state_file="$STATE_DIR/$session_id.json"
 
+# This hook runs on EVERY prompt submit, and each `ccusage` invocation
+# parses every transcript under ~/.claude/projects (hundreds of MB) to answer
+# -- so the two uncached calls that used to live here cost a full
+# double corpus scan per prompt, on the interactive path, inside a 5s
+# timeout. Worse, the second was pure waste: `session --json -i <sid>`
+# returns the same all-time `.totalCost` for that session that the FIRST
+# call's payload already lists under `.session[] | select(.period==<sid>)`
+# (verified identical across every active session). One call now answers
+# both questions.
+#
+# What remains is cached in ccusage-panel.sh's cache directory using that
+# script's exact key scheme -- sha256 of the argument string, first 16
+# chars -- so this is the same cache entry the panel's own 7-day-average
+# call writes. Whenever a panel is open the hook pays nothing at all; when
+# none is, the hook populates it for the panel instead. Deliberately NOT
+# keyed on transcript mtime like the panel's per-session cache: a prompt
+# submit always follows a transcript write, so an mtime key would miss
+# every single time and cache nothing.
+#
+# The TTL is generous because of what this value is FOR: a 7-day rolling
+# average moves imperceptibly minute to minute, and it only ever gates a
+# >2x escalation alert above a $5 floor. Staleness here cannot change an
+# alert decision that a fresh read would not also have made.
+CCUSAGE_CACHE_DIR="$HOME/.cache/ccusage-panel-cache"
+HOOK_CACHE_TTL=120
+mkdir -p "$CCUSAGE_CACHE_DIR" 2>/dev/null
+
 since7=$(date -v-7d +%Y%m%d 2>/dev/null || date -d '7 days ago' +%Y%m%d)
-avg_session_cost=$(ccusage session --json --since "$since7" --offline 2>/dev/null | jq -r '
+
+cache_args="session --json --since $since7 --offline"
+cache_key=$(printf '%s' "$cache_args" | shasum -a 256 | cut -c1-16)
+cache_file="$CCUSAGE_CACHE_DIR/$cache_key.json"
+
+sessions_json=""
+if [ -f "$cache_file" ]; then
+  cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+  if (( $(date +%s) - cache_mtime < HOOK_CACHE_TTL )); then
+    sessions_json=$(cat "$cache_file" 2>/dev/null)
+  fi
+fi
+if [ -z "$sessions_json" ]; then
+  sessions_json=$(ccusage session --json --since "$since7" --offline 2>/dev/null)
+  # Only a parseable payload is cached -- writing an empty or truncated
+  # result would poison the panel's cache too, since they share this file.
+  if [ -n "$sessions_json" ] && jq -e '.session' >/dev/null 2>&1 <<<"$sessions_json"; then
+    printf '%s' "$sessions_json" > "$cache_file.tmp" 2>/dev/null &&
+      mv "$cache_file.tmp" "$cache_file" 2>/dev/null
+  fi
+fi
+
+avg_session_cost=$(jq -r '
   [.session[].totalCost] | map(select(. > 0.05)) |
   if length >= 3 then (add/length) else 0 end
-' 2>/dev/null)
+' <<<"$sessions_json" 2>/dev/null)
 [ -z "$avg_session_cost" ] && avg_session_cost="0"
 
-session_cost=$(ccusage session --json -i "$session_id" --offline 2>/dev/null | jq -r '.totalCost // 0')
+# A session with no billable activity yet is simply absent from the list;
+# 0 is the same answer the old `-i` call gave for it, and is below
+# MIN_SESSION_ALERT regardless.
+session_cost=$(jq -r --arg s "$session_id" \
+  '[.session[] | select(.period == $s) | .totalCost][0] // 0' <<<"$sessions_json" 2>/dev/null)
 [ -z "$session_cost" ] && session_cost="0"
 
 tier="normal"
