@@ -953,7 +953,7 @@ PYEOF
   # increase to $3/$15; verify this has not changed again before trusting it.
   if [ -n "$latest" ]; then
     python3 - "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
-      "$C_DIM" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
+      "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
       "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" \
       "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
       "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" <<'PYEOF'
@@ -1184,11 +1184,11 @@ PYEOF
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
       .totals | [.totalCost, .totalTokens, .inputTokens, .outputTokens, .cacheCreationTokens, .cacheReadTokens] | @tsv
     ' <<<"$daily_json")"
-    printf '  %stoday:%s %s | %s tokens\n' "$C_DIM" "$C_RESET" "$(fmt_money "$tCost")" "$(fmt_m "$tTok")"
+    printf '  %stoday:%s %s | %s tokens\n' "$C_CYAN" "$C_RESET" "$(fmt_money "$tCost")" "$(fmt_m "$tTok")"
     models_line=""
     while IFS=$'\t' read -r mname mcost; do
       [ -z "$mname" ] && continue
-      seg="${C_DIM}${mname#claude-}:${C_RESET} $(fmt_money "$mcost")"
+      seg="${C_CYAN}${mname#claude-}:${C_RESET} $(fmt_money "$mcost")"
       models_line="${models_line:+$models_line | }$seg"
     done < <(jq -r '.daily[0].modelBreakdowns[]? | [.modelName, .cost] | @tsv' <<<"$daily_json")
     printf '  %s\n' "$models_line"
@@ -1201,15 +1201,15 @@ PYEOF
     trend_line=""
     while IFS=$'\t' read -r day dcost dtok; do
       [ -z "$day" ] && continue
-      seg="${C_DIM}${day:5}:${C_RESET} $(fmt_money "$dcost")"
+      seg="${C_CYAN}${day:5}:${C_RESET} $(fmt_money "$dcost")"
       trend_line="${trend_line:+$trend_line | }$seg"
     done < <(jq -r '.daily[] | [.period, .totalCost, .totalTokens] | @tsv' <<<"$trend_json")
-    printf '  %s3d:%s %s\n' "$C_DIM" "$C_RESET" "$trend_line"
+    printf '  %s3d:%s %s\n' "$C_CYAN" "$C_RESET" "$trend_line"
   fi
   week_cost=$(ccusage_cached weekly --json --last 1 --offline | jq -r '.totals.totalCost // 0')
   month_cost=$(ccusage_cached monthly --json --last 1 --offline | jq -r '.totals.totalCost // 0')
   printf '  %sweek:%s %s | %smonth:%s %s\n' \
-    "$C_DIM" "$C_RESET" "$(fmt_money "$week_cost")" "$C_DIM" "$C_RESET" "$(fmt_money "$month_cost")"
+    "$C_CYAN" "$C_RESET" "$(fmt_money "$week_cost")" "$C_CYAN" "$C_RESET" "$(fmt_money "$month_cost")"
   echo
 
   # ---- top sessions today: which session is consuming the day's spend ----
