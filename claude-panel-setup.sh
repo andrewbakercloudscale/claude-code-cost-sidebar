@@ -63,7 +63,12 @@ cat > "$BIN_DIR/ccusage-panel.sh" <<'PANEL_EOF'
 set -uo pipefail
 export LC_ALL=C LC_NUMERIC=C
 
-REFRESH="${1:-5}"
+# Default matches CCUSAGE_CACHE_TTL below (10s) -- the underlying ccusage
+# data only actually changes that often regardless of how fast this redraws,
+# so a shorter default just repaints identical numbers and burns extra CPU
+# for it. (Was 5s; the displayed "(refresh Ns)" label used to say 5 while
+# the numbers visibly only moved every 10, since they're the same cache.)
+REFRESH="${1:-10}"
 TURN_ROWS="${2:-12}"
 # Set by the autolaunch hook (~/.zshrc) for a bare `claude` invocation,
 # which it forces to run with a known --session-id — lets this panel open
@@ -1414,7 +1419,7 @@ panel_pids() { pgrep -f '[b]in/ccusage-panel\.sh' 2>/dev/null | sort; }
 # else, and the panel falls back to its own directory-scoped guess.
 PIN_SID="${1:-}"
 PANEL_CMD="~/.local/bin/ccusage-panel.sh"
-[ -n "$PIN_SID" ] && PANEL_CMD="~/.local/bin/ccusage-panel.sh 5 12 $PIN_SID"
+[ -n "$PIN_SID" ] && PANEL_CMD="~/.local/bin/ccusage-panel.sh 10 12 $PIN_SID"
 
 log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} TMUX=${TMUX:-unset} PWD=$PWD PIN_SID=${PIN_SID:-none}"
 
