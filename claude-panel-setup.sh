@@ -124,6 +124,78 @@ proxy_state_line() {
   printf '  🔀 Proxy State: %s%s%s\n' "$route_color" "$route_label" "$C_RESET"
 }
 
+# There's no Anthropic API call for "what plan is this account on" — the
+# closest thing is ~/.claude.json's oauthAccount block, which Claude Code
+# itself populates from the account API at login and refreshes periodically
+# (organizationType e.g. "claude_max", organizationRateLimitTier e.g.
+# "default_claude_max_20x"). Absent entirely for API-key auth (no
+# subscription to report), so silently print nothing rather than "Unknown".
+# Cached on its own long TTL, not tied to CCUSAGE_CACHE_TTL — a plan
+# practically never changes mid-session, so there's no reason to re-parse
+# a multi-hundred-KB json file every 5-10s just to re-read the same string.
+LICENSE_CACHE_TTL=300
+license_line() {
+  local acct_file="$HOME/.claude.json" label now mtime
+  # $CCUSAGE_CACHE_DIR is defined later in the file (with the rest of the
+  # ccusage cache machinery) -- computed here, not as a top-level global,
+  # so this function is safe to define before that point under `set -u`.
+  local LICENSE_CACHE="$CCUSAGE_CACHE_DIR/license.txt"
+  now=$(date +%s)
+
+  # Route-aware: claude-burst's secondary path hits a totally different
+  # vendor (config's secondary.provider, e.g. "openai-compatible" against
+  # Together/GLM) billed by its own API key — nothing to do with the
+  # Anthropic Max/Pro seat below. Showing "Max (20x)" while traffic is
+  # actually on secondary would be wrong, not just stale, so check the same
+  # overflow state proxy_state_line() checks and short-circuit first.
+  if command -v claude-burst >/dev/null 2>&1; then
+    local cfg="$HOME/.config/claude-burst/config.json"
+    if [ -f "$cfg" ]; then
+      local state="$HOME/.config/claude-burst/state.json" overflow_until active_provider
+      overflow_until=0
+      [ -f "$state" ] && overflow_until=$(jq -r '.overflow_until // 0' "$state" 2>/dev/null)
+      if [ "${overflow_until:-0}" -gt "$now" ] 2>/dev/null; then
+        active_provider=$(jq -r '.secondary.provider // "?"' "$cfg" 2>/dev/null)
+      else
+        active_provider=$(jq -r '.primary.provider // "?"' "$cfg" 2>/dev/null)
+      fi
+      if [[ "$active_provider" != *oauth* ]]; then
+        printf '  📜 License: %s%s%s\n' "$C_YELLOW" "API key (${active_provider%-passthrough})" "$C_RESET"
+        return
+      fi
+    fi
+  fi
+
+  if [ -f "$LICENSE_CACHE" ]; then
+    mtime=$(stat -f %m "$LICENSE_CACHE" 2>/dev/null || stat -c %Y "$LICENSE_CACHE" 2>/dev/null || echo 0)
+    if (( now - mtime < LICENSE_CACHE_TTL )); then
+      label=$(cat "$LICENSE_CACHE")
+    fi
+  fi
+  if [ -z "${label:-}" ]; then
+    [ -f "$acct_file" ] || return
+    local org_type mult
+    org_type=$(jq -r '.oauthAccount.organizationType // empty' "$acct_file" 2>/dev/null)
+    if [ -z "$org_type" ]; then
+      printf 'none' > "$LICENSE_CACHE.tmp" && mv "$LICENSE_CACHE.tmp" "$LICENSE_CACHE"
+      return
+    fi
+    case "$org_type" in
+      claude_max)        label="Max" ;;
+      claude_pro)         label="Pro" ;;
+      claude_team)        label="Team" ;;
+      claude_enterprise)  label="Enterprise" ;;
+      claude_free)        label="Free" ;;
+      *) label="${org_type#claude_}" ;;
+    esac
+    mult=$(jq -r '.oauthAccount.organizationRateLimitTier // empty' "$acct_file" 2>/dev/null | grep -oE '[0-9]+x$')
+    [ -n "$mult" ] && label="$label ($mult)"
+    printf '%s' "$label" > "$LICENSE_CACHE.tmp" && mv "$LICENSE_CACHE.tmp" "$LICENSE_CACHE"
+  fi
+  [ "$label" = "none" ] && return
+  printf '  📜 License: %s%s%s\n' "$C_CYAN" "$label" "$C_RESET"
+}
+
 # ---- traffic-light thresholds, shared by every colored figure in the panel ----
 TIER_YELLOW_MULT=1.5
 TIER_RED_MULT=2.0
@@ -507,6 +579,300 @@ ccusage_cached_stdin() {
   printf '%s' "$out"
 }
 
+# ---- transcript-scan cache, keyed by mtime+size not TTL ----
+# Both python parses below read the WHOLE transcript file every refresh —
+# fine for a small session, but for a multi-million-token one (see the
+# 4.66M-token session that motivated this) that's a full multi-MB re-parse
+# every 5-10s, per open panel, for as long as the pane stays open — most of
+# it spent re-deriving a result that hasn't changed because nothing new was
+# written since the last refresh (the common case: reading/typing between
+# turns, not mid-generation). Unlike ccusage_cached()'s TTL, staleness here
+# has an exact signal — the file's own mtime+size — so cache on THAT: a
+# turn landing invalidates it immediately, and an idle pane pays for the
+# parse exactly once until the next one lands, not every 5-10s regardless.
+transcript_stamp() {
+  local path="$1" m s
+  m=$(stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || echo 0)
+  s=$(stat -f %z "$path" 2>/dev/null || stat -c %s "$path" 2>/dev/null || echo 0)
+  printf '%s:%s' "$m" "$s"
+}
+
+# $1 = transcript path. Prints the cached "sid\tmodel\tlabel\tfolder\tepoch"
+# tsv line, calling the identity-scan python only when path+mtime+size
+# changed since the last call (by any panel).
+session_identity_cached() {
+  local path="$1" key cache_file stamp cached
+  key=$(printf '%s' "$path" | shasum -a 256 | cut -c1-16)
+  cache_file="$CCUSAGE_CACHE_DIR/sessid-$key.tsv"
+  stamp=$(transcript_stamp "$path")
+  if [ -f "$cache_file" ]; then
+    IFS=$'\t' read -r cached _ < "$cache_file"
+    if [ "$cached" = "$stamp" ]; then
+      cut -f2- "$cache_file"
+      return
+    fi
+  fi
+  local out
+  out=$(python3 - "$path" <<'PYEOF'
+import datetime, json, os, sys
+
+path = sys.argv[1]
+sid = os.path.basename(path).removesuffix(".jsonl")
+model = "unknown"
+folder = ""
+first_ts = None
+try:
+    with open(path) as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not folder and d.get("cwd"):
+                folder = os.path.basename(d["cwd"])
+            if not first_ts and d.get("timestamp"):
+                first_ts = d["timestamp"]
+            if d.get("type") == "assistant":
+                m = d.get("message", {}).get("model")
+                if m:
+                    model = m
+except OSError:
+    pass
+
+rest = model.removeprefix("claude-")
+parts = rest.split("-")
+name = parts[0].capitalize()
+nums = parts[1:]
+if len(nums) >= 2:
+    label = f"{name} {nums[0]}.{nums[1]}"
+elif len(nums) == 1:
+    label = f"{name} {nums[0]}"
+else:
+    label = name
+
+epoch = 0
+if first_ts:
+    epoch = int(datetime.datetime.fromisoformat(first_ts.replace("Z", "+00:00")).timestamp())
+print(f"{sid}\t{model}\t{label}\t{folder}\t{epoch}")
+PYEOF
+)
+  printf '%s\t%s\n' "$stamp" "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  printf '%s' "$out"
+}
+
+# $1 = transcript path, $2... = the same color/threshold args the table
+# always took MINUS burn_color/burn_str -- those are a live every-refresh
+# figure independent of this file's contents, so the caller prints that
+# header line itself and only asks for the (cacheable) table body here.
+# Same mtime+size cache as session_identity_cached() above, and for the
+# same reason: this used to re-read and re-price the ENTIRE transcript on
+# every single refresh, which for a multi-million-token session is real,
+# repeated CPU for a result that's usually unchanged since the last frame.
+turn_table_cached() {
+  local path="$1"; shift
+  local key cache_file stamp cached
+  key=$(printf '%s' "$path $*" | shasum -a 256 | cut -c1-16)
+  cache_file="$CCUSAGE_CACHE_DIR/turns-$key.out"
+  stamp=$(transcript_stamp "$path")
+  if [ -f "$cache_file" ]; then
+    IFS=$'\t' read -r cached < "$cache_file"
+    if [ "$cached" = "$stamp" ]; then
+      tail -n +2 "$cache_file"
+      return
+    fi
+  fi
+  {
+    printf '%s\n' "$stamp"
+    python3 - "$path" "$@" <<'PYEOF'
+import json, os, sys
+
+path, max_rows, c_head, c_reset = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+col_turn, col_model, col_input, col_cache, col_cost, col_mid_tier = sys.argv[5:11]
+col_purple = sys.argv[11]
+ctx_yellow_t, ctx_red_t, ctx_purple_t = (float(x) for x in sys.argv[12:15])
+delta_yellow_mult, delta_red_mult, delta_floor = (float(x) for x in sys.argv[15:18])
+
+PRICES = {  # model id -> (input $/1M, output $/1M)
+    "claude-sonnet-5":   (2.00, 10.00),
+    "claude-opus-5":     (5.00, 25.00),
+    "claude-haiku-4-5":  (1.00, 5.00),
+    "claude-sonnet-4-6": (3.00, 15.00),
+    "claude-opus-4-8":   (5.00, 25.00),
+    "claude-opus-4-7":   (5.00, 25.00),
+    "claude-opus-4-6":   (5.00, 25.00),
+    "claude-fable-5":    (10.00, 50.00),
+    "claude-mythos-5":   (10.00, 50.00),
+}
+DEFAULT_PRICE = (3.00, 15.00)
+CACHE_READ_MULT, CACHE_WRITE_5M_MULT, CACHE_WRITE_1H_MULT = 0.1, 1.25, 2.0
+
+def model_label(model_id):
+    rest = model_id.removeprefix("claude-")
+    parts = rest.split("-")
+    name = parts[0].capitalize()
+    nums = parts[1:]
+    if len(nums) >= 2:
+        return f"{name} {nums[0]}.{nums[1]}"
+    if len(nums) == 1:
+        return f"{name} {nums[0]}"
+    return name
+
+def fmt_k(n):
+    if abs(n) >= 1000:
+        return f"{n/1000:.0f}k"
+    return str(n)
+
+# Mirrors context_window_size() in the bash panel — kept in sync manually,
+# same as the PRICES table above, since this heredoc is its own process.
+# Every current-generation model is 1M except Haiku 4.5 (200k) — see the
+# bash version's comment for why this used to be a Sonnet-5/Fable-5-only
+# allowlist and why that went stale.
+def context_window_size(model_id):
+    size = 200_000 if model_id == "claude-haiku-4-5" else 1_000_000
+    if size == 1_000_000 and os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0") == "1":
+        size = 200_000
+    return size
+
+# Same green/yellow/red/purple bands as the "Context Usage" line above the
+# table (CTX_YELLOW/RED/PURPLE), so a turn whose running total is already
+# eating most of the window reads the same way here as it does up there.
+def ctx_pct_color(pct):
+    if pct > ctx_purple_t:
+        return col_purple
+    if pct > ctx_red_t:
+        return col_cost
+    if pct > ctx_yellow_t:
+        return col_mid_tier
+    return col_input
+
+# RAG against this session's own average turn-over-turn growth (same
+# baseline-ratio shape as tier_color() in bash: 1.5x avg -> yellow, 2x avg ->
+# red) so a turn that blew up context relative to this session's own pattern
+# stands out, rather than against an absolute token count that means
+# something different in a 200k vs 1M window.
+def delta_color(d, avg):
+    if avg <= 0 or d < delta_floor:
+        return col_input
+    if d > avg * delta_red_mult:
+        return col_cost
+    if d > avg * delta_yellow_mult:
+        return col_mid_tier
+    return col_input
+
+# Ranks the two independent per-cell colors above (context %, delta vs
+# session average) onto one scale so a row can be colored as a whole by
+# whichever signal is worse, instead of only the one cell that tripped it —
+# a row that's fine on context but has an outsized delta (or vice versa)
+# should still read as elevated at a glance, not just in one column.
+def severity_rank(color):
+    if color == col_purple:
+        return 3
+    if color == col_cost:
+        return 2
+    if color == col_mid_tier:
+        return 1
+    return 0
+
+turns, seen = [], set()
+try:
+    with open(path) as f:
+        lines = f.readlines()
+except OSError:
+    lines = []
+
+for line in lines:
+    try:
+        d = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if d.get("type") != "assistant":
+        continue
+    msg = d.get("message", {})
+    usage = msg.get("usage")
+    mid = msg.get("id")
+    if not usage or not mid or mid in seen:
+        continue
+    seen.add(mid)
+
+    model = msg.get("model", "unknown")
+    in_tok = usage.get("input_tokens", 0)
+    out_tok = usage.get("output_tokens", 0)
+    cr_tok = usage.get("cache_read_input_tokens", 0)
+    cc_tok = usage.get("cache_creation_input_tokens", 0)
+    cc = usage.get("cache_creation") or {}
+    # See the same fix in the hourly-bucket PYEOF block above: no nested
+    # breakdown means the default 5-minute TTL was used, not the 1h beta.
+    if cc:
+        cw_1h = cc.get("ephemeral_1h_input_tokens", 0)
+        cw_5m = cc.get("ephemeral_5m_input_tokens", 0)
+    else:
+        cw_1h = 0
+        cw_5m = cc_tok
+
+    total_ctx = in_tok + cr_tok + cc_tok
+    cache_pct = (cr_tok / total_ctx * 100) if total_ctx else 0.0
+
+    price_in, price_out = PRICES.get(model, DEFAULT_PRICE)
+    cost = (
+        in_tok * price_in
+        + out_tok * price_out
+        + cr_tok * price_in * CACHE_READ_MULT
+        + cw_1h * price_in * CACHE_WRITE_1H_MULT
+        + cw_5m * price_in * CACHE_WRITE_5M_MULT
+    ) / 1_000_000
+
+    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model))
+
+total_n = len(turns)
+shown = turns[-max_rows:]
+avg_delta = (sum(t[2] for t in turns) / total_n) if total_n else 0.0
+turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
+model_h = f"{col_model}{'Model':<10}{c_reset}"
+input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
+cache_h = f"{col_cache}{'Cache':>6}{c_reset}"
+cost_h = f"{col_cost}{'Cost':>8}{c_reset}"
+print(f"  {turn_h}{model_h}{input_h}{cache_h}{cost_h}")
+if shown:
+    start_idx = total_n - len(shown) + 1
+    # Newest turn first — this table sits at a fixed position above the
+    # sections below it, so the most recent activity would otherwise be the
+    # one row that scrolls out of view first as the session grows.
+    for i in reversed(range(len(shown))):
+        label, total_ctx, delta, cache_pct, cost, model = shown[i]
+        turn_no = start_idx + i
+        total_str, delta_str = fmt_k(total_ctx), fmt_k(delta)
+        plain_cell = f"{total_str} (+{delta_str})"
+        pad = " " * max(0, 12 - len(plain_cell))
+        ctx_pct = total_ctx / context_window_size(model) * 100
+        # Cache hit % is the odd one out: low is bad (unlike ctx_pct/delta,
+        # where high is bad), so its bands run the opposite direction —
+        # below 95% red, below 90% purple, 95%+ reads as normal.
+        cache_c = col_purple if cache_pct < 90 else (col_cost if cache_pct < 95 else col_input)
+        ctx_c, delta_c = ctx_pct_color(ctx_pct), delta_color(delta, avg_delta)
+        # Whole-row coloring is keyed on delta alone, not context %. Delta
+        # is a one-turn spike -- an actionable, out-of-pattern event worth
+        # flagging everywhere at a glance. Context % is the opposite: once
+        # a long session crosses its threshold it STAYS crossed for every
+        # remaining turn (it only grows), so letting it drive whole-row
+        # color painted the rest of a deep Opus/long session's table solid
+        # red/purple turn after turn -- true, but no longer signal, just
+        # noise. Context % keeps its own dedicated Input-cell tint below.
+        rank = severity_rank(delta_c)
+        cost_cell = "$" + format(cost, ".2f")
+        if rank > 0:
+            row_c = (col_input, col_mid_tier, col_cost, col_purple)[rank]
+            print(f"  {row_c}{turn_no:<5}{label:<10}{pad}{total_str} (+{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
+        else:
+            total_colored = f"{ctx_c}{total_str}{c_reset}"
+            delta_colored = f"{delta_c}{delta_str}{c_reset}"
+            input_cell = f"{pad}{total_colored} (+{delta_colored})"
+            cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
+            print(f"  {turn_no:<5}{label:<10}{input_cell}{cache_cell}{cost_cell:>8}")
+PYEOF
+  } > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  tail -n +2 "$cache_file"
+}
+
 # Save the real terminal fd BEFORE the loop ever redirects fd1 through a
 # command-substitution pipe — fd3 keeps pointing at the actual pane device
 # no matter what fd1 becomes inside a $(...), and unlike /dev/tty it still
@@ -514,6 +880,32 @@ ccusage_cached_stdin() {
 # relaunched via `nohup ... &` with stdout pointed straight at a pty device
 # file) as long as that fd itself is a real tty.
 exec 3>&1
+
+# ---- swallow stray keystrokes ----
+# This pane is read-only — it never reads from stdin — but the tty
+# underneath it still echoes and buffers whatever gets typed into it (focus
+# briefly landing here mid-launch, or a keystroke sent while Ghostty is
+# still splitting the window). Left alone, that typed text sits in the
+# pty's input queue and lands straight on the shell prompt the moment this
+# script exits — the stray characters/garbled prompt seen whenever the
+# panel dies while someone was mid-keystroke in this pane. Turn off echo
+# and canonical line-buffering, then drain (and discard) whatever arrives
+# in a background loop for as long as the panel runs; restore the tty's
+# original settings on exit no matter how the script ends, or the pane's
+# shell is left echo-less afterward — a new bug in place of the old one.
+if [ -t 0 ]; then
+  ORIG_STTY=$(stty -g 2>/dev/null || true)
+  if [ -n "$ORIG_STTY" ]; then
+    stty -echo -icanon min 0 time 0 2>/dev/null
+    restore_tty() {
+      stty "$ORIG_STTY" 2>/dev/null
+      [ -n "${DRAIN_PID:-}" ] && kill "$DRAIN_PID" 2>/dev/null
+    }
+    trap restore_tty EXIT INT TERM
+    ( while :; do read -r -t 0.2 -n 4096 _ 2>/dev/null; done ) &
+    DRAIN_PID=$!
+  fi
+fi
 
 while true; do
   # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
@@ -659,49 +1051,7 @@ while true; do
     # session found" this now falls back to instead.
   fi
   if [ -n "$latest" ]; then
-    IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(python3 - "$latest" <<'PYEOF'
-import datetime, json, os, sys
-
-path = sys.argv[1]
-sid = os.path.basename(path).removesuffix(".jsonl")
-model = "unknown"
-folder = ""
-first_ts = None
-try:
-    with open(path) as f:
-        for line in f:
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not folder and d.get("cwd"):
-                folder = os.path.basename(d["cwd"])
-            if not first_ts and d.get("timestamp"):
-                first_ts = d["timestamp"]
-            if d.get("type") == "assistant":
-                m = d.get("message", {}).get("model")
-                if m:
-                    model = m
-except OSError:
-    pass
-
-rest = model.removeprefix("claude-")
-parts = rest.split("-")
-name = parts[0].capitalize()
-nums = parts[1:]
-if len(nums) >= 2:
-    label = f"{name} {nums[0]}.{nums[1]}"
-elif len(nums) == 1:
-    label = f"{name} {nums[0]}"
-else:
-    label = name
-
-epoch = 0
-if first_ts:
-    epoch = int(datetime.datetime.fromisoformat(first_ts.replace("Z", "+00:00")).timestamp())
-print(f"{sid}\t{model}\t{label}\t{folder}\t{epoch}")
-PYEOF
-    )
+    IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(session_identity_cached "$latest")
     # Floor elapsed time at 3 minutes — a session-so-far rate computed over
     # the first few seconds swings wildly and would flash red/green noise.
     sess_elapsed_h=$(awk -v s="$sess_start_epoch" -v n="$(date +%s)" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
@@ -956,6 +1306,7 @@ PYEOF
     printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
   fi
   proxy_state_line
+  license_line
   echo
 
   # ---- per-turn breakdown of the current session ----
@@ -967,199 +1318,15 @@ PYEOF
   # rate of $2/$10 was made permanent on 2026-08-10, cancelling the planned
   # increase to $3/$15; verify this has not changed again before trusting it.
   if [ -n "$latest" ]; then
-    python3 - "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
+    # Printed here, not by the (cached) table below: burn rate is a live,
+    # every-refresh figure independent of the transcript file, so it can't
+    # be part of output that's only recomputed when that file changes.
+    printf '%sThis Session%s, Burn  %s%s/hr%s\n' \
+      "$C_BOLD$C_CYAN" "$C_RESET" "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" "$C_RESET"
+    turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
       "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
-      "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" \
       "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
-      "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" <<'PYEOF'
-import json, os, sys
-
-path, max_rows, c_head, c_reset = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
-col_turn, col_model, col_input, col_cache, col_cost, col_mid_tier = sys.argv[5:11]
-burn_color, burn_str = sys.argv[11], sys.argv[12]
-col_purple = sys.argv[13]
-ctx_yellow_t, ctx_red_t, ctx_purple_t = (float(x) for x in sys.argv[14:17])
-delta_yellow_mult, delta_red_mult, delta_floor = (float(x) for x in sys.argv[17:20])
-
-PRICES = {  # model id -> (input $/1M, output $/1M)
-    "claude-sonnet-5":   (2.00, 10.00),
-    "claude-opus-5":     (5.00, 25.00),
-    "claude-haiku-4-5":  (1.00, 5.00),
-    "claude-sonnet-4-6": (3.00, 15.00),
-    "claude-opus-4-8":   (5.00, 25.00),
-    "claude-opus-4-7":   (5.00, 25.00),
-    "claude-opus-4-6":   (5.00, 25.00),
-    "claude-fable-5":    (10.00, 50.00),
-    "claude-mythos-5":   (10.00, 50.00),
-}
-DEFAULT_PRICE = (3.00, 15.00)
-CACHE_READ_MULT, CACHE_WRITE_5M_MULT, CACHE_WRITE_1H_MULT = 0.1, 1.25, 2.0
-
-def model_label(model_id):
-    rest = model_id.removeprefix("claude-")
-    parts = rest.split("-")
-    name = parts[0].capitalize()
-    nums = parts[1:]
-    if len(nums) >= 2:
-        return f"{name} {nums[0]}.{nums[1]}"
-    if len(nums) == 1:
-        return f"{name} {nums[0]}"
-    return name
-
-def fmt_k(n):
-    if abs(n) >= 1000:
-        return f"{n/1000:.0f}k"
-    return str(n)
-
-# Mirrors context_window_size() in the bash panel — kept in sync manually,
-# same as the PRICES table above, since this heredoc is its own process.
-# Every current-generation model is 1M except Haiku 4.5 (200k) — see the
-# bash version's comment for why this used to be a Sonnet-5/Fable-5-only
-# allowlist and why that went stale.
-def context_window_size(model_id):
-    size = 200_000 if model_id == "claude-haiku-4-5" else 1_000_000
-    if size == 1_000_000 and os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0") == "1":
-        size = 200_000
-    return size
-
-# Same green/yellow/red/purple bands as the "Context Usage" line above the
-# table (CTX_YELLOW/RED/PURPLE), so a turn whose running total is already
-# eating most of the window reads the same way here as it does up there.
-def ctx_pct_color(pct):
-    if pct > ctx_purple_t:
-        return col_purple
-    if pct > ctx_red_t:
-        return col_cost
-    if pct > ctx_yellow_t:
-        return col_mid_tier
-    return col_input
-
-# RAG against this session's own average turn-over-turn growth (same
-# baseline-ratio shape as tier_color() in bash: 1.5x avg -> yellow, 2x avg ->
-# red) so a turn that blew up context relative to this session's own pattern
-# stands out, rather than against an absolute token count that means
-# something different in a 200k vs 1M window.
-def delta_color(d, avg):
-    if avg <= 0 or d < delta_floor:
-        return col_input
-    if d > avg * delta_red_mult:
-        return col_cost
-    if d > avg * delta_yellow_mult:
-        return col_mid_tier
-    return col_input
-
-# Ranks the two independent per-cell colors above (context %, delta vs
-# session average) onto one scale so a row can be colored as a whole by
-# whichever signal is worse, instead of only the one cell that tripped it —
-# a row that's fine on context but has an outsized delta (or vice versa)
-# should still read as elevated at a glance, not just in one column.
-def severity_rank(color):
-    if color == col_purple:
-        return 3
-    if color == col_cost:
-        return 2
-    if color == col_mid_tier:
-        return 1
-    return 0
-
-turns, seen = [], set()
-try:
-    with open(path) as f:
-        lines = f.readlines()
-except OSError:
-    lines = []
-
-for line in lines:
-    try:
-        d = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if d.get("type") != "assistant":
-        continue
-    msg = d.get("message", {})
-    usage = msg.get("usage")
-    mid = msg.get("id")
-    if not usage or not mid or mid in seen:
-        continue
-    seen.add(mid)
-
-    model = msg.get("model", "unknown")
-    in_tok = usage.get("input_tokens", 0)
-    out_tok = usage.get("output_tokens", 0)
-    cr_tok = usage.get("cache_read_input_tokens", 0)
-    cc_tok = usage.get("cache_creation_input_tokens", 0)
-    cc = usage.get("cache_creation") or {}
-    # See the same fix in the hourly-bucket PYEOF block above: no nested
-    # breakdown means the default 5-minute TTL was used, not the 1h beta.
-    if cc:
-        cw_1h = cc.get("ephemeral_1h_input_tokens", 0)
-        cw_5m = cc.get("ephemeral_5m_input_tokens", 0)
-    else:
-        cw_1h = 0
-        cw_5m = cc_tok
-
-    total_ctx = in_tok + cr_tok + cc_tok
-    cache_pct = (cr_tok / total_ctx * 100) if total_ctx else 0.0
-
-    price_in, price_out = PRICES.get(model, DEFAULT_PRICE)
-    cost = (
-        in_tok * price_in
-        + out_tok * price_out
-        + cr_tok * price_in * CACHE_READ_MULT
-        + cw_1h * price_in * CACHE_WRITE_1H_MULT
-        + cw_5m * price_in * CACHE_WRITE_5M_MULT
-    ) / 1_000_000
-
-    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model))
-
-total_n = len(turns)
-shown = turns[-max_rows:]
-avg_delta = (sum(t[2] for t in turns) / total_n) if total_n else 0.0
-head_label = f"{c_head}This Session{c_reset}, Burn  {burn_color}{burn_str}/hr{c_reset}"
-print(head_label)
-turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
-model_h = f"{col_model}{'Model':<10}{c_reset}"
-input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
-cache_h = f"{col_cache}{'Cache':>6}{c_reset}"
-cost_h = f"{col_cost}{'Cost':>8}{c_reset}"
-print(f"  {turn_h}{model_h}{input_h}{cache_h}{cost_h}")
-if shown:
-    start_idx = total_n - len(shown) + 1
-    # Newest turn first — this table sits at a fixed position above the
-    # sections below it, so the most recent activity would otherwise be the
-    # one row that scrolls out of view first as the session grows.
-    for i in reversed(range(len(shown))):
-        label, total_ctx, delta, cache_pct, cost, model = shown[i]
-        turn_no = start_idx + i
-        total_str, delta_str = fmt_k(total_ctx), fmt_k(delta)
-        plain_cell = f"{total_str} (+{delta_str})"
-        pad = " " * max(0, 12 - len(plain_cell))
-        ctx_pct = total_ctx / context_window_size(model) * 100
-        # Cache hit % is the odd one out: low is bad (unlike ctx_pct/delta,
-        # where high is bad), so its bands run the opposite direction —
-        # below 95% red, below 90% purple, 95%+ reads as normal.
-        cache_c = col_purple if cache_pct < 90 else (col_cost if cache_pct < 95 else col_input)
-        ctx_c, delta_c = ctx_pct_color(ctx_pct), delta_color(delta, avg_delta)
-        # Whole-row coloring is keyed on delta alone, not context %. Delta
-        # is a one-turn spike -- an actionable, out-of-pattern event worth
-        # flagging everywhere at a glance. Context % is the opposite: once
-        # a long session crosses its threshold it STAYS crossed for every
-        # remaining turn (it only grows), so letting it drive whole-row
-        # color painted the rest of a deep Opus/long session's table solid
-        # red/purple turn after turn -- true, but no longer signal, just
-        # noise. Context % keeps its own dedicated Input-cell tint below.
-        rank = severity_rank(delta_c)
-        cost_cell = "$" + format(cost, ".2f")
-        if rank > 0:
-            row_c = (col_input, col_mid_tier, col_cost, col_purple)[rank]
-            print(f"  {row_c}{turn_no:<5}{label:<10}{pad}{total_str} (+{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
-        else:
-            total_colored = f"{ctx_c}{total_str}{c_reset}"
-            delta_colored = f"{delta_c}{delta_str}{c_reset}"
-            input_cell = f"{pad}{total_colored} (+{delta_colored})"
-            cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
-            print(f"  {turn_no:<5}{label:<10}{input_cell}{cache_cell}{cost_cell:>8}")
-PYEOF
+      "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT"
   else
     header "This Session"
     echo "  (no active Claude Code session found)"
