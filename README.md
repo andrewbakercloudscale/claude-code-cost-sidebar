@@ -73,6 +73,16 @@ bash claude-panel-setup.sh
 bash opencode-panel-setup.sh
 ```
 
+Or deploy both (or one) at once with the wrapper script:
+
+```bash
+bash deploy.sh            # both panels
+bash deploy.sh claude     # Claude Code panel only
+bash deploy.sh opencode   # OpenCode panel only
+```
+
+`deploy.sh` doesn't do anything the installers above don't already do on their own — there's no remote server for this repo, so "deploy" means re-running the installer(s) to pick up the latest script changes on this machine. It's just a single command to re-run after pulling changes, mirroring the `deploy-*.sh` convention used elsewhere. Safe to re-run any time; both installers are idempotent.
+
 Then open a **new** terminal window/tab (or `source ~/.zshrc`) and type a `claude...` or `opencode...` command — the panel opens automatically in a right-hand split.
 
 You can also run either panel manually at any time, in any terminal:
