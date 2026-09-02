@@ -941,7 +941,6 @@ PYEOF
     printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
   fi
   proxy_state_line
-  [ -z "$latest" ] && echo "no active session — turns appear after first message"
   echo
 
   # ---- per-turn breakdown of the current session ----
@@ -1093,17 +1092,14 @@ total_n = len(turns)
 shown = turns[-max_rows:]
 avg_delta = (sum(t[2] for t in turns) / total_n) if total_n else 0.0
 head_label = f"{c_head}This Session{c_reset}, Burn  {burn_color}{burn_str}/hr{c_reset}"
-if not shown:
-    print(head_label)
-    print("  (no assistant turns yet)")
-else:
-    print(head_label)
-    turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
-    model_h = f"{col_model}{'Model':<10}{c_reset}"
-    input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
-    cache_h = f"{col_cache}{'Cache':>6}{c_reset}"
-    cost_h = f"{col_cost}{'Cost':>8}{c_reset}"
-    print(f"  {turn_h}{model_h}{input_h}{cache_h}{cost_h}")
+print(head_label)
+turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
+model_h = f"{col_model}{'Model':<10}{c_reset}"
+input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
+cache_h = f"{col_cache}{'Cache':>6}{c_reset}"
+cost_h = f"{col_cost}{'Cost':>8}{c_reset}"
+print(f"  {turn_h}{model_h}{input_h}{cache_h}{cost_h}")
+if shown:
     start_idx = total_n - len(shown) + 1
     # Newest turn first — this table sits at a fixed position above the
     # sections below it, so the most recent activity would otherwise be the
