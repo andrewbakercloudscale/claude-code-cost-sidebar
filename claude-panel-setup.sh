@@ -159,13 +159,19 @@ ctx_tier_color() {
   awk -v v="$v" -v t="$pt" 'BEGIN{exit !(v+0>t)}' && color="$C_MAGENTA"
   printf '%s' "$color"
 }
-# Only Sonnet 5 and Fable 5 have a native 1M window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1
-# forces those two back to Sonnet 4.6's 200k boundary — see the comment above the
-# "Context cap" line below for why that distinction matters.
+# Every current-generation model has a native 1M window except Haiku 4.5
+# (still 200k) — verified against Anthropic's published model table
+# (claude-api skill cache, 2026-06-24). This used to list only Sonnet 5 and
+# Fable 5 as 1M, which was true when written but went stale as Opus 5/4.8/
+# 4.7/4.6 and Sonnet 4.6 picked up 1M too — the panel silently kept treating
+# a 220k-token Opus 5 turn as 110% of a 200k ceiling that was never real.
+# CLAUDE_CODE_DISABLE_1M_CONTEXT=1 forces any of these back to the 200k
+# boundary — see the comment above the "Context cap" line below for why
+# that distinction matters.
 context_window_size() {
-  local size=200000
+  local size=1000000
   case "$1" in
-    claude-sonnet-5|claude-fable-5) size=1000000 ;;
+    claude-haiku-4-5) size=200000 ;;
   esac
   if [ "$size" = "1000000" ] && [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-0}" = "1" ]; then
     size=200000
@@ -888,7 +894,11 @@ PYEOF
       ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
       ctx_color=$(ctx_tier_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")
       forced_note=""
-      if [ "$win_size" = "200000" ] && [[ "$model_id" == "claude-sonnet-5" || "$model_id" == "claude-fable-5" ]]; then
+      # Check the env var directly rather than re-deriving "was this model
+      # actually forced down" from a hardcoded model-name list — that list
+      # (originally just Sonnet 5/Fable 5) is exactly what went stale and
+      # caused the 1M-window bug this comment now sits next to.
+      if [ "$win_size" = "200000" ] && [ "$model_id" != "claude-haiku-4-5" ] && [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-0}" = "1" ]; then
         forced_note=" [forced 200k]"
       fi
       printf '  🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
@@ -998,8 +1008,11 @@ def fmt_k(n):
 
 # Mirrors context_window_size() in the bash panel — kept in sync manually,
 # same as the PRICES table above, since this heredoc is its own process.
+# Every current-generation model is 1M except Haiku 4.5 (200k) — see the
+# bash version's comment for why this used to be a Sonnet-5/Fable-5-only
+# allowlist and why that went stale.
 def context_window_size(model_id):
-    size = 1_000_000 if model_id in ("claude-sonnet-5", "claude-fable-5") else 200_000
+    size = 200_000 if model_id == "claude-haiku-4-5" else 1_000_000
     if size == 1_000_000 and os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0") == "1":
         size = 200_000
     return size
