@@ -1122,13 +1122,17 @@ if shown:
         # below 95% red, below 90% purple, 95%+ reads as normal.
         cache_c = col_purple if cache_pct < 90 else (col_cost if cache_pct < 95 else col_input)
         ctx_c, delta_c = ctx_pct_color(ctx_pct), delta_color(delta, avg_delta)
-        rank = max(severity_rank(ctx_c), severity_rank(delta_c), severity_rank(cache_c))
+        # Whole-row coloring is keyed on delta alone, not context %. Delta
+        # is a one-turn spike -- an actionable, out-of-pattern event worth
+        # flagging everywhere at a glance. Context % is the opposite: once
+        # a long session crosses its threshold it STAYS crossed for every
+        # remaining turn (it only grows), so letting it drive whole-row
+        # color painted the rest of a deep Opus/long session's table solid
+        # red/purple turn after turn -- true, but no longer signal, just
+        # noise. Context % keeps its own dedicated Input-cell tint below.
+        rank = severity_rank(delta_c)
         cost_cell = "$" + format(cost, ".2f")
         if rank > 0:
-            # Whole row in the single worst-offending color, not just the
-            # one cell that tripped it — a turn that's fine on context but
-            # blew its delta (or vice versa) should still stand out at a
-            # glance across every column, not just its one flagged cell.
             row_c = (col_input, col_mid_tier, col_cost, col_purple)[rank]
             print(f"  {row_c}{turn_no:<5}{label:<10}{pad}{total_str} (+{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
         else:
