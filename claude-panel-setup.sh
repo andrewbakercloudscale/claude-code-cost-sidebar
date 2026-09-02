@@ -996,14 +996,6 @@ def fmt_k(n):
         return f"{n/1000:.0f}k"
     return str(n)
 
-def model_tier_color(model_id):
-    m = model_id.lower()
-    if "haiku" in m:
-        return col_input
-    if "opus" in m or "fable" in m or "mythos" in m:
-        return col_cost
-    return col_mid_tier
-
 # Mirrors context_window_size() in the bash panel — kept in sync manually,
 # same as the PRICES table above, since this heredoc is its own process.
 def context_window_size(model_id):
@@ -1143,9 +1135,8 @@ if shown:
             total_colored = f"{ctx_c}{total_str}{c_reset}"
             delta_colored = f"{delta_c}{delta_str}{c_reset}"
             input_cell = f"{pad}{total_colored} (+{delta_colored})"
-            label_cell = f"{model_tier_color(model)}{label:<10}{c_reset}"
             cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
-            print(f"  {turn_no:<5}{label_cell}{input_cell}{cache_cell}{cost_cell:>8}")
+            print(f"  {turn_no:<5}{label:<10}{input_cell}{cache_cell}{cost_cell:>8}")
 PYEOF
   else
     header "This Session"
