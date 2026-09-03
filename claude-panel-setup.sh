@@ -1297,7 +1297,16 @@ if [ -t 0 ]; then
       drain_stdin
       stty "$ORIG_STTY" 2>/dev/null
     }
-    trap restore_tty EXIT INT TERM
+    # INT/TERM need a handler that EXITS, not just one that tidies up. A
+    # trap body that returns hands control straight back to the refresh
+    # loop, so `kill <panel>` was survivable: the panel caught the signal,
+    # restored the tty and carried on drawing -- now with echo back ON, so
+    # the pane both kept redrawing AND echoed anything typed into it. Two
+    # SIGTERMs to a pair of live panels left them running and confirmed it.
+    # 130 is the conventional "terminated by SIGINT" status.
+    on_signal() { restore_tty; exit 130; }
+    trap restore_tty EXIT
+    trap on_signal INT TERM
   fi
 fi
 
