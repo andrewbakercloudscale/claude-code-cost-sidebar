@@ -102,6 +102,10 @@ fmt_interval() {
 # set it, the header claimed 5s while the figures moved every 10.
 RATE_FAST="$(fmt_interval "$REFRESH")"
 RATE_SLOW="$(fmt_interval "$SLOW_REFRESH")"
+# Always appended at the END of a heading, never in the middle: header()
+# wraps its whole argument in bold cyan, and this tag closes with a reset,
+# so anything placed after it would lose the heading's own colour.
+rate_tag() { printf '%s(refresh %s)%s' "$C_ELECTRIC" "$1" "$C_RESET"; }
 # Set by the autolaunch hook (~/.zshrc) for a bare `claude` invocation,
 # which it forces to run with a known --session-id — lets this panel open
 # that EXACT transcript instead of guessing "most recently modified file in
@@ -117,6 +121,15 @@ PANEL_START_EPOCH=$(date +%s)
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
 C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
+# Electric blue (#7DF9FF), used only for the per-section "(refresh Ns)"
+# tags. 24-bit rather than one of the 8 basic codes because every one of
+# those is already carrying meaning in this panel — cyan is section
+# headings, blue/green/yellow/red/magenta are all traffic-light states — and
+# a rate tag is metadata about the panel, not a reading from it, so it
+# should not collide with any of them. clear_eol()'s ANSI stripper matches
+# \033[<digits and semicolons>m, which covers this form too, so width
+# accounting is unaffected.
+C_ELECTRIC=$'\033[38;2;125;249;255m'
 
 fmt_num() {
   awk -v n="$1" 'BEGIN{
@@ -1498,8 +1511,8 @@ resolve_session() {
 # which is the honest reading of it: it is the "as of" stamp for every
 # number underneath, and it advances at exactly the rate the header claims.
 build_summary() {
-  printf '%sClaude Code Usage — %s (refresh %s)%s\n' \
-    "$C_BOLD$C_CYAN" "$(date '+%a %H:%M:%S')" "$RATE_SLOW" "$C_RESET"
+  printf '%sClaude Code Usage — %s %s\n' \
+    "$C_BOLD$C_CYAN" "$(date '+%a %H:%M:%S')" "$(rate_tag "$RATE_SLOW")"
   # ---- baselines: average per-session cost over 7 days, total spend over
   # 30 days. Session average needs >=3 real sessions to trust — otherwise a
   # single earlier tiny/huge session would skew it.
@@ -1782,15 +1795,15 @@ build_session_table() {
     # The rate label goes LAST on this line deliberately: on a narrow pane
     # clear_eol() truncates from the right, so the label is what gets cut,
     # never the burn figure it annotates.
-    printf '%sThis Session%s, Burn  %s%s/hr%s %s(refresh %s)%s\n' \
+    printf '%sThis Session%s, Burn  %s%s/hr%s %s\n' \
       "$C_BOLD$C_CYAN" "$C_RESET" "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" "$C_RESET" \
-      "$C_DIM" "$RATE_FAST" "$C_RESET"
+      "$(rate_tag "$RATE_FAST")"
     turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
       "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
       "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
       "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_DIM"
   else
-    header "This Session (refresh $RATE_FAST)"
+    header "This Session $(rate_tag "$RATE_FAST")"
     echo "  (no active Claude Code session found)"
   fi
 }
@@ -1816,7 +1829,7 @@ build_trailing() {
   # with a bar chart eating 3 rows for 3 numbers — merged so this whole
   # block reliably fits above the fold instead of scrolling off a short
   # pane.
-  header "Recent (refresh $RATE_SLOW)"
+  header "Recent $(rate_tag "$RATE_SLOW")"
   # Same query as today_daily_json in build_summary() — that runs in its own
   # $(...) subshell, so its value doesn't survive into this one. Re-fetching
   # here goes through ccusage_cached(), and build_summary() and this function
@@ -1867,7 +1880,7 @@ build_trailing() {
   echo
 
   # ---- top sessions today: which session is consuming the day's spend ----
-  header "Top Sessions Today (refresh $RATE_SLOW)"
+  header "Top Sessions Today $(rate_tag "$RATE_SLOW")"
   session_json=$(sessions_window "$(all_sessions)" "$(date +%Y-%m-%d)" "")
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     # ccusage's per-session totalCost/totalTokens are all-time-per-session,
@@ -2008,7 +2021,14 @@ while true; do
   [ -n "$trailing" ] && printf '%s\n' "$trailing" | clear_eol
   printf '\033[0J'
 
-  sleep "$REFRESH"
+  # Backgrounded and waited on, not a plain `sleep`. Bash defers every trap
+  # until the current FOREGROUND child returns, so with a bare `sleep
+  # $REFRESH` a Ctrl-C or a `kill` sat unanswered for up to a full tier --
+  # measured at 9.06s on the 10s default. `wait` is interruptible, so the
+  # handler runs the moment the signal lands. The orphaned sleep exits on
+  # its own a few seconds later and costs nothing.
+  sleep "$REFRESH" &
+  wait $! 2>/dev/null
 done
 PANEL_EOF
 chmod +x "$BIN_DIR/ccusage-panel.sh"
