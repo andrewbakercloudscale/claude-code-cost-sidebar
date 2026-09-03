@@ -463,6 +463,43 @@ CCUSAGE_CACHE_DIR="$HOME/.cache/ccusage-panel-cache"
 CCUSAGE_CACHE_TTL=10
 mkdir -p "$CCUSAGE_CACHE_DIR"
 
+# ---- corpus-change gate ----
+# The TTL above exists so that N panels (and the cost-alert hook) share ONE
+# fetch per window instead of N -- that part is doing its job and stays at
+# 10s. What it does NOT do is notice that the answer cannot have changed:
+# with TTL == refresh, every redraw finds the entry just expired and pays a
+# full re-scan, even on a pane nobody has typed into for an hour.
+#
+# But a ccusage report is a pure function of the transcript corpus. If no
+# transcript has been written since a cache entry was produced, re-running
+# the query cannot produce a different answer -- so the entry stays valid
+# past its TTL. This checks that directly, and it is ~300x cheaper than the
+# scan it avoids (0.01 CPU-seconds against 2.99 for a full refresh's
+# queries), because `-print -quit` stops at the first newer path rather than
+# walking the whole tree.
+#
+# Deliberately NOT restricted to *.jsonl: a file being added or removed
+# updates its parent directory's mtime but not any file's, so filtering to
+# transcripts alone would miss new sessions and archived ones. Matching
+# every path under the tree is conservative -- it can only cause an
+# unnecessary refetch, never a missed change.
+#
+# The cache file is never touched on a gate hit. Its mtime must keep meaning
+# "the corpus state this content was computed from"; bumping it to now would
+# move the comparison point forward past writes this check has not actually
+# examined.
+corpus_changed_since() {
+  [ -n "$(find "$HOME/.claude/projects" -newer "$1" -print -quit 2>/dev/null)" ]
+}
+
+# `blocks --active` is the one query whose answer moves without the corpus
+# moving: its projection counts down (remainingMinutes) and its burn rate is
+# per-minute, so a gated blocks entry would freeze the "Nh Nm left" readout
+# on an idle pane. It keeps the plain TTL. Everything else -- the
+# daily/weekly/monthly sections load and the session report -- is pure
+# history and is gated.
+ccusage_query_is_gated() { [ "$1" != "blocks" ]; }
+
 # $1... = ccusage subcommand + args, e.g. `blocks --active --json --offline`.
 # Prints the (possibly cached) JSON to stdout.
 ccusage_cached() {
@@ -475,6 +512,11 @@ ccusage_cached() {
   if [ -f "$cache_file" ]; then
     cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
     if (( now_epoch - cache_mtime < CCUSAGE_CACHE_TTL )); then
+      cat "$cache_file"
+      return
+    fi
+    # TTL lapsed, but nothing this answer depends on has changed.
+    if ccusage_query_is_gated "$1" && ! corpus_changed_since "$cache_file"; then
       cat "$cache_file"
       return
     fi
@@ -542,6 +584,11 @@ ccusage_cached_stdin() {
   if [ -f "$cache_file" ]; then
     cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
     if (( now_epoch - cache_mtime < CCUSAGE_CACHE_TTL )); then
+      cat "$cache_file"
+      return
+    fi
+    # TTL lapsed, but nothing this answer depends on has changed.
+    if ccusage_query_is_gated "${1:-}" && ! corpus_changed_since "$cache_file"; then
       cat "$cache_file"
       return
     fi
