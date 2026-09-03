@@ -1259,21 +1259,45 @@ exec 3>&1
 # pty's input queue and lands straight on the shell prompt the moment this
 # script exits — the stray characters/garbled prompt seen whenever the
 # panel dies while someone was mid-keystroke in this pane. Turn off echo
-# and canonical line-buffering, then drain (and discard) whatever arrives
-# in a background loop for as long as the panel runs; restore the tty's
-# original settings on exit no matter how the script ends, or the pane's
-# shell is left echo-less afterward — a new bug in place of the old one.
+# and canonical line-buffering, drain the queue on every tick, and restore
+# the tty's original settings on exit no matter how the script ends, or the
+# pane's shell is left echo-less afterward — a new bug in place of the old.
+#
+# The drain runs INLINE, in the main shell. It used to be a background loop,
+#
+#   ( while :; do read -r -t 0.2 -n 4096 _ 2>/dev/null; done ) &
+#
+# which did not work and was not cheap. POSIX says an asynchronous command
+# in a shell without job control gets its stdin redirected to /dev/null, and
+# a panel is `bash ccusage-panel.sh` — non-interactive, job control off. So
+# that subshell was not reading the tty at all: it read instant EOF from
+# /dev/null, `read` returned immediately, and the `-t 0.2` never once
+# engaged. It spun a full core for the entire life of every panel — measured
+# at 101 minutes of CPU across 103 minutes of wall clock, against 4 seconds
+# for the panel process that owned it — while draining exactly nothing.
+#
+# `min 0 time 0` above makes tty reads non-blocking, so one call returns
+# whatever is queued and the next returns failure on an empty queue: the
+# loop drains and stops on its own. The iteration cap is only a guard
+# against someone leaning on a key; the queue is drained again on exit,
+# which is the moment that actually matters.
+drain_stdin() {
+  [ -n "${ORIG_STTY:-}" ] || return 0
+  local i=0
+  while (( i < 32 )) && read -r -t 0.01 -n 1024 _ 2>/dev/null; do
+    i=$(( i + 1 ))
+  done
+  return 0
+}
 if [ -t 0 ]; then
   ORIG_STTY=$(stty -g 2>/dev/null || true)
   if [ -n "$ORIG_STTY" ]; then
     stty -echo -icanon min 0 time 0 2>/dev/null
     restore_tty() {
+      drain_stdin
       stty "$ORIG_STTY" 2>/dev/null
-      [ -n "${DRAIN_PID:-}" ] && kill "$DRAIN_PID" 2>/dev/null
     }
     trap restore_tty EXIT INT TERM
-    ( while :; do read -r -t 0.2 -n 4096 _ 2>/dev/null; done ) &
-    DRAIN_PID=$!
   fi
 fi
 
@@ -1927,6 +1951,10 @@ while true; do
   (( rows < 10 )) && rows=10
   export COLS="$cols"
 
+
+  # Discard anything typed into this read-only pane since the last tick, so
+  # it cannot land on the shell prompt when the panel exits.
+  drain_stdin
 
   now_epoch=$(date +%s)
   resolve_session
