@@ -63,13 +63,45 @@ cat > "$BIN_DIR/ccusage-panel.sh" <<'PANEL_EOF'
 set -uo pipefail
 export LC_ALL=C LC_NUMERIC=C
 
-# Default matches CCUSAGE_CACHE_TTL below (10s) -- the underlying ccusage
-# data only actually changes that often regardless of how fast this redraws,
-# so a shorter default just repaints identical numbers and burns extra CPU
-# for it. (Was 5s; the displayed "(refresh Ns)" label used to say 5 while
-# the numbers visibly only moved every 10, since they're the same cache.)
+# ---- two refresh tiers ----
+# $REFRESH is the FAST tick: the "This Session" per-turn table only. That
+# table is the one thing that has to track the conversation as it happens,
+# and it is also the cheapest thing here — it reads one transcript file and
+# is cached on that file's own mtime+size (turn_table_cached), so an idle
+# pane re-renders it for free and a pane mid-turn pays exactly one parse per
+# turn that lands.
+#
+# $SLOW_REFRESH is everything else: the summary block, Recent, and Top
+# Sessions Today. Each of those is built from `ccusage` reports, and EVERY
+# ccusage invocation reparses the whole (hundreds-of-MB) transcript corpus —
+# ~3 CPU-seconds a scan. At the old single 10s tier that was ~4 full corpus
+# scans every 10 seconds on a pane being actively typed into, because the
+# corpus-change gate below (correctly) sees the corpus changing on every
+# turn and refetches. That is the CPU heat; none of those figures — a 7/30
+# day baseline, today's total, a 5h block average, the day's session
+# ranking — moves meaningfully inside two minutes.
+#
+# Both rates are printed on the section headers they govern, so what the
+# panel claims about itself stays true. (The label lying about the rate is
+# a bug this panel has had before: it used to say "refresh 5s" while the
+# numbers only moved every 10, since they shared one 10s cache.)
 REFRESH="${1:-10}"
 TURN_ROWS="${2:-12}"
+SLOW_REFRESH="${SLOW_REFRESH:-120}"
+# "10s", "2m", "1m30s" — used to label each section with its own rate.
+fmt_interval() {
+  local s="${1:-0}"
+  if (( s < 60 )); then printf '%ds' "$s"
+  elif (( s % 60 == 0 )); then printf '%dm' "$(( s / 60 ))"
+  else printf '%dm%ds' "$(( s / 60 ))" "$(( s % 60 ))"; fi
+}
+# Computed once, printed on every section header. Each section states the
+# rate it ACTUALLY redraws at, so a glance at the panel tells you how old the
+# number under the heading can be. Nothing here should ever be a hardcoded
+# string: the last time a label named a rate independently of the code that
+# set it, the header claimed 5s while the figures moved every 10.
+RATE_FAST="$(fmt_interval "$REFRESH")"
+RATE_SLOW="$(fmt_interval "$SLOW_REFRESH")"
 # Set by the autolaunch hook (~/.zshrc) for a bare `claude` invocation,
 # which it forces to run with a known --session-id — lets this panel open
 # that EXACT transcript instead of guessing "most recently modified file in
@@ -468,7 +500,22 @@ BUCKET_PYEOF
 # refresh_hourly_buckets() above (atomic on POSIX, no flock dependency),
 # generalized from one fixed python rebuild to arbitrary ccusage subcommands.
 CCUSAGE_CACHE_DIR="$HOME/.cache/ccusage-panel-cache"
-CCUSAGE_CACHE_TTL=10
+# Every ccusage-backed figure now lives on the slow tier, so the shared TTL
+# tracks it -- but deliberately SHORTER than the tier, not equal to it.
+#
+# Equal was measured to be wrong. A slow tick at t=$SLOW_REFRESH finds an
+# entry written at t=0 aged exactly $SLOW_REFRESH, and `age < TTL` is then a
+# coin flip decided by a second's rounding: land on the TTL side and the tick
+# serves the old entry WITHOUT consulting the corpus gate, so the section
+# skips to the tick after -- an observed 240s effective refresh on a header
+# advertising 120s. Which is the panel's oldest bug wearing a new hat.
+#
+# Three quarters of the tier means a slow tick always finds the TTL lapsed
+# and always defers to corpus_changed_since(), which is the right arbiter:
+# refetch iff the answer can actually have changed. The TTL's remaining job
+# is only to stop N panels stampeding the same query at once.
+CCUSAGE_CACHE_TTL=$(( SLOW_REFRESH * 3 / 4 ))
+(( CCUSAGE_CACHE_TTL < 5 )) && CCUSAGE_CACHE_TTL=5
 mkdir -p "$CCUSAGE_CACHE_DIR"
 
 # ---- corpus-change gate ----
@@ -500,13 +547,21 @@ corpus_changed_since() {
   [ -n "$(find "$HOME/.claude/projects" -newer "$1" -print -quit 2>/dev/null)" ]
 }
 
-# `blocks --active` is the one query whose answer moves without the corpus
-# moving: its projection counts down (remainingMinutes) and its burn rate is
-# per-minute, so a gated blocks entry would freeze the "Nh Nm left" readout
-# on an idle pane. It keeps the plain TTL. Everything else -- the
-# daily/weekly/monthly sections load and the session report -- is pure
-# history and is gated.
-ccusage_query_is_gated() { [ "$1" != "blocks" ]; }
+# `blocks --active` used to be exempted from this gate, because its
+# projection counts down (remainingMinutes) and a gated entry would freeze
+# the "Nh Nm left" readout on an idle pane -- so it paid a full corpus scan
+# every tick forever, on the busiest and the idlest pane alike, purely to
+# re-read a clock.
+#
+# It is gated now. The two fields that actually move with the wall clock are
+# both derived from the block's OWN start/end timestamps, which do not
+# change for the life of the block: the panel keeps startTime/endTime as
+# epochs and recomputes "time left" and "elapsed hours" itself on every fast
+# tick (see the loop). Everything genuinely fetched here -- the block's cost
+# and token totals -- can only change when a turn is written, which is
+# exactly what this gate tests. So nothing is exempt: every query is a pure
+# function of the transcript corpus.
+ccusage_query_is_gated() { :; }
 
 # $1... = ccusage subcommand + args, e.g. `blocks --active --json --offline`.
 # Prints the (possibly cached) JSON to stdout.
@@ -1222,28 +1277,12 @@ if [ -t 0 ]; then
   fi
 fi
 
-while true; do
-  # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
-  # whole pane for one frame before the redraw lands, which reads as a
-  # visible flicker every refresh. Staying purely additive-overwrite only
-  # works because clear_eol() (above) truncates every line to $COLS, so a
-  # frame's physical row count can never silently exceed $rows and desync
-  # this cursor-home overwrite against the previous frame.
-  printf '\033[H'
-  # `tput cols`/`tput lines` run inside $(...) have their OWN stdout
-  # redirected to the capture pipe, so the ioctl they'd normally use to ask
-  # the terminal for its real size fails and they silently return the
-  # compiled-in terminfo default (80x24) — a fixed ceiling that has nothing
-  # to do with the pane's actual height. `stty size` doesn't have this
-  # problem because it reads the size off the fd it's given, so pointing it
-  # at fd3 (see above) gets the real, live pane dimensions.
-  read -r rows cols < <(stty size <&3 2>/dev/null)
-  [ -z "$cols" ] && cols=60
-  [ -z "$rows" ] && rows=24
-  (( cols < 40 )) && cols=40
-  (( rows < 10 )) && rows=10
-  export COLS="$cols"
-
+# ---- slow-tier fetch: the active 5h block ----
+# One `ccusage blocks --active` call, on the slow tier. Everything about a
+# block that moves with the clock rather than with the corpus is derived
+# from its start/end epochs by block_clock_tick() below, so this only needs
+# to run when the corpus itself can have changed.
+refresh_active_block() {
   refresh_hourly_buckets
 
   # ---- active 5h block: fetched once here (not down in the ACTIVE BLOCK
@@ -1257,34 +1296,65 @@ while true; do
     # no zone conversion of its own, so without it these clock times render
     # in UTC while everything else in the panel (the header, "This Session"
     # times) is local — a 2h-off block window on any UTC+2 machine.
-    IFS=$'\t' read -r blk_start blk_end blk_cost blk_tokens blk_elapsedSec blk_tpm blk_rem blk_projCost blk_projTokens blk_models <<<"$(jq -r '
+    # startTime/endTime come out as EPOCHS as well as clock strings. The
+    # epochs are what let the fast tick recompute "elapsed" and "time left"
+    # locally every 10s without refetching the block -- see
+    # ccusage_query_is_gated() for why that matters (this query was the last
+    # one paying a full corpus scan per tick just to advance a countdown).
+    IFS=$'\t' read -r blk_start blk_end blk_start_epoch blk_end_epoch blk_cost blk_tokens blk_tpm blk_projCost blk_projTokens blk_models <<<"$(jq -r '
       .blocks[0] |
       [
         (.startTime[0:19]+"Z" | fromdateiso8601 | localtime | strftime("%H:%M")),
         (.endTime[0:19]+"Z"   | fromdateiso8601 | localtime | strftime("%H:%M")),
+        (.startTime[0:19]+"Z" | fromdateiso8601),
+        (.endTime[0:19]+"Z"   | fromdateiso8601),
         .costUSD, .totalTokens,
-        ((.startTime[0:19]+"Z" | fromdateiso8601) as $s | (now - $s)),
         .burnRate.tokensPerMinute,
-        .projection.remainingMinutes, .projection.totalCost, .projection.totalTokens,
+        .projection.totalCost, .projection.totalTokens,
         (.models | join(", "))
       ] | @tsv
     ' <<<"$block_json")"
-    # blk_cph is the block's TRUE average $/hr (cost ÷ elapsed time), not
-    # ccusage's own burnRate.costPerHour — that field is a seconds-scale
-    # instantaneous rate that spikes 10x+ right after any single pricey
-    # turn and decays within minutes (same failure mode already worked
-    # around for "Today's Predicted Value" above), so it disagreed wildly
-    # with the block's actual spend-so-far (e.g. reported $18.93/hr while
-    # the block had spent $0.81 in 44 minutes — a true rate of ~$1.11/hr).
-    # Floor elapsed at 3 minutes for the same reason sess_elapsed_h does.
-    blk_elapsed_h=$(awk -v s="$blk_elapsedSec" 'BEGIN{ h=s/3600; if(h<0.05) h=0.05; print h }')
-    blk_cph=$(awk -v c="$blk_cost" -v h="$blk_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
-    burn_color=$(threshold_color "$blk_cph" "$BURN_YELLOW" "$BURN_RED")
-    burn_label="Normal"
-    [ "$burn_color" = "$C_YELLOW" ] && burn_label="Elevated"
-    [ "$burn_color" = "$C_RED" ] && burn_label="High"
+    has_block=1
   fi
+}
 
+# Recomputed on EVERY fast tick from the block's fixed start/end epochs, so
+# the countdown and the burn rate keep moving between the (slow) fetches of
+# the block itself. Nothing here reads the corpus: elapsed and remaining are
+# pure wall-clock arithmetic, and blk_cost only changes when a turn lands.
+#
+# blk_cph is the block's TRUE average $/hr (cost ÷ elapsed time), not
+# ccusage's own burnRate.costPerHour — that field is a seconds-scale
+# instantaneous rate that spikes 10x+ right after any single pricey turn
+# and decays within minutes (same failure mode already worked around for
+# "Today's Predicted Value" above), so it disagreed wildly with the block's
+# actual spend-so-far (e.g. reported $18.93/hr while the block had spent
+# $0.81 in 44 minutes — a true rate of ~$1.11/hr). Floor elapsed at 3
+# minutes for the same reason sess_elapsed_h does.
+block_clock_tick() {
+  [ "${has_block:-0}" = "1" ] || return
+  local now_s
+  now_s=$(date +%s)
+  IFS=$'\t' read -r blk_elapsed_h blk_cph blk_rem <<<"$(awk \
+    -v now="$now_s" -v st="$blk_start_epoch" -v en="$blk_end_epoch" -v c="$blk_cost" 'BEGIN{
+      h=(now-st)/3600; if(h<0.05) h=0.05
+      rem=int((en-now)/60); if(rem<0) rem=0
+      printf "%.6f\t%.2f\t%d", h, c/h, rem
+    }')"
+  burn_color=$(threshold_color "$blk_cph" "$BURN_YELLOW" "$BURN_RED")
+  burn_label="Normal"
+  [ "$burn_color" = "$C_YELLOW" ] && burn_label="Elevated"
+  [ "$burn_color" = "$C_RED" ] && burn_label="High"
+}
+
+# ---- which transcript is this pane's session? ----
+# Runs on every FAST tick: a session started in this pane after the panel
+# has to appear in the turn table now, not on the next slow tier. It sets
+# globals rather than printing, so it is deliberately NOT called in a
+# subshell -- TOP SESSIONS TODAY needs $sess_id to mark which row is this
+# one, and a command-substitution subshell can read variables from outside
+# itself but never write them back out.
+resolve_session() {
   # ---- current session identity: fetched once here (not inside the
   # guaranteed subshell below) so TOP SESSIONS TODAY, further down, can
   # mark which row is THIS session — a command-substitution subshell can
@@ -1324,14 +1394,25 @@ while true; do
     # explicit pin.
     latest=""
     newest_birth=0
-    for f in "$project_dir"/*.jsonl; do
-      [ -f "$f" ] || continue
-      birth=$(stat -f %B "$f" 2>/dev/null) || continue
+    # ONE `stat` for the whole directory, not one fork per transcript. This
+    # runs on every fast tick (a session started in this pane has to show up
+    # now, not on the next slow tier), and a long-lived project directory
+    # routinely holds dozens of past transcripts -- that was dozens of forks
+    # every $REFRESH seconds to answer what a single fork answers.
+    #
+    # `%B %N` puts the birth epoch first and the path last, so `read -r birth
+    # f` gives f the rest of the line and paths containing spaces survive.
+    # On any platform without `stat -f` (i.e. not macOS) this prints nothing
+    # and $latest stays empty -- exactly what the per-file `|| continue`
+    # produced before, and the single-transcript fallback below still applies.
+    while read -r birth f; do
+      [ -n "$f" ] || continue
+      case "$birth" in ''|*[!0-9]*) continue;; esac
       if (( birth > PANEL_START_EPOCH && birth > newest_birth )); then
         newest_birth=$birth
         latest="$f"
       fi
-    done
+    done < <(stat -f '%B %N' "$project_dir"/*.jsonl 2>/dev/null)
     # No post-launch file yet — e.g. a brand-new session whose first line
     # (or even --session-id pin) hasn't landed on disk. Only fall back to
     # "most recently modified in this directory" when that guess is
@@ -1371,15 +1452,21 @@ while true; do
     # the first few seconds swings wildly and would flash red/green noise.
     sess_elapsed_h=$(awk -v s="$sess_start_epoch" -v n="$(date +%s)" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
   fi
+}
 
-  # Everything through the per-turn table is GUARANTEED — printed in full,
-  # never truncated, even on a short pane — so "show N turns" always means
-  # N turns, not "N turns if there's room after the other sections." Only
-  # the sections below it (active block onward, less essential) compete
-  # for whatever pane height is left over.
-  guaranteed=$( {
-  printf '%sClaude Code Usage — %s (refresh %ss)%s\n' \
-    "$C_BOLD$C_CYAN" "$(date '+%a %H:%M:%S')" "$REFRESH" "$C_RESET"
+# ---- slow-tier render: the summary block ----
+# Every figure in here is built from a `ccusage` report, and every ccusage
+# invocation reparses the whole transcript corpus. Nothing it shows -- a
+# 7/30-day baseline, the day so far, a 5h block average, the plan line --
+# moves meaningfully inside $SLOW_REFRESH, so it is rendered once per slow
+# tick into a string and reprinted verbatim on the fast ticks between.
+#
+# The clock in the header is therefore the time this block was COMPUTED,
+# which is the honest reading of it: it is the "as of" stamp for every
+# number underneath, and it advances at exactly the rate the header claims.
+build_summary() {
+  printf '%sClaude Code Usage — %s (refresh %s)%s\n' \
+    "$C_BOLD$C_CYAN" "$(date '+%a %H:%M:%S')" "$RATE_SLOW" "$C_RESET"
   # ---- baselines: average per-session cost over 7 days, total spend over
   # 30 days. Session average needs >=3 real sessions to trust — otherwise a
   # single earlier tiny/huge session would skew it.
@@ -1631,8 +1718,22 @@ while true; do
   fi
   proxy_state_line
   license_line
-  echo
+}
 
+# ---- fast-tier render: this session's per-turn table ----
+# The one section that has to track the conversation as it happens, and the
+# cheapest one here: it reads a single transcript file and is cached on that
+# file's own mtime+size (turn_table_cached), so an idle pane re-renders it
+# for free and an active one pays exactly one parse per turn that lands. No
+# ccusage call, no corpus scan -- which is why it can afford to run at
+# $REFRESH while everything else runs at $SLOW_REFRESH.
+build_session_table() {
+  # The blank separator line between the summary block and this one. It
+  # lives at the top of this function rather than the bottom of
+  # build_summary(), because $(...) strips trailing newlines -- a blank line
+  # emitted as the last thing in the summary would simply not survive into
+  # the cached string.
+  echo
   # ---- per-turn breakdown of the current session ----
   # ccusage doesn't expose per-message cost (session/daily/blocks only give
   # per-session/day/block totals), so this reads the transcript directly and
@@ -1645,31 +1746,36 @@ while true; do
     # Printed here, not by the (cached) table below: burn rate is a live,
     # every-refresh figure independent of the transcript file, so it can't
     # be part of output that's only recomputed when that file changes.
-    printf '%sThis Session%s, Burn  %s%s/hr%s\n' \
-      "$C_BOLD$C_CYAN" "$C_RESET" "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" "$C_RESET"
+    # The rate label goes LAST on this line deliberately: on a narrow pane
+    # clear_eol() truncates from the right, so the label is what gets cut,
+    # never the burn figure it annotates.
+    printf '%sThis Session%s, Burn  %s%s/hr%s %s(refresh %s)%s\n' \
+      "$C_BOLD$C_CYAN" "$C_RESET" "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" "$C_RESET" \
+      "$C_DIM" "$RATE_FAST" "$C_RESET"
     turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
       "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
       "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
       "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_DIM"
   else
-    header "This Session"
+    header "This Session (refresh $RATE_FAST)"
     echo "  (no active Claude Code session found)"
   fi
-  } )
-  used_lines=$(printf '%s\n' "$guaranteed" | wc -l | tr -d ' ')
-  remaining=$(( rows - 1 - used_lines ))
+}
 
-  # Both blocks are fully computed into variables and only written to the
-  # terminal once, together, below — previously the guaranteed block was
-  # printed immediately and the trailing Recent/Top Sessions block followed
-  # seconds later (once its several sequential `ccusage ...` calls
-  # finished), so every refresh visibly redrew in two separate passes. A
-  # slow trailing fetch now delays the whole frame instead of half-updating
-  # it: the previous frame just stays up a little longer, which reads as a
-  # pause, not a tear.
-  trailing=""
-  if (( remaining > 0 )); then
-  trailing=$( {
+# ---- slow-tier render: Recent + Top Sessions Today ----
+# Same reasoning as build_summary(), plus the expensive bit: Top Sessions
+# fans out one session_today_tokens_cached() per session active today. Each
+# of those is a `ccusage session -i <sid>` whose -i filters only the OUTPUT
+# -- the scan is the whole corpus either way -- and each sid is its own
+# cache key, so the mtime cache dedupes a session against itself but never
+# the eight against each other. On the old single tier a day with eight
+# live sessions meant eight concurrent full corpus scans every 10 seconds.
+#
+# Emitted untruncated; the caller applies `head -n $remaining` at PRINT
+# time, not here, because the height left over depends on how many rows the
+# fast-tier turn table happens to have this tick.
+build_trailing() {
+  echo
   echo
 
   # ---- recent: today's totals/models + 3-day trend + week/month, one
@@ -1677,12 +1783,13 @@ while true; do
   # with a bar chart eating 3 rows for 3 numbers — merged so this whole
   # block reliably fits above the fold instead of scrolling off a short
   # pane.
-  header "Recent"
-  # Same query as today_daily_json above ("today's spend + EOD forecast") —
-  # that's computed inside the separate `guaranteed=$( { ... } )` subshell
-  # above, so its value doesn't survive into this one; re-fetching here
-  # goes through ccusage_cached, so within the same $CCUSAGE_CACHE_TTL
-  # window this is a cache read, not a second ccusage fork.
+  header "Recent (refresh $RATE_SLOW)"
+  # Same query as today_daily_json in build_summary() — that runs in its own
+  # $(...) subshell, so its value doesn't survive into this one. Re-fetching
+  # here goes through ccusage_cached(), and build_summary() and this function
+  # are called back to back on the same slow tick, so the entry is always
+  # well inside its TTL by the time this reads it: a cache read, never a
+  # second ccusage fork.
   daily_json=$(today_daily_shape "$(recent_sections)")
   if [ -n "$daily_json" ] && [ "$(jq -r '.daily | length' <<<"$daily_json" 2>/dev/null)" != "0" ]; then
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
@@ -1727,7 +1834,7 @@ while true; do
   echo
 
   # ---- top sessions today: which session is consuming the day's spend ----
-  header "Top Sessions Today"
+  header "Top Sessions Today (refresh $RATE_SLOW)"
   session_json=$(sessions_window "$(all_sessions)" "$(date +%Y-%m-%d)" "")
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     # ccusage's per-session totalCost/totalTokens are all-time-per-session,
@@ -1743,11 +1850,20 @@ while true; do
     # its token share.
     today_str=$(date +%Y-%m-%d)
     tmpdir=$(mktemp -d)
+    # Wait on the pids we actually spawned, never a bare `wait`. This runs
+    # inside a $(...) command substitution, and such a subshell inherits the
+    # PARENT's job table without those jobs being its children -- so a bare
+    # `wait` here reaches the panel's own stdin-drain background loop, prints
+    # "pid N is not a child of this shell", and never retires the entry: it
+    # spins, emitting that line forever. (It was survivable only while this
+    # block sat inside a `| head -n` pipeline, which resets the job table.)
+    fanout_pids=""
     while IFS=$'\t' read -r sid _ _ _; do
       [ -z "$sid" ] && continue
       ( session_today_tokens_cached "$sid" "$today_str" > "$tmpdir/$sid.tok" ) &
+      fanout_pids="$fanout_pids $!"
     done < <(jq -r '.session[] | [.period, .totalCost, .totalTokens, .metadata.lastActivity] | @tsv' <<<"$session_json")
-    wait
+    for fp in $fanout_pids; do wait "$fp" 2>/dev/null; done
 
     top_rows=$(while IFS=$'\t' read -r sid all_cost all_tok slast; do
       [ -z "$sid" ] && continue
@@ -1778,7 +1894,77 @@ while true; do
   else
     echo "  (none)"
   fi
-  } | head -n "$remaining" )
+}
+
+# Slow-tier render cache: the last string each slow section produced, plus
+# when it was produced. A pane width change forces a rebuild too -- the
+# summary truncates the folder name against $cols, so a resized pane would
+# otherwise keep a stale-width line up for as long as $SLOW_REFRESH.
+last_slow=0
+last_cols=0
+summary_block=""
+trailing_raw=""
+
+while true; do
+  # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
+  # whole pane for one frame before the redraw lands, which reads as a
+  # visible flicker every refresh. Staying purely additive-overwrite only
+  # works because clear_eol() (above) truncates every line to $COLS, so a
+  # frame's physical row count can never silently exceed $rows and desync
+  # this cursor-home overwrite against the previous frame.
+  printf '\033[H'
+  # `tput cols`/`tput lines` run inside $(...) have their OWN stdout
+  # redirected to the capture pipe, so the ioctl they'd normally use to ask
+  # the terminal for its real size fails and they silently return the
+  # compiled-in terminfo default (80x24) — a fixed ceiling that has nothing
+  # to do with the pane's actual height. `stty size` doesn't have this
+  # problem because it reads the size off the fd it's given, so pointing it
+  # at fd3 (see above) gets the real, live pane dimensions.
+  read -r rows cols < <(stty size <&3 2>/dev/null)
+  [ -z "$cols" ] && cols=60
+  [ -z "$rows" ] && rows=24
+  (( cols < 40 )) && cols=40
+  (( rows < 10 )) && rows=10
+  export COLS="$cols"
+
+
+  now_epoch=$(date +%s)
+  resolve_session
+
+  slow_due=0
+  (( now_epoch - last_slow >= SLOW_REFRESH )) && slow_due=1
+  [ "$cols" != "$last_cols" ] && slow_due=1
+
+  (( slow_due )) && refresh_active_block
+  # Always: re-derives the countdown and the $/hr denominator from the
+  # block's fixed epochs. Pure arithmetic, no fetch.
+  block_clock_tick
+
+  if (( slow_due )); then
+    summary_block=$(build_summary)
+    trailing_raw=$(build_trailing)
+    last_slow=$now_epoch
+    last_cols=$cols
+  fi
+
+  # Everything through the per-turn table is GUARANTEED — printed in full,
+  # never truncated, even on a short pane — so "show N turns" always means
+  # N turns, not "N turns if there's room after the other sections." Only
+  # the sections below it compete for whatever pane height is left over.
+  guaranteed="$summary_block"$'\n'"$(build_session_table)"
+  used_lines=$(printf '%s\n' "$guaranteed" | wc -l | tr -d ' ')
+  remaining=$(( rows - 1 - used_lines ))
+
+  # Both blocks are written to the terminal once, together, below —
+  # previously the guaranteed block was printed immediately and the trailing
+  # Recent/Top Sessions block followed seconds later (once its several
+  # sequential `ccusage ...` calls finished), so every refresh visibly
+  # redrew in two separate passes. A slow trailing fetch delays the whole
+  # frame instead of half-updating it: the previous frame just stays up a
+  # little longer, which reads as a pause, not a tear.
+  trailing=""
+  if (( remaining > 0 )) && [ -n "$trailing_raw" ]; then
+    trailing=$(printf '%s\n' "$trailing_raw" | head -n "$remaining")
   fi
 
   printf '%s\n' "$guaranteed" | clear_eol

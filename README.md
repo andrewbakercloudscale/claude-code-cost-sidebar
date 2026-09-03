@@ -92,6 +92,39 @@ You can also run either panel manually at any time, in any terminal:
 ~/.local/bin/opencode-panel.sh [refresh_seconds] [turn_rows]
 ```
 
+### Refresh tiers (Claude panel)
+
+The Claude panel redraws on two clocks, and **each section header states its
+own rate** so you can always see how old the number under it can be:
+
+| Section | Default rate | Argument |
+|---|---|---|
+| `This Session` (per-turn table + burn rate) | 10s | `refresh_seconds` (arg 1) |
+| Header summary, `Recent`, `Top Sessions Today` | 2m | `SLOW_REFRESH` env var |
+
+The split exists because the two tiers cost wildly different amounts. The
+per-turn table reads one transcript file and is cached on that file's own
+mtime+size, so an idle pane re-renders it for free — it can afford to be
+near-live. Everything else is built from `ccusage` reports, and every
+`ccusage` invocation reparses the whole transcript corpus (hundreds of MB,
+~0.3–1s of CPU each); at a single 10s tier an actively-used pane was paying
+several of those *every ten seconds*, which is what made the fans spin.
+
+```bash
+# near-live turns, hourly summary
+SLOW_REFRESH=3600 ~/.local/bin/ccusage-panel.sh 5 12
+
+# everything slow, for a background monitor
+SLOW_REFRESH=600 ~/.local/bin/ccusage-panel.sh 30 12
+```
+
+Both tiers sit behind a corpus-change gate: if nothing has been written under
+`~/.claude/projects` since a cached answer was computed, that answer cannot
+have changed, so the slow tier costs nothing at all on an idle pane no matter
+how often it comes round. The block countdown and `$/hr` denominator are
+derived locally from the block's own start/end timestamps, so they keep
+moving between fetches without one.
+
 ## FAQ
 
 - **Sonnet 5 (and Fable 5) burns through tokens much faster than Sonnet 4.6 did on the same kind of task — is there a way to cap it back to a 200k context window?** Yes. Set `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` in your shell profile. Claude Code then treats Sonnet 5 / Fable 5 as having a 200k context window instead of their native 1M, removes the 1M variant from the model picker, and — this is the part that actually matters for cost — **auto-compaction kicks in at the 200k boundary**, the same discipline that was implicitly keeping 4.6's token usage in check. You don't need to switch models back to get that behavior. The Claude panel shows which cap is currently in effect (`🧭 Context cap: 200k (forced via CLAUDE_CODE_DISABLE_1M_CONTEXT)` vs `1M (native)`) so it's visible at a glance rather than something you have to remember you set.
