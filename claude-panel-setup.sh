@@ -256,13 +256,21 @@ context_window_size() {
   printf '%s' "$size"
 }
 # model id -> green (cheapest tier, e.g. Haiku) / yellow (mid, e.g. Sonnet) /
-# red (most expensive, e.g. Opus/Fable/Mythos) — mirrors the PRICES table in
+# cyan (most expensive, e.g. Opus/Fable/Mythos) — mirrors the PRICES table in
 # the per-turn-table python block below, but keyed on model-name substrings
 # since this runs in bash, before that table's exact $/1M figures are in scope.
+#
+# The top tier is cyan and NOT red on purpose. Red everywhere else in this
+# panel means "a threshold was crossed" — an over-average session, a burn
+# rate past BURN_RED, a turn that spiked. The model is a deliberate choice
+# that holds for the whole session, so colouring it red made the panel open
+# on a standing alarm that never cleared and could not be acted on, which
+# dulls the red that does mean something. Spend on an expensive model still
+# shows up in red, on the Session/Today/Burn lines that actually measure it.
 model_tier_color() {
   case "${1,,}" in
     *haiku*) printf '%s' "$C_GREEN" ;;
-    *opus*|*fable*|*mythos*) printf '%s' "$C_RED" ;;
+    *opus*|*fable*|*mythos*) printf '%s' "$C_CYAN" ;;
     *) printf '%s' "$C_YELLOW" ;;
   esac
 }
@@ -872,12 +880,16 @@ turn_table_cached() {
     printf '%s\n' "$stamp"
     python3 - "$path" "$@" <<'PYEOF'
 import json, os, sys
+from datetime import datetime
 
 path, max_rows, c_head, c_reset = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 col_turn, col_model, col_input, col_cache, col_cost, col_mid_tier = sys.argv[5:11]
 col_purple = sys.argv[11]
 ctx_yellow_t, ctx_red_t, ctx_purple_t = (float(x) for x in sys.argv[12:15])
 delta_yellow_mult, delta_red_mult, delta_floor = (float(x) for x in sys.argv[15:18])
+# Appended last so every index above keeps its meaning. Used for the cells a
+# secondary-served turn genuinely cannot fill in.
+c_dim = sys.argv[18]
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-sonnet-5":   (2.00, 10.00),
@@ -894,6 +906,12 @@ DEFAULT_PRICE = (3.00, 15.00)
 CACHE_READ_MULT, CACHE_WRITE_5M_MULT, CACHE_WRITE_1H_MULT = 0.1, 1.25, 2.0
 
 def model_label(model_id):
+    # A secondary-served id is not an Anthropic one and must not be forced
+    # through the "claude-<name>-<major>-<minor>" shape below, which turns
+    # "zai-org/GLM-5.3" into the nonsense "Zai org/GLM.5.3". Show the bare
+    # model, dropping the vendor path segment: "zai-org/GLM-5.3" -> "GLM-5.3".
+    if not model_id.startswith("claude-"):
+        return model_id.rsplit("/", 1)[-1]
     rest = model_id.removeprefix("claude-")
     parts = rest.split("-")
     name = parts[0].capitalize()
@@ -960,6 +978,72 @@ def severity_rank(color):
         return 1
     return 0
 
+# --- which turns did claude-burst actually send to the secondary? ----------
+#
+# The transcript cannot answer this. When an overflow window is active the
+# gateway translates the reply from an openai-compatible secondary back into
+# Anthropic's wire shape and, deliberately (see ServeModeler's doc comment in
+# claude-burst's internal/router/provider.go), echoes back the model Claude
+# Code ASKED for rather than the one that served -- Claude Code must see the
+# id it requested. So ~/.claude/projects/*.jsonl records "claude-opus-5" for
+# a turn GLM actually answered, and this table priced it at Opus rates: a
+# confident dollar figure for a request Anthropic never billed.
+#
+# The gateway's own metrics.jsonl has the truth (slot, real model, tokens),
+# and its timestamps match the transcript's to within milliseconds because
+# both are written at the end of the same response. Match on time, and
+# require the output-token count to agree as well so a coincidental
+# same-second primary turn can never be mislabelled.
+BURST_METRICS = os.path.expanduser("~/.config/claude-burst/metrics.jsonl")
+MATCH_WINDOW_S = 3.0
+
+def parse_iso(t):
+    if not t:
+        return None
+    try:
+        # Python's fromisoformat rejects the trailing "Z" the transcript uses.
+        return datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+def load_secondary_events():
+    """[(epoch, model, output_tokens)] for secondary-served requests."""
+    out = []
+    try:
+        with open(BURST_METRICS) as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("slot") != "secondary":
+                    continue
+                ts = parse_iso(e.get("time"))
+                if ts is None or not e.get("model"):
+                    continue
+                out.append((ts, e["model"], e.get("output_tokens"), e.get("input_tokens")))
+    except OSError:
+        return []
+    return out
+
+SECONDARY_EVENTS = load_secondary_events()
+
+def secondary_event_for(turn_ts, out_tok):
+    """(model, input_tokens) for the secondary hop that served this turn, or
+    None if it went to primary."""
+    if turn_ts is None:
+        return None
+    best, best_gap = None, MATCH_WINDOW_S
+    for ts, model, ev_out, ev_in in SECONDARY_EVENTS:
+        gap = abs(ts - turn_ts)
+        if gap > best_gap:
+            continue
+        # Token agreement is what makes this safe rather than merely likely.
+        if ev_out is not None and out_tok is not None and ev_out != out_tok:
+            continue
+        best, best_gap = (model, ev_in), gap
+    return best
+
 turns, seen = [], set()
 try:
     with open(path) as f:
@@ -982,6 +1066,7 @@ for line in lines:
     seen.add(mid)
 
     model = msg.get("model", "unknown")
+    turn_ts = parse_iso(d.get("timestamp"))
     in_tok = usage.get("input_tokens", 0)
     out_tok = usage.get("output_tokens", 0)
     cr_tok = usage.get("cache_read_input_tokens", 0)
@@ -999,6 +1084,23 @@ for line in lines:
     total_ctx = in_tok + cr_tok + cc_tok
     cache_pct = (cr_tok / total_ctx * 100) if total_ctx else 0.0
 
+    # Substitute the model that really served before pricing, not after: a
+    # secondary model has no entry in PRICES, and falling back to
+    # DEFAULT_PRICE would just swap one invented figure for another. Cost is
+    # reported as unknown for these instead.
+    ev = secondary_event_for(turn_ts, out_tok)
+    is_secondary = ev is not None
+    if is_secondary:
+        model, ev_in = ev
+        # Turns served before claude-burst's 2026-09-03 message_delta fix were
+        # recorded with "input_tokens": 0 -- the translator sent only
+        # output_tokens, so message_start's placeholder 0 stood. The gateway
+        # logged the real count either way, so prefer its figure over a zero
+        # the transcript never actually measured. Post-fix turns agree, and
+        # this line is then a no-op.
+        if not total_ctx and ev_in:
+            in_tok, total_ctx = ev_in, ev_in
+
     price_in, price_out = PRICES.get(model, DEFAULT_PRICE)
     cost = (
         in_tok * price_in
@@ -1008,11 +1110,15 @@ for line in lines:
         + cw_5m * price_in * CACHE_WRITE_5M_MULT
     ) / 1_000_000
 
-    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model))
+    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model, is_secondary))
 
 total_n = len(turns)
 shown = turns[-max_rows:]
-avg_delta = (sum(t[2] for t in turns) / total_n) if total_n else 0.0
+# Averaged over primary turns only. A secondary turn reports no cache at all,
+# so its whole prompt lands in the delta column; mixing those in inflates the
+# baseline and suppresses the very spikes delta_color exists to flag.
+primary_turns = [t for t in turns if not t[6]]
+avg_delta = (sum(t[2] for t in primary_turns) / len(primary_turns)) if primary_turns else 0.0
 turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
 model_h = f"{col_model}{'Model':<10}{c_reset}"
 input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
@@ -1024,12 +1130,32 @@ if shown:
     # Newest turn first — this table sits at a fixed position above the
     # sections below it, so the most recent activity would otherwise be the
     # one row that scrolls out of view first as the session grows.
+    saw_secondary = False
     for i in reversed(range(len(shown))):
-        label, total_ctx, delta, cache_pct, cost, model = shown[i]
+        label, total_ctx, delta, cache_pct, cost, model, is_secondary = shown[i]
         turn_no = start_idx + i
         total_str, delta_str = fmt_k(total_ctx), fmt_k(delta)
         plain_cell = f"{total_str} (+{delta_str})"
         pad = " " * max(0, 12 - len(plain_cell))
+        if is_secondary:
+            # Marked in the one column that has room, and explained in a
+            # legend below rather than by a wider Model column -- this pane
+            # is a third of a terminal wide and every column is already at
+            # its minimum.
+            saw_secondary = True
+            label = (label[:9] + "*") if len(label) > 9 else label + "*"
+            # Everything downstream of here is an Anthropic-shaped inference
+            # that does not survive the trip to a third-party model:
+            #   - cost: no pricing entry, so there is no figure to show
+            #   - cache: the secondary reports no prompt caching at all, so a
+            #     0% here means "not applicable", not "cache missed" -- and
+            #     the cache bands would paint it purple, an alarm for a
+            #     condition that cannot occur
+            #   - context %: the window size is unknown, so ctx_pct is noise
+            print(f"  {col_purple}{turn_no:<5}{label:<10}{c_reset}"
+                  f"{pad}{total_str} (+{delta_str})"
+                  f"{c_dim}{'--':>6}{'?':>8}{c_reset}")
+            continue
         ctx_pct = total_ctx / context_window_size(model) * 100
         # Cache hit % is the odd one out: low is bad (unlike ctx_pct/delta,
         # where high is bad), so its bands run the opposite direction —
@@ -1055,6 +1181,8 @@ if shown:
             input_cell = f"{pad}{total_colored} (+{delta_colored})"
             cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
             print(f"  {turn_no:<5}{label:<10}{input_cell}{cache_cell}{cost_cell:>8}")
+    if saw_secondary:
+        print(f"  {c_dim}* served by claude-burst secondary; not Anthropic spend{c_reset}")
 PYEOF
   } > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
   tail -n +2 "$cache_file"
@@ -1522,7 +1650,7 @@ while true; do
     turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
       "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
       "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
-      "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT"
+      "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_DIM"
   else
     header "This Session"
     echo "  (no active Claude Code session found)"
