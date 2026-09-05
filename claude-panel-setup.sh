@@ -2198,6 +2198,41 @@ fi
 ghostty_procs=$(pgrep -x ghostty 2>/dev/null | wc -l | tr -d ' ')
 log "context: ${ghostty_procs} ghostty process(es) running"
 
+# WHICH Ghostty instance is ours? Not a rhetorical question: every Finder
+# Service launch runs `Ghostty.app/Contents/MacOS/ghostty -e ...` directly,
+# which starts a new app INSTANCE rather than a new window inside the
+# existing one, so several processes named "ghostty" coexist as a matter of
+# routine — one per launched window, plus any whose window was closed while
+# a child shell kept the process alive.
+#
+# Everything below used to identify its target as "the frontmost process
+# named ghostty", which is only unambiguous while exactly one instance
+# exists. It stopped being true on 2026-09-05: macOS reported a two-day-old
+# instance as frontmost, that instance had no windows left, and all three
+# attempts died on `Can't get window 1 of application process "ghostty".
+# Invalid index. (-1719)` while the real window sat there in focus.
+#
+# Our own instance is always an ancestor of this script (ghostty -> login ->
+# shell -> here), so walk up and get its pid. Everything downstream then
+# addresses it by unix id instead of by name. If the walk fails we fall back
+# to the old name match rather than refusing to launch, but the log says so.
+ghostty_pid=""
+walk=$$
+depth=0
+while [ -n "$walk" ] && [ "$walk" -gt 1 ] && [ "$depth" -lt 12 ]; do
+  if [ "$(ps -o comm= -p "$walk" 2>/dev/null | sed 's|.*/||')" = "ghostty" ]; then
+    ghostty_pid="$walk"
+    break
+  fi
+  walk=$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')
+  depth=$((depth + 1))
+done
+if [ -n "$ghostty_pid" ]; then
+  log "context: our Ghostty instance is pid $ghostty_pid (walked $depth level(s) of process ancestry)"
+else
+  log "context: could not identify our Ghostty instance from process ancestry — falling back to matching on the name 'ghostty', which is ambiguous when several instances are running"
+fi
+
 # A bare permission-probe first — if Accessibility access isn't granted,
 # every subsequent step will fail the same way, so say so once clearly
 # instead of three confusing retries.
@@ -2219,22 +2254,42 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
 
   before_pids=$(panel_pids)
 
+  # Ask our own instance to come to the front before polling. This isn't
+  # cosmetic: System Events delivers `keystroke` to whatever application is
+  # frontmost, not to the process an enclosing `tell` names, so targeting
+  # the right instance and typing into the right window are one and the
+  # same requirement — a check that merely observes frontmost can be
+  # satisfied by an instance we are not about to type into.
+  if [ -n "$ghostty_pid" ]; then
+    osascript -e "tell application \"System Events\" to set frontmost of (first application process whose unix id is $ghostty_pid) to true" >/dev/null 2>&1
+  fi
+
   # Brand-new windows can take a beat to become frontmost at the
   # Accessibility API level — poll instead of checking once and giving up.
   front=""
   polls=0
   for _ in $(seq 1 20); do
     polls=$((polls + 1))
-    front=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)
-    [ "$front" = "ghostty" ] && break
+    if [ -n "$ghostty_pid" ]; then
+      front=$(osascript -e 'tell application "System Events" to get unix id of first application process whose frontmost is true' 2>/dev/null)
+      [ "$front" = "$ghostty_pid" ] && break
+    else
+      front=$(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null)
+      [ "$front" = "ghostty" ] && break
+    fi
     sleep 0.1
   done
-  if [ "$front" != "ghostty" ]; then
+  if [ -n "$ghostty_pid" ] && [ "$front" != "$ghostty_pid" ]; then
+    log "attempt $attempt: our Ghostty instance (pid $ghostty_pid) never became frontmost after $polls polls (last saw pid '$front') — retrying"
+    sleep 0.5
+    continue
+  fi
+  if [ -z "$ghostty_pid" ] && [ "$front" != "ghostty" ]; then
     log "attempt $attempt: frontmost never became ghostty after $polls polls (last saw '$front') — retrying"
     sleep 0.5
     continue
   fi
-  log "attempt $attempt: frontmost confirmed ghostty after $polls poll(s)"
+  log "attempt $attempt: frontmost confirmed ($([ -n "$ghostty_pid" ] && echo "pid $ghostty_pid" || echo "name match")) after $polls poll(s)"
 
   # Block real keyboard input for the settle delay + the whole keystroke
   # sequence below (worst case, a wide monitor's resize-repeat loop, runs
@@ -2258,10 +2313,23 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
   # resize math, and every keystroke — happens inside ONE osascript call.
   # Splitting this across two calls previously let frontmost change out
   # from under the second one, and both halves would separately exit 0.
+  # 0 means "we never worked out which instance is ours" — the AppleScript
+  # then falls back to the old, ambiguous name match.
+  TARGET_PID="${ghostty_pid:-0}"
+
   result=$(osascript <<APPLESCRIPT 2>&1
 tell application "System Events"
   set frontApp to first application process whose frontmost is true
-  if name of frontApp is not "ghostty" then return "skip: frontmost is " & (name of frontApp)
+  if $TARGET_PID is not 0 then
+    if unix id of frontApp is not $TARGET_PID then return "skip: frontmost is " & (name of frontApp) & " pid " & (unix id of frontApp) & ", not our ghostty instance $TARGET_PID"
+  else
+    if name of frontApp is not "ghostty" then return "skip: frontmost is " & (name of frontApp)
+  end if
+  -- A Ghostty instance whose windows have all been closed still exists as
+  -- a process, and asking it for `front window` raises a bare "Invalid
+  -- index (-1719)" that reads like a permissions or scripting fault rather
+  -- than the plain fact it is. Say the plain fact instead.
+  if (count of windows of frontApp) is 0 then return "skip: ghostty pid " & (unix id of frontApp) & " has no windows"
   tell frontApp
     set winSize to size of front window
     set winWidth to item 1 of winSize
