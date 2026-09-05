@@ -877,7 +877,7 @@ correctly reports "unknown" — and that answer then sits on screen for up to
 two minutes after it stopped being true.
 
 The scan was never the problem. Run by hand against the reported session it
-returned `claude-opus-5 / Opus 5 / hamadi-labs-audit` in one pass; the fix is
+returned `claude-opus-5 / Opus 5 / <project>` in one pass; the fix is
 in *when the header is redrawn*, not in what it computes. Identity is not on
 a cadence at all — it changes when it changes, and noticing costs nothing
 because `resolve_session` has already run. So the frame is now due on the

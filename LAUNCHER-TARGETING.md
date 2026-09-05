@@ -94,9 +94,9 @@ which was the user's. And because the typed text lands in a shell that runs
 the `~/.zshrc` autolaunch hook, it recursed:
 
 ```
-15:47:04 ... PWD=/Users/…/hamadi-labs-audit
+15:47:04 ... PWD=/Users/…/<project-a>
 15:47:09 attempt 1: VERIFIED — new panel process(es): 44768 45371 45442 45443 45475 45485
-15:47:11 start: … PWD=/Users/…/wordpress-seo-ai-optimizer PIN_SID=none
+15:47:11 start: … PWD=/Users/…/<project-b> PIN_SID=none
 15:47:16 attempt 1: VERIFIED — new panel process(es): 45887
 ```
 
