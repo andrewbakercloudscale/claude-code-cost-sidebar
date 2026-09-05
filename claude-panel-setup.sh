@@ -2590,39 +2590,10 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
 
   result=$(osascript <<APPLESCRIPT 2>&1
 tell application "System Events"
-  -- Ask OUR instance whether it is frontmost. Do not ask which process is.
-  --
-  -- `first application process whose frontmost is true` returns whichever
-  -- match comes first in System Events' own process order, and with several
-  -- Ghostty instances alive more than one can carry a stale frontmost=true
-  -- at the same moment. It then answers with the OLDEST such instance, not
-  -- the focused one. That is why the shell-side poll a second earlier logged
-  -- "frontmost confirmed (pid 37092)" and this script, asking the identical
-  -- question, read pid 87107 and skipped -- three attempts out of three,
-  -- every new window, for as long as a second Ghostty was open. Measured:
-  -- with three instances running, `frontmost of <pid>` was true for exactly
-  -- one of them and false for the others, while the "first ... whose"
-  -- form returned the wrong one.
-  --
-  -- The raise is here rather than only in the shell above for the reason
-  -- the comment above gives: a raise a second and two subprocesses away
-  -- from the check that depends on it is the split this single call exists
-  -- to avoid. Both are wrapped in try -- the instance can exit between the
-  -- two, and an unhandled error here reads as a permissions fault rather
-  -- than the plain fact that the window is gone.
+  set frontApp to first application process whose frontmost is true
   if $TARGET_PID is not 0 then
-    set frontApp to missing value
-    try
-      set frontApp to first application process whose unix id is $TARGET_PID
-    end try
-    if frontApp is missing value then return "skip: ghostty instance $TARGET_PID is gone"
-    try
-      set frontmost of frontApp to true
-      delay 0.2
-    end try
-    if frontmost of frontApp is false then return "skip: could not bring ghostty pid $TARGET_PID to the front"
+    if unix id of frontApp is not $TARGET_PID then return "skip: frontmost is " & (name of frontApp) & " pid " & (unix id of frontApp) & ", not our ghostty instance $TARGET_PID"
   else
-    set frontApp to first application process whose frontmost is true
     if name of frontApp is not "ghostty" then return "skip: frontmost is " & (name of frontApp)
   end if
   -- A Ghostty instance whose windows have all been closed still exists as
