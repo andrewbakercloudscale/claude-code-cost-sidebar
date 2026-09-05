@@ -553,9 +553,73 @@ CCUSAGE_CACHE_DIR="$HOME/.cache/ccusage-panel-cache"
 # and always defers to corpus_changed_since(), which is the right arbiter:
 # refetch iff the answer can actually have changed. The TTL's remaining job
 # is only to stop N panels stampeding the same query at once.
-CCUSAGE_CACHE_TTL=$(( SLOW_REFRESH * 3 / 4 ))
-(( CCUSAGE_CACHE_TTL < 5 )) && CCUSAGE_CACHE_TTL=5
+TTL_LIVE=$(( SLOW_REFRESH * 3 / 4 ))
+(( TTL_LIVE < 5 )) && TTL_LIVE=5
+
+# The history bucket serves a stale answer even when the corpus HAS changed
+# and the answer is known to be different. That is a real departure from the
+# rule above -- "refetch iff the answer can have changed" -- and it is taken
+# deliberately, for the one report where nothing anybody watches lives: the
+# day's session RANKING and the 7-day session baselines. A ranking does not
+# reorder inside a quarter of an hour, and an average over seven days moves
+# by less than its own rounding. Measured on a 653MB corpus, `session` costs
+# 0.71 CPU-s per fetch against 0.036 for an entire fast tick.
+#
+# 900 is 7.5 slow ticks, deliberately not a whole multiple: the same
+# rounding coin-flip the comment above describes applies to every bucket,
+# not just the one it was first found in.
+TTL_HISTORY=$(( SLOW_REFRESH * 15 / 2 ))
+(( TTL_HISTORY < TTL_LIVE )) && TTL_HISTORY=$TTL_LIVE
 mkdir -p "$CCUSAGE_CACHE_DIR"
+# The history bucket's own rate. Sections fed by it must advertise THIS, not
+# the tick rate: the tick is how often they are redrawn, which is not how
+# often the numbers in them can change. A header that names the redraw rate
+# while the data underneath is a quarter of an hour old is the panel's
+# oldest recurring bug, and it has always looked exactly this reasonable.
+RATE_HISTORY="$(fmt_interval "$TTL_HISTORY")"
+
+# Which bucket a query belongs in is decided by the QUERY, never by the call
+# site, so two callers of the same report cannot disagree about how fresh it
+# is. An unclassified query lands in the live bucket on purpose: a new query
+# nobody has thought about must be wrongly EXPENSIVE, never wrongly stale.
+#
+# `daily` is deliberately NOT in the history bucket, despite being the
+# obvious candidate: the same payload that carries the 7/30-day baselines
+# also carries TODAY'S total, and today's total is one of the numbers this
+# panel exists to watch climb. Deferring it 15 minutes would make it step
+# rather than move, and only while turns are landing -- which is precisely
+# when someone is looking at it. The baselines would happily be deferred;
+# they just do not arrive on their own.
+#
+# So the freshness of Today is what actually costs here, and no arrangement
+# of TTLs can change that: it is one corpus scan per tick or a stale number.
+# Phase 2 (drop the statusline fetch) and Phase 3 (incremental rollup) are
+# the levers on it; this one is not.
+ccusage_ttl_for() {
+  case "$1" in
+    session) printf '%s' "$TTL_HISTORY" ;;
+    *)       printf '%s' "$TTL_LIVE" ;;
+  esac
+}
+
+# Spread the expiries. Without this every entry is seeded when the panel
+# starts and they all lapse on the same tick, for the life of the pane --
+# one lurching frame and one CPU spike instead of several small ones, and
+# synchronised across every open panel rather than merely within one.
+#
+# Derived from the cache key, NOT from $RANDOM or the pid: every panel on
+# this machine must compute the SAME expiry for the same query, or N panels
+# stagger into N separate fetches of one shared entry and the cross-panel
+# cache stops being a cache. Deterministic per key is what makes it shared.
+#
+# Subtracted, never added, so the effective TTL is at most the advertised
+# one. A label may under-promise freshness; it may never over-promise it.
+ccusage_ttl_jittered() { # $1 = subcommand, $2 = cache key
+  local ttl j
+  ttl=$(ccusage_ttl_for "$1")
+  j=$(( 0x$(printf '%s' "$2" | cut -c1-2) % 15 ))
+  printf '%s' $(( ttl - ttl * j / 100 ))
+}
 
 # ---- corpus-change gate ----
 # The TTL above exists so that N panels (and the cost-alert hook) share ONE
@@ -606,14 +670,16 @@ ccusage_query_is_gated() { :; }
 # Prints the (possibly cached) JSON to stdout.
 ccusage_cached() {
   local key cache_file lock_dir now_epoch cache_mtime lock_age waited out have_lock
+  local ttl
   key=$(printf '%s' "$*" | shasum -a 256 | cut -c1-16)
   cache_file="$CCUSAGE_CACHE_DIR/$key.json"
   lock_dir="$cache_file.lock"
   now_epoch=$(panel_now)
+  ttl=$(ccusage_ttl_jittered "$1" "$key")
 
   if [ -f "$cache_file" ]; then
     cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
-    if (( now_epoch - cache_mtime < CCUSAGE_CACHE_TTL )); then
+    if (( now_epoch - cache_mtime < ttl )); then
       cat "$cache_file"
       return
     fi
@@ -678,14 +744,16 @@ ccusage_cached() {
 ccusage_cached_stdin() {
   local payload="$1"; shift
   local key cache_file lock_dir now_epoch cache_mtime lock_age waited out have_lock
+  local ttl
   key=$(printf '%s\x00%s' "$payload" "$*" | shasum -a 256 | cut -c1-16)
   cache_file="$CCUSAGE_CACHE_DIR/$key.json"
   lock_dir="$cache_file.lock"
   now_epoch=$(panel_now)
+  ttl=$(ccusage_ttl_jittered "${1:-}" "$key")
 
   if [ -f "$cache_file" ]; then
     cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
-    if (( now_epoch - cache_mtime < CCUSAGE_CACHE_TTL )); then
+    if (( now_epoch - cache_mtime < ttl )); then
       cat "$cache_file"
       return
     fi
@@ -1919,7 +1987,7 @@ build_trailing() {
   echo
 
   # ---- top sessions today: which session is consuming the day's spend ----
-  header "Top Sessions Today $(rate_tag "$RATE_SLOW")"
+  header "Top Sessions Today $(rate_tag "$RATE_HISTORY")"
   session_json=$(sessions_window "$(all_sessions)" "$(panel_date +%Y-%m-%d)" "")
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     # ccusage's per-session totalCost/totalTokens are all-time-per-session,

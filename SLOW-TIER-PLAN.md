@@ -147,14 +147,30 @@ The organising rule is not "how fast does this change" but:
 
 | Bucket | TTL | Queries | Rationale |
 |---|---|---|---|
-| **live** | 90s (unchanged) | `blocks --active`, `statusline`¹ | Tied to money accruing right now; read against the fast-tier session table |
-| **history** | 900s | `daily --sections ...`, `session` | 7d/30d baselines, week/month totals, today's session ranking. Cannot move meaningfully inside 15 minutes. |
+| **live** | 90s (unchanged) | `blocks --active`, `statusline`¹, `daily --sections ...` | Tied to money accruing right now |
+| **history** | 900s | `session` | The day's session ranking and the 7-day session baselines. A ranking does not reorder inside a quarter of an hour. |
 
 ¹ `statusline` is in the live bucket only until Phase 2 deletes it.
 
-`session` and `daily` **must share a bucket**: "Top Sessions Today" is
-summed and compared against "Today" total by any user who looks at both. Give
-them different TTLs and the panel will visibly fail to add up.
+**`daily` was moved back to the live bucket during implementation, and the
+reason is worth recording.** The same payload that carries the 7/30-day
+baselines also carries **today's total** — one of the two or three numbers
+this panel exists to watch climb. Deferring it 15 minutes would make Today
+*step* rather than move, and only while turns are landing, which is exactly
+when someone is looking at it. The baselines would happily be deferred; they
+just do not arrive on their own.
+
+So **the freshness of Today is what actually costs here**, and no arrangement
+of TTLs changes that: it is one corpus scan per tick, or a stale number.
+Phases 2 and 3 are the levers on it. Phase 1 is not, and its saving is
+correspondingly smaller than this plan first claimed.
+
+That leaves `session` and `daily` in *different* buckets, which the coherence
+rule warns about — and it is safe here **only because of the direction of the
+skew**. The sessions side is the stale one, so "Top Sessions Today" lags the
+day total and can never sum to more than it. Reverse the assignment and the
+panel would show a set of sessions adding up to more than the day they belong
+to. Check C asserts the direction, not merely the numbers.
 
 ### Projection
 
@@ -163,14 +179,45 @@ produced the original report):
 
 | | live bucket | history bucket | fast tier | total |
 |---|---|---|---|---|
-| Now | (2.11+0.73)×720 = 2045s | (1.03+0.71)×720 = 1253s | 311s | **~60 min/day**² |
-| Phase 1 | 2045s | (1.03+0.71)×96 = 167s | 311s | **~42 min/day** |
-| Phase 1+2 | 0.73×720 = 526s | 167s | ~350s | **~17 min/day** |
+| Now | (2.11+1.03+0.73)×720 = 2786s | (0.71)×720 = 511s | 311s | **~60 min/day**² |
+| Phase 1 | 2786s | 0.71×96 = 68s | 311s | **~53 min/day** |
+| Phase 1+2 | (1.03+0.73)×720 = 1267s | 68s | ~350s | **~28 min/day** |
 
 ² Worst case exceeds the observed 49 min because the observation includes
 corpus-gate and cross-panel cache hits. Use it for ranking, not forecasting.
 
-**Phase 1 buys ~7 min/day of the observed 49. Phase 2 buys ~25 more.**
+**Phase 1 buys ~7 min/day worst case (~4 realistic). Phase 2 buys ~25 more.**
+Phase 1's honest justification is not its saving; it is the harness and the
+staleness discipline that make Phase 2 safe to attempt.
+
+### 4.1 Concurrent sessions
+
+One panel is launched per Claude Code session, so everything above multiplies
+by the session count — except what the shared cache absorbs. Measured, and
+asserted in check M:
+
+| Cost | Shared across sessions? |
+|---|---|
+| `daily`, `session`, `blocks` | **Yes** — one filesystem cache keyed by the query string, with an mkdir lock. Three panels cost one scan. |
+| Hourly buckets (30-day scan) | **Yes** — its own lock, same pattern. |
+| Cost-alert baseline | **Yes** — the hook's key carries no session id. |
+| `statusline` | **No.** Its key includes the session id and transcript path, because the answer genuinely is per-session. |
+
+So **each additional concurrent session costs ~25 CPU-min/day on its own**
+(720 statusline fetches × 2.11 CPU-s), plus ~5 min for its own fast tier.
+Nothing else scales with session count.
+
+Two consequences:
+
+1. **Phase 2 matters more the more sessions you run.** It is worth ~25
+   min/day for one session and ~25 min/day *per session* after that. On the
+   two-panel machine this investigation started from, that is the majority of
+   the total.
+2. **The jitter must be derived from the cache key, never from `$RANDOM` or
+   the pid.** Every panel has to compute the *same* expiry for the same
+   query, or N panels stagger into N separate fetches of one shared entry and
+   the cross-panel cache stops being a cache. Check M asserts three panels
+   share one refetch.
 
 ---
 

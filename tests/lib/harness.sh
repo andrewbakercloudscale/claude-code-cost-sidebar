@@ -49,9 +49,27 @@ panel_tick_slow() {
 }
 
 # Backdate a file so a TTL lapses without the test sleeping for it.
+#
+# Relative to PANEL_FAKE_NOW when the clock is pinned, and this matters more
+# than it looks: ccusage_cached() compares panel_now() against the cache
+# file's REAL mtime, so a check that pins the clock to another date and then
+# backdates against the real one produces an age of several million negative
+# seconds. Every TTL then reads as fresh, the cache is served forever, and
+# the check quietly measures nothing at all.
 age_file() { # $1 path, $2 seconds
-  touch -t "$(date -v-"$2"S +%Y%m%d%H%M.%S)" "$1"
+  local base ts
+  if [ -n "${PANEL_FAKE_NOW:-}" ]; then
+    ts=$(date -r "$(( PANEL_FAKE_NOW - $2 ))" +%Y%m%d%H%M.%S)
+  else
+    ts=$(date -v-"$2"S +%Y%m%d%H%M.%S)
+  fi
+  touch -t "$ts" "$1"
 }
+
+# Money comparisons, normalised. jq 1.7 preserves a number's original
+# literal, so a fixture written as 10.00 comes back as "10.00" and a string
+# compare against "10" fails on formatting rather than on value.
+num() { awk -v v="$1" 'BEGIN{ printf "%.2f", v + 0 }'; }
 
 # Backdate the WHOLE corpus tree, directories included.
 #

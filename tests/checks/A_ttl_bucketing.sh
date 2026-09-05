@@ -1,10 +1,4 @@
-# Check A -- how many corpus scans a slow tick actually costs.
-#
-# This encodes the CURRENT contract: one shared TTL, so every ccusage-backed
-# query is refetched once per slow tick while the corpus is changing. Phase 1
-# of SLOW-TIER-PLAN.md splits that into a live bucket and a history bucket;
-# when it lands, the EXPECT_* constants below change and this check becomes
-# the thing that proves the buckets are real rather than aspirational.
+# Check A -- the two TTL buckets are real, and their boundary is where it says.
 #
 # Counting invocations rather than measuring CPU is deliberate: the count is
 # exact and hermetic. A CPU-seconds gate would be flaky, and a flaky gate
@@ -12,29 +6,23 @@
 check_A_ttl_bucketing() {
   sandbox_new A
   local TICKS=6
-  # Current behaviour: every query shares CCUSAGE_CACHE_TTL, so a corpus that
-  # changes every tick means one fetch per query per tick.
-  local EXPECT_DAILY=$TICKS EXPECT_SESSION=$TICKS EXPECT_BLOCKS=$TICKS
-
   cat > "$CCUSAGE_FIXTURE_DIR/sections.json" <<'JSON'
 {"daily":[{"period":"2026-09-01","totalCost":1.5,"totalTokens":100}],"weekly":[],"monthly":[]}
 JSON
   cat > "$CCUSAGE_FIXTURE_DIR/session.json" <<'JSON'
 {"session":[{"period":"sess-1","totalCost":1.5,"totalTokens":100,"metadata":{"lastActivity":"2026-09-01T10:00:00.000Z"}}]}
 JSON
-  cat > "$CCUSAGE_FIXTURE_DIR/blocks.json" <<'JSON'
-{"blocks":[]}
-JSON
+  printf '{"blocks":[]}' > "$CCUSAGE_FIXTURE_DIR/blocks.json"
   printf '{}' > "$HOME/.cache/claude-hourly-buckets.json"
   load_panel 10 12 ""
 
-  local i
+  local i f
+  # Age the caches to 600s: past the live bucket (90s), inside the history
+  # bucket (900s, minus at most 14% jitter = 774s at worst). The corpus is
+  # touched every tick, so the gate cannot be what holds anything back --
+  # only the TTL can, which is what this is measuring.
   for (( i = 0; i < TICKS; i++ )); do
-    # A turn lands, then a slow tick fetches. Both caches must be past their
-    # TTL for the tick to consult the gate at all -- age them rather than
-    # sleep for them.
     touch "$HOME/.claude/projects/test-project/seed.jsonl"
-    local f
     for f in "$HOME/.cache/ccusage-panel-cache"/*.json; do
       [ -e "$f" ] && age_file "$f" 600
     done
@@ -43,18 +31,32 @@ JSON
     ccusage_cached blocks --active --json --offline >/dev/null
   done
 
-  assert_eq "daily+weekly+monthly scans over $TICKS ticks"  "$EXPECT_DAILY"   "$(calls_for daily)"
-  assert_eq "session scans over $TICKS ticks"               "$EXPECT_SESSION" "$(calls_for session)"
-  assert_eq "blocks scans over $TICKS ticks"                "$EXPECT_BLOCKS"  "$(calls_for blocks)"
+  # Live bucket: today's total rides in the daily payload, so it refetches
+  # every tick. That is the cost of a Today figure that moves rather than
+  # steps, and it is charged knowingly.
+  assert_eq "daily is live: one scan per tick"  "$TICKS" "$(calls_for daily)"
+  assert_eq "blocks is live: one scan per tick" "$TICKS" "$(calls_for blocks)"
+  # History bucket: the day's session ranking, held across all six ticks.
+  assert_eq "session is history: one scan for all $TICKS ticks" "1" "$(calls_for session)"
 
-  # The other half of the contract: with a static corpus the same $TICKS
-  # ticks must cost nothing at all. If this regresses, an idle pane is paying
-  # a full corpus scan per tick again.
+  # Past the history TTL as well (1000s > 900s even before jitter, which
+  # only ever subtracts), session must refetch like anything else. Without
+  # this the check above would also pass on a query that never refetches.
+  local before; before=$(calls_for session)
+  for (( i = 0; i < 3; i++ )); do
+    touch "$HOME/.claude/projects/test-project/seed.jsonl"
+    for f in "$HOME/.cache/ccusage-panel-cache"/*.json; do
+      [ -e "$f" ] && age_file "$f" 1000
+    done
+    all_sessions >/dev/null
+  done
+  assert_eq "past its own TTL, session refetches too" "$(( before + 3 ))" "$(calls_for session)"
+
+  # And with a static corpus, nothing costs anything -- the gate, not the
+  # TTL, is still the arbiter for everything in the live bucket.
   local before_daily; before_daily=$(calls_for daily)
   age_corpus 1200
   for (( i = 0; i < TICKS; i++ )); do
-    # Caches lapse, but stay NEWER than the last transcript write -- which is
-    # exactly the idle pane this gate exists for.
     for f in "$HOME/.cache/ccusage-panel-cache"/*.json; do
       [ -e "$f" ] && age_file "$f" 600
     done

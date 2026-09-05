@@ -27,6 +27,9 @@ export PATH="$HERE/stub:$PATH"
 export TEST_TMP="${TMPDIR:-/tmp}/ccusage-panel-tests.$$"
 mkdir -p "$TEST_TMP"
 REAL_HOME="$HOME"
+# Checks that inspect INSTALLED siblings (the cost-alert hook) need the real
+# location, because $HOME is a sandbox by the time they run.
+export HOME_REAL_BIN="$REAL_HOME/.local/bin"
 trap 'HOME="$REAL_HOME"; rm -rf "$TEST_TMP"' EXIT
 
 source "$HERE/lib/harness.sh"
