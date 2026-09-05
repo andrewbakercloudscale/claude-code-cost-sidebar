@@ -55,6 +55,17 @@ for f in "$HERE"/checks/*.sh; do source "$f"; done
 
 printf 'panel:  %s\n' "$PANEL_SH"
 printf 'checks: %s\n\n' "$(ls "$HERE"/checks/*.sh | wc -l | tr -d ' ')"
+# A check file that defines no check function -- or one that failed to load --
+# is invisible unless these two numbers are compared. `source dir/*.sh` sources
+# only the FIRST match and passes the rest as arguments, which silently ran one
+# of two checks in the launcher suite while its header still announced two.
+_check_files=$(ls "$HERE"/checks/*.sh | wc -l | tr -d ' ')
+_check_fns=$(declare -F | awk '{print $3}' | grep -c '^check_')
+if [ "$_check_files" -ne "$_check_fns" ]; then
+  printf '%s check FILES but %s check FUNCTIONS loaded -- a check is not running\n' \
+    "$_check_files" "$_check_fns" >&2
+  exit 2
+fi
 TOTAL=0; FAILED_CHECKS=0; RUN=0
 for fn in $(declare -F | awk '{print $3}' | grep '^check_' | sort); do
   ASSERTIONS=0; FAILED=0

@@ -13,7 +13,7 @@ that would make all of it unnecessary.
 | Symptom before | new windows opened with no panel, whenever a second Ghostty was alive |
 | Symptom now | should be fixed; **not yet confirmed by the user in normal use** |
 | Known remaining risk | a genuinely ambiguous focus state still skips, so a window can still come up without a panel — by design, see "Why skipping is right" |
-| Answered 2026-09-05 | keystrokes **can** be delivered to a non-focused window by pid — tested, works end to end. See "The open question, answered". Not yet implemented. |
+| Answered and shipped 2026-09-05 | keystrokes are now addressed to our process by pid, so focus is irrelevant. The focus-dependent path remains as the fallback where pyobjc is absent. |
 
 Commits, in order: `75374c1` (my bad fix) → `af1e67e` (revert) → `fa3dd2f`
 (the guard that shipped). `75374c1` is in history and **must not be
@@ -206,20 +206,69 @@ pid cannot land in the wrong window **no matter what focus is doing**, so:
 It is the same property the tmux path already has, which is why that path has
 never produced a bug of this kind.
 
-### Not implemented — the open decision is the dependency
+### Shipped: targeted first, focus-dependent as the fallback
 
-The mechanism is proven; what it should be built on is not decided.
-Hammerspoon is a third-party app that happens to be installed on this
-machine, and this repo is public — most users will not have it. pyobjc is not
-guaranteed either. So an implementation needs:
+`claude-panel-keysend` (installed alongside the launcher) posts the whole
+sequence — split, type, Return, resize — to one pid via `CGEventPostToPid`.
+The launcher tries it first and keeps the AppleScript path underneath.
 
-- a posting mechanism with no hard third-party dependency (a small compiled
-  helper, or pyobjc when present), **and**
-- a fallback to today's guarded osascript path when it is unavailable, which
-  means the guard stays even once this ships, and
-- the `keyblock` guard reconsidered: it exists because keystrokes could be
-  interleaved with real typing, which is far less of a concern once they are
-  addressed to a specific process.
+The fallback is not hedging. pyobjc's Quartz bindings are **not** on stock
+macOS — `/usr/bin/python3` does not have them, a Homebrew python usually does
+— and this repo is public, so a hard dependency would simply stop the panel
+working for anyone without them. Where the bindings exist this is strictly an
+upgrade; where they do not, nothing changes.
+
+| | targeted path | fallback path |
+|---|---|---|
+| Requires | a python3 with pyobjc | nothing new |
+| Addresses | our process, by pid | whatever holds focus |
+| Can type into the wrong window | **no, structurally** | only if the guard is wrong |
+| Needs the frontmost guard | no | yes |
+| Needs the keyboard guard | no — events are addressed, not broadcast | yes |
+| Steals focus | no | yes, it raises our window |
+
+Window geometry still comes from System Events on both paths: reading a
+window's size does not require it to be focused, only typing into it does.
+
+**Verified end to end, in the shape that used to fail** — a new window while
+another Ghostty held focus:
+
+```
+attempt 1: targeted send to pid 81119 (width=1255 presses=5) via /opt/homebrew/bin/python3
+attempt 1: VERIFIED — new panel process(es): 82089
+done: succeeded on attempt 1/3
+```
+
+Focus was on an unrelated window before and after, and panel 82089's own
+process ancestry places it in ghostty 81119 — the target. The fallback was
+then exercised deliberately (`PANEL_KEYSEND_PYTHON=/usr/bin/python3`, an
+interpreter with no pyobjc) and logged `no python3 with pyobjc's Quartz
+bindings — using the focus-dependent AppleScript path`, then succeeded on
+attempt 1/3 the old way.
+
+### Why `PANEL_KEYSEND_PYTHON` is authoritative
+
+If it were merely first in the search order it could not turn the targeted
+path **off** — the search would find Homebrew's python anyway. The fallback
+would then be unreachable on every machine that has pyobjc, which is every
+machine this was developed on, and it would rot without anyone finding out.
+Set it and the search stops there, so the fallback stays exercisable.
+
+### Tests
+
+`tests/launcher/run-tests.sh` — 2 checks, 16 assertions, deliberately narrow.
+Driving Ghostty through the Accessibility API is not something a hermetic
+check can do, so what is covered is the decision about **which path runs**
+plus the helper's exit-code contract with the launcher (2 = no pyobjc, fall
+through; 64 = the launcher called it wrong, which must not be confused with
+the first). Whether keystrokes actually arrive was verified by hand, above,
+because faking a window would only assert the fake.
+
+Writing it turned up a bug in its own runner: `source "$HERE"/checks/*.sh`
+sources only the FIRST match and passes the rest as positional arguments, so
+one of two checks silently did not run while the header announced two. All
+three runners now compare check *files* against loaded check *functions* and
+refuse to run if they disagree.
 
 ## Debugging notes for next time
 

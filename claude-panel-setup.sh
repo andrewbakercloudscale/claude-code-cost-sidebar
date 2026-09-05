@@ -2436,6 +2436,108 @@ fi
 rm -f "$KEYBLOCK_SRC"
 
 echo "Installing claude-panel-launch.sh ..."
+# ---------------------------------------------------------------------------
+# claude-panel-keysend: deliver the split-and-launch keystrokes to ONE process.
+#
+# System Events' `keystroke` goes to whatever window holds keyboard focus,
+# system-wide, so the launcher has always had to identify the focused window
+# and refuse to type when it could not. CGEventPostToPid addresses a PROCESS
+# instead, and every Ghostty window here is its own process, so the events
+# cannot land anywhere else no matter what focus is doing.
+#
+# Verified against a Ghostty instance with focus deliberately held on an
+# unrelated window throughout: the split opened, the command ran, and the
+# resulting panel's own process ancestry placed it in the targeted instance.
+# Focus never moved.
+# ---------------------------------------------------------------------------
+KEYSEND_SRC="$BIN_DIR/claude-panel-keysend"
+cat > "$KEYSEND_SRC" <<'KEYSEND_EOF'
+"""Post the panel's split-and-launch key sequence to a single process.
+
+usage: claude-panel-keysend <pid> <panel-command> <resize-presses>
+
+Exits 2 if pyobjc's Quartz bindings are missing, which is the launcher's
+signal to fall back to its focus-dependent AppleScript path.
+"""
+import sys
+import time
+
+try:
+    import Quartz
+except ImportError:
+    sys.stderr.write("Quartz (pyobjc) not available\n")
+    sys.exit(2)
+
+# macOS virtual key codes. Only the four this sequence needs.
+KEY = {"d": 2, "h": 4, "l": 37, "return": 36}
+FLAG = {
+    "cmd": Quartz.kCGEventFlagMaskCommand,
+    "ctrl": Quartz.kCGEventFlagMaskControl,
+    "shift": Quartz.kCGEventFlagMaskShift,
+}
+
+# Each event is posted down-then-up with a short gap. Ghostty drops keys sent
+# faster than this, and a dropped key here is a half-typed command sitting on
+# a prompt.
+GAP = 0.012
+
+
+def _post(pid, event):
+    Quartz.CGEventPostToPid(pid, event)
+    time.sleep(GAP)
+
+
+def chord(pid, src, key, mods=()):
+    flags = 0
+    for m in mods:
+        flags |= FLAG[m]
+    for down in (True, False):
+        e = Quartz.CGEventCreateKeyboardEvent(src, KEY[key], down)
+        Quartz.CGEventSetFlags(e, flags)
+        _post(pid, e)
+
+
+def text(pid, src, s):
+    # Key code 0 with an attached unicode string types the character itself,
+    # so this does not need a layout-specific code for every key -- which
+    # matters because the panel command contains "~", "/" and ".".
+    for ch in s:
+        for down in (True, False):
+            e = Quartz.CGEventCreateKeyboardEvent(src, 0, down)
+            Quartz.CGEventKeyboardSetUnicodeString(e, len(ch), ch)
+            _post(pid, e)
+
+
+def main():
+    if len(sys.argv) != 4:
+        sys.stderr.write(__doc__)
+        return 64
+    pid = int(sys.argv[1])
+    command = sys.argv[2]
+    presses = int(sys.argv[3])
+
+    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+
+    # Same sequence, and the same delays, as the AppleScript path below it:
+    # split, type, run, focus left pane, shrink the right one.
+    chord(pid, src, "d", ("cmd",))
+    time.sleep(0.6)
+    text(pid, src, command)
+    time.sleep(0.1)
+    chord(pid, src, "return")
+    time.sleep(0.3)
+    chord(pid, src, "h", ("ctrl",))
+    time.sleep(0.2)
+    for _ in range(presses):
+        chord(pid, src, "l", ("ctrl", "shift"))
+        time.sleep(0.05)
+    return 0
+
+
+sys.exit(main())
+KEYSEND_EOF
+chmod +x "$KEYSEND_SRC"
+
 cat > "$BIN_DIR/claude-panel-launch.sh" <<'LAUNCH_EOF'
 #!/usr/bin/env bash
 # Opens a right-hand Ghostty split running the live ccusage panel, shrinks
@@ -2543,6 +2645,44 @@ else
   log "context: could not identify our Ghostty instance from process ancestry — falling back to matching on the name 'ghostty', which is ambiguous when several instances are running"
 fi
 
+# Which python3, if any, can post key events to a specific process?
+#
+# pyobjc's Quartz bindings are not part of stock macOS -- /usr/bin/python3
+# does not have them; a Homebrew python usually does -- so this is a probe,
+# not an assumption. Empty means the targeted path is unavailable on this
+# machine and the AppleScript path runs exactly as before.
+#
+# PANEL_KEYSEND_PYTHON names the interpreter to use, for anyone whose python
+# is somewhere else. It is AUTHORITATIVE, not merely first in the search: if
+# it is set and cannot post events, the search stops rather than quietly
+# picking a different interpreter. Otherwise the variable could not turn the
+# targeted path OFF, which would leave the AppleScript path below
+# unreachable on this machine -- and an untested fallback is one that has
+# stopped working without anyone finding out. `PANEL_KEYSEND_PYTHON=/usr/bin/
+# python3` (stock macOS, no pyobjc) exercises it.
+BIN_DIR_KEYSEND="$HOME/.local/bin/claude-panel-keysend"
+panel_python=""
+find_quartz_python() {
+  local py
+  if [ -n "${PANEL_KEYSEND_PYTHON:-}" ]; then
+    if command -v "$PANEL_KEYSEND_PYTHON" >/dev/null 2>&1 &&
+       "$PANEL_KEYSEND_PYTHON" -c 'import Quartz' 2>/dev/null; then
+      printf '%s' "$PANEL_KEYSEND_PYTHON"
+      return 0
+    fi
+    return 1
+  fi
+  for py in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3 \
+            /usr/bin/python3; do
+    command -v "$py" >/dev/null 2>&1 || continue
+    if "$py" -c 'import Quartz' 2>/dev/null; then
+      printf '%s' "$py"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # A bare permission-probe first — if Accessibility access isn't granted,
 # every subsequent step will fail the same way, so say so once clearly
 # instead of three confusing retries.
@@ -2564,6 +2704,66 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
 
   before_pids=$(panel_pids)
 
+  # ---- targeted path: address the process, never the focus ---------------
+  # CGEventPostToPid delivers to a specific PROCESS, and every Ghostty window
+  # here is its own process (see the ancestry walk above), so these keystrokes
+  # cannot land in another window however focus moves. That removes the whole
+  # problem the AppleScript path below spends its length managing: it can only
+  # type into the FOCUSED window, so it has to identify that window first and
+  # refuse when it cannot -- which is why new windows were silently getting no
+  # panel whenever a second Ghostty was alive.
+  #
+  # Needs pyobjc's Quartz bindings, which are not on stock macOS: /usr/bin/
+  # python3 does not have them, a Homebrew python usually does. When no
+  # interpreter has them the AppleScript path below runs unchanged, so this is
+  # strictly an upgrade where it is available rather than a new requirement.
+  #
+  # The window geometry still comes from System Events -- reading a window's
+  # size does not require it to be focused, only typing into it does.
+  if [ -z "$panel_python" ] && [ -n "$ghostty_pid" ]; then
+    if panel_python=$(find_quartz_python); then
+      [ "$attempt" = 1 ] && log "context: key events will be addressed to our process via $panel_python"
+    else
+      panel_python=""
+      [ "$attempt" = 1 ] && log "context: no python3 with pyobjc's Quartz bindings — using the focus-dependent AppleScript path"
+    fi
+  fi
+  if [ -n "$panel_python" ] && [ -n "$ghostty_pid" ] && [ -x "$BIN_DIR_KEYSEND" ]; then
+    geom=$(osascript -e "tell application \"System Events\"
+      set p to first application process whose unix id is $ghostty_pid
+      if (count of windows of p) is 0 then return \"nowindow\"
+      -- Bind the size before indexing it. \`item 1 of (size of front window
+      -- of p)\` reads fine and fails at runtime with \"Can't make ... into
+      -- type specifier (-1700)\": inside a tell block the index is applied to
+      -- the unevaluated reference rather than to the returned list.
+      set sz to size of front window of p
+      return item 1 of sz
+    end tell" 2>&1)
+    case "$geom" in
+      ''|*[!0-9]*)
+        log "attempt $attempt: targeted path unavailable (window geometry: $geom) — falling through to the AppleScript path"
+        ;;
+      *)
+        presses=$(( (geom / 6) / 40 ))
+        log "attempt $attempt: targeted send to pid $ghostty_pid (width=$geom presses=$presses) via $panel_python"
+        if "$panel_python" "$BIN_DIR_KEYSEND" "$ghostty_pid" "$PANEL_CMD" "$presses" >>"$LOG" 2>&1; then
+          sleep 1
+          after_pids=$(panel_pids)
+          new_pids=$(comm -13 <(echo "$before_pids") <(echo "$after_pids") 2>/dev/null)
+          if [ -n "$new_pids" ]; then
+            log "attempt $attempt: VERIFIED — new panel process(es): $(echo "$new_pids" | tr '\n' ' ')"
+            success=1
+            continue
+          fi
+          log "attempt $attempt: targeted send reported success but no panel appeared — falling through"
+        else
+          log "attempt $attempt: targeted send failed (exit $?) — falling through to the AppleScript path"
+        fi
+        ;;
+    esac
+  fi
+
+  # ---- focus-dependent path: only reached when the above is unavailable ---
   # Ask our own instance to come to the front before polling. This isn't
   # cosmetic: System Events delivers `keystroke` to whatever application is
   # frontmost, not to the process an enclosing `tell` names, so targeting
