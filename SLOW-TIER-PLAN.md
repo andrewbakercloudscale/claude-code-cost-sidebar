@@ -438,15 +438,16 @@ already in hand:
 lines). Dead code that still looks live is a hazard: the next person needing
 a stdin query would find a tested-looking path that had not run in months.
 
-**Still open — the unknown-model rule.** §7.2 originally called for `Context
-—` on an unmapped model. That is *not* implemented, and deliberately:
-`context_window_size()` returns 1M for anything it does not recognise, and
-turning it into an allowlist means asserting context windows for nine model
-ids I cannot verify from here. Inventing those numbers is precisely the
-"plausible wrong figure" failure this plan exists to avoid. The behaviour is
-unchanged from before Phase 2 — it was already the shell's default for the
-same displayed percentage — so this is a pre-existing gap, now recorded
-rather than newly introduced.
+**The unknown-model rule was open here, and closed in §9.2.** This section
+originally called for `Context —` on an unmapped model but left
+`context_window_size()` defaulting to 1M for anything it did not recognise —
+turning it into an allowlist meant asserting context windows for models this
+plan could not verify at the time. §9.2 verified the full table against the
+`claude-api` skill and closed it: the function is now an allowlist keyed on
+`PRICES`, an unknown id returns 0, and the panel renders `Context Usage: N/A`
+rather than guessing. See §9.2 and §9.3 for what that verification pass also
+caught (two missing models, a divide-by-zero, and a parser crash that served
+a stale table silently).
 
 ### 7.3 Verification
 
