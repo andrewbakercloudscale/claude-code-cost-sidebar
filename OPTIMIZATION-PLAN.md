@@ -1,5 +1,14 @@
 # ccusage-panel.sh: idle-cost optimization plan
 
+> **Superseded 2026-09-05 by [`SLOW-TIER-PLAN.md`](SLOW-TIER-PLAN.md).**
+> The cost this document identified is real and reproduces (~49 CPU-min/day,
+> measured). The attribution is wrong: ~90% of it is the 120s slow tier, not
+> the 10s fast tick, so Tier 2's ceiling was ~5 min/day. Two claims here are
+> also incorrect — `ps -o time` excludes children, so the 47-minute figure is
+> not the panel process's own CPU; and Tier 2's "no change in behavior anyone
+> would notice" is false, since a backed-off tier shows a landed turn up to
+> 60s late. Kept as the record of the investigation.
+
 Written 2026-09-05, after a live battery-drain investigation on the primary
 dev machine traced part of the cost to this panel. Two instances of
 `ccusage-panel.sh` had been running continuously for ~24h (one per
