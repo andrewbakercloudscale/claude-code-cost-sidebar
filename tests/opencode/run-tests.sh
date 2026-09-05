@@ -19,6 +19,14 @@ _pass() { ASSERTIONS=$(( ASSERTIONS + 1 )); }
 _fail() { ASSERTIONS=$(( ASSERTIONS + 1 )); printf '    FAIL: %s\n      expected: %s\n      actual:   %s\n' "$1" "$2" "$3" >&2; FAILED=1; }
 assert_eq() { [ "$2" = "$3" ] && _pass || _fail "$1" "$2" "$3"; }
 assert_ne() { [ "$2" != "$3" ] && _pass || _fail "$1" "not $2" "$3"; }
+# Parity with the Claude panel's harness. Its absence was not a missing
+# convenience: a check calling it got "command not found" on stderr, the
+# assertion never ran, and the check still reported ok because the four
+# assertions that DID run were more than zero. The zero-assertion rule
+# cannot see a check that lost only some of its assertions -- so keep the
+# two harnesses' vocabularies the same, or checks written against one will
+# quietly half-run against the other.
+assert_contains() { case "$3" in *"$2"*) _pass ;; *) _fail "$1" "contains '$2'" "$3" ;; esac; }
 
 sandbox_new() { # $1 name
   SBX="$TEST_TMP/$1"; rm -rf "$SBX"

@@ -233,7 +233,7 @@ opencode_cached() {
   fi
 
   out=$(opencode "$@" 2>/dev/null)
-  printf '%s' "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  printf '%s' "$out" > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
   [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
   printf '%s' "$out"
 }
@@ -255,7 +255,7 @@ oc_export_cached() { # $1 = session_id, $2 = updated_ms (the stamp)
   fi
   out=$(opencode export "$sid" 2>/dev/null)
   if [ -n "$out" ]; then
-    { printf '%s\n' "$stamp"; printf '%s' "$out"; } > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+    { printf '%s\n' "$stamp"; printf '%s' "$out"; } > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
   fi
   printf '%s' "$out"
 }
@@ -266,7 +266,17 @@ oc_export_cached() { # $1 = session_id, $2 = updated_ms (the stamp)
 # of scope here). Pruned on a TTL of its own, cheaply: touch is ~free, `find`
 # over a cache directory holding at most a few hundred small files is not the
 # 30-day corpus scan this whole effort exists to avoid.
-find "$OC_CACHE_DIR" -maxdepth 1 -name 'export-*.json' -mtime +7 -delete 2>/dev/null
+find "$OC_CACHE_DIR" -maxdepth 1 \
+  \( -name 'export-*.json' -o -name '*.tmp' \) -mtime +7 -delete 2>/dev/null
+
+# Temp names carry the pid for the same reason ccusage-panel.sh's do. Both
+# writers above use `> "$f.tmp" && mv "$f.tmp" "$f"`, which is atomic for the
+# reader but was not safe for the second WRITER: oc_export_cached has no lock
+# around it, so two panels on the same session both wrote `<file>.tmp`, one
+# renamed it, and the other's `mv` failed on a path that no longer existed.
+# Found in the Claude panel by running two of them and reading the stderr;
+# the same code was here. A panel killed between the write and the rename
+# leaves its temp behind, which is why the prune above sweeps `*.tmp` too.
 
 # Test seam, same pattern as ccusage-panel.sh: source this file with
 # PANEL_LIB_ONLY=1 to get the cache functions above without entering the

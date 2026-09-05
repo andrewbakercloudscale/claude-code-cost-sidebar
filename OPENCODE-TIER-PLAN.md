@@ -98,8 +98,9 @@ script has no function-per-section architecture to test through:
 | B — TTL buckets | `stats --days 7/30` get the long TTL; `session list`/`stats --days 1` get the short one; neither is a whole multiple of the tick |
 | C — export stamp | same (session, stamp) → cached; stamp moves → one refetch; a different session is its own entry |
 | D — shared across panels | 3 concurrent panels cost one fetch, and one refetch when the db changes |
+| E — concurrent cache write | two panels exporting one session do not collide on a temp filename |
 
-4 checks, 17 assertions. One harness trap on the way, the same shape as
+5 checks, 23 assertions. One harness trap on the way, the same shape as
 every one in `SLOW-TIER-PLAN.md`: a plain (non-exported) variable set only
 inside a subshell that had sourced the panel does not exist in the parent
 shell, so a check computing a cache path from it silently worked on an
@@ -118,13 +119,38 @@ the one thing the check can know without sourcing anything.
    from the real database. **Done.**
 4. Installer (`opencode-panel-setup.sh`) resynced; embedded copy verified
    byte-identical to the installed script. **Done.**
+5. **Shared temp filename, fixed 2026-09-05.** Both writers here used
+   `> "$f.tmp" && mv "$f.tmp" "$f"` with a temp name shared by every panel.
+   Atomic for the reader; not safe for the second writer — two panels on one
+   session both wrote `<file>.tmp`, one renamed it, the other's `mv` failed
+   on a path that no longer existed. `oc_export_cached` has no lock around
+   it, by design, so nothing prevented it. Found in `ccusage-panel.sh` by
+   running two panels and reading the stderr (`SLOW-TIER-PLAN.md` §10.3);
+   the same code was here, so it is fixed here too — temp names carry `$$`,
+   and the prune sweeps orphaned `*.tmp` alongside `export-*.json`.
+
+   Check D already ran three concurrent panels and did not catch it: it
+   exercises `opencode_cached`, which IS lock-protected, and never touches
+   the export path. **Concurrency coverage is per code path, not per suite.**
+   Check E covers the path that had no lock.
+
+   Adding it surfaced a second gap: this harness had no `assert_contains`,
+   so the two assertions calling it printed "command not found" to stderr,
+   never ran, and the check still reported **ok** — four assertions is more
+   than zero, and the zero-assertion rule cannot see a check that lost only
+   *some* of its assertions. The two harnesses' vocabularies are now the
+   same, which is the only durable fix: a check written against one suite
+   will otherwise half-run against the other.
 
 ## Out of scope for this pass
 
 - The per-transcript export cache's unbounded growth in *this* file is
   pruned (7-day TTL); the equivalent gap in `ccusage-panel.sh`'s
   `turns-<key>.out` cache is not, and is noted here rather than fixed —
-  touching that file was not part of this pass.
+  touching that file was not part of this pass. **Closed 2026-09-05**: that
+  panel now prunes the same way, over four families rather than one
+  (`turns-*.out`, `sessid-*.tsv`, `todaytok-*.tsv`, `errors-*.log`) plus
+  orphaned temp files — see `SLOW-TIER-PLAN.md` §10.4.
 - No cost-alert-equivalent hook exists for OpenCode on this machine (there
   is no `opencode-cost-alert-check.sh`), so there was nothing analogous to
   `claude-cost-alert-check.sh`'s baseline-scoping bug to check for here.
