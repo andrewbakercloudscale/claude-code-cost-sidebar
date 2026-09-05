@@ -669,16 +669,82 @@ an external scribble.
 
 420s per side, sequential, cold cache, no other panel running:
 
-| | CPU | vs before |
+| | CPU over 420s | corpus scans |
 |---|---|---|
-| before (`45f9f73`) | _pending_ | — |
-| final | _pending_ | _pending_ |
+| before (`45f9f73`) | 15.76 user + 8.41 sys = **24.17 s** | 16 |
+| final | 10.68 user + 6.34 sys = **17.02 s** | 10 |
+| | **−30%** | **−37%** |
+
+Read that as a floor, not a ceiling, for three reasons — all of which push the
+steady-state saving higher than the window shows:
+
+- **420s is 3.5 slow ticks**, and both sides pay a full cold-cache fetch of
+  every query at t=0. The startup is a fixed cost the "before" panel amortises
+  over the same short window.
+- **The history bucket's 900s TTL cannot expire inside 420s**, so its benefit
+  appears once rather than repeatedly.
+- **The corpus was changing throughout** (this session was working), which is
+  the worst case for the corpus gate and the case the original report came
+  from.
+
+Three of the "final" run's ten scans are bare, unscoped `session` calls — the
+cost-alert hook, which was still unscoped when this ran and has since been
+scoped too (§9.5). The panel's own share is 7.
 
 **Rollback:** `rollback-cost-panel.sh` restores the previous
 `ccusage-panel.sh`. Every phase is independently revertible; Phase 2 is the
 only one that deletes anything, and it is gated on a day of parity evidence.
 
 ---
+
+## 9.5 The cost-alert hook was unscoped too
+
+Found in the measurement's own scan log: three bare `session` calls the panel
+does not make. `claude-cost-alert-check.sh` computed its 7-day average from
+**all-agent** session data, so the 2x/3x thresholds it posts into the chat
+were measured against a denominator diluted by every other agent CLI — and
+because it throttles per session and per tier, firing at the wrong time
+consumes the tier and the real crossing is never reported.
+
+Now scoped, with the same `.sessions` → `.session` adapter the panel uses.
+Baseline before and after the change: $12.09, against the $12.07 the hook
+itself last reported — unchanged in practice here, but no longer by luck.
+
+## 10.1 Errors reach the screen
+
+Every figure in this panel is a number, and a number that failed to compute is
+indistinguishable from one that computed to zero. Nearly every call ends in
+`2>/dev/null` — correctly, since a chatty stderr would shred a 1/3-width pane
+— so a dead query, an unparseable payload, and a builder that died on an
+unbound variable all rendered as `$0.00` and nothing else.
+
+There is now one channel for that. A **file**, not a variable, because the
+section builders run inside `$(...)` and a global set in there cannot be read
+back out. `ccusage_cached` records any non-zero exit **or empty output** (an
+empty payload parses to nothing while looking like a quiet day) and keeps
+serving the last good answer rather than replacing it with the failure — but
+the failure is on screen next to it. The three builders have their stderr
+redirected into the same file, which is the general catch: it does not need to
+know what broke to report that something did.
+
+Rendered inside the guaranteed block, so a short pane cannot hide it; capped
+at three lines with an "and N more" tail, so a burst cannot push the turn
+table off screen; cleared once per slow tick, so it shows what is failing now
+rather than everything that ever has.
+
+Verified end to end by putting a `ccusage` on `PATH` that exits 3. The panel
+renders:
+
+```
+  ! ccusage claude blocks failed (exit 3): boom: simulated
+  ! ccusage claude daily failed (exit 3): boom: simulated c
+  ! ccusage claude monthly failed (exit 3): boom: simulated
+  ! and 2 more failure(s)
+```
+
+— and, because Phase 2 moved this session's own figures out of ccusage, it
+still shows Session, Burn, Context Usage and the full per-turn table with the
+tool completely dead.
 
 ## 11. Phase 3 — incremental rollup (deferred, not scheduled)
 

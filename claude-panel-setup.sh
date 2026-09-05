@@ -554,6 +554,22 @@ TTL_LIVE=$(( SLOW_REFRESH * 3 / 4 ))
 TTL_HISTORY=$(( SLOW_REFRESH * 15 / 2 ))
 (( TTL_HISTORY < TTL_LIVE )) && TTL_HISTORY=$TTL_LIVE
 mkdir -p "$CCUSAGE_CACHE_DIR"
+
+# ---- errors are rendered, never swallowed ------------------------------
+# Everything in this panel is a number, and a number that failed to compute
+# looks exactly like a number that computed to zero. Almost every call here
+# ends in `2>/dev/null` -- correctly, because a chatty stderr would shred a
+# 1/3-width pane -- so without somewhere for failures to go, a broken query,
+# a jq that could not parse, or a builder that died on an unbound variable
+# all render as $0.00 and nothing else.
+#
+# A FILE rather than a variable, because the section builders run inside
+# $(...) subshells and a global set in there cannot be read back out. The
+# loop truncates it once per slow tick, so what shows is what just failed
+# rather than everything that ever has.
+PANEL_ERR_FILE="$CCUSAGE_CACHE_DIR/errors-$$.log"
+: > "$PANEL_ERR_FILE" 2>/dev/null
+panel_error() { printf '%s\n' "$1" >> "$PANEL_ERR_FILE" 2>/dev/null; }
 # The history bucket's own rate. Sections fed by it must advertise THIS, not
 # the tick rate: the tick is how often they are redrawn, which is not how
 # often the numbers in them can change. A header that names the redraw rate
@@ -716,7 +732,22 @@ ccusage_cached() {
     # indefinitely; an occasional duplicate fetch beats a stuck panel.
   fi
 
-  out=$(ccusage "$@" 2>/dev/null)
+  local err_tmp rc
+  err_tmp="$cache_file.err"
+  out=$(ccusage "$@" 2>"$err_tmp"); rc=$?
+  # Empty counts as failure as much as a non-zero exit: every query here
+  # returns a JSON object, and "" parses to nothing while looking like a
+  # quiet day.
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    panel_error "ccusage $1 ${2:-} failed (exit $rc): $(tr -d '\n' < "$err_tmp" | cut -c1-80)"
+    rm -f "$err_tmp"
+    # Serve the last good answer if there is one, rather than replacing it
+    # with the failure -- but the failure is on screen either way.
+    [ -f "$cache_file" ] && cat "$cache_file"
+    [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
+    return 0
+  fi
+  rm -f "$err_tmp"
   printf '%s' "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
   [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
   printf '%s' "$out"
@@ -1449,6 +1480,7 @@ if [ -t 0 ]; then
   if [ -n "$ORIG_STTY" ]; then
     stty -echo -icanon min 0 time 0 2>/dev/null
     restore_tty() {
+      rm -f "$PANEL_ERR_FILE"
       drain_stdin
       stty "$ORIG_STTY" 2>/dev/null
     }
@@ -2121,16 +2153,23 @@ while true; do
   (( now_epoch - last_slow >= SLOW_REFRESH )) && slow_due=1
   [ "$cols" != "$last_cols" ] && slow_due=1
 
-  # One fetch+merge per slow tick, read by every section below it.
-  (( slow_due )) && RECENT_JSON=$(recent_sections_fetch)
+  # One fetch+merge per slow tick, read by every section below it. The error
+  # file is cleared first so the panel reports this tick's failures rather
+  # than accumulating every failure since the pane opened.
+  (( slow_due )) && : > "$PANEL_ERR_FILE"
+  (( slow_due )) && RECENT_JSON=$(recent_sections_fetch 2>>"$PANEL_ERR_FILE")
   (( slow_due )) && refresh_active_block
   # Always: re-derives the countdown and the $/hr denominator from the
   # block's fixed epochs. Pure arithmetic, no fetch.
   block_clock_tick
 
   if (( slow_due )); then
-    summary_block=$(build_summary)
-    trailing_raw=$(build_trailing)
+    # Any stderr from a builder -- an unbound variable, a jq parse error, a
+    # python traceback -- is a crash that would otherwise show as a
+    # truncated block and nothing else. This is the general catch: it does
+    # not need to know what broke to report that something did.
+    summary_block=$(build_summary 2>>"$PANEL_ERR_FILE")
+    trailing_raw=$(build_trailing 2>>"$PANEL_ERR_FILE")
     last_slow=$now_epoch
     last_cols=$cols
   fi
@@ -2139,7 +2178,20 @@ while true; do
   # never truncated, even on a short pane — so "show N turns" always means
   # N turns, not "N turns if there's room after the other sections." Only
   # the sections below it compete for whatever pane height is left over.
-  guaranteed="$summary_block"$'\n'"$(build_session_table)"
+  # At most three lines, so a burst of failures cannot push the turn table
+  # off a short pane -- but say how many there are, or three of eight reads
+  # as all of them.
+  errs=""
+  if [ -s "$PANEL_ERR_FILE" ]; then
+    err_n=$(sort -u "$PANEL_ERR_FILE" | wc -l | tr -d ' ')
+    errs=$(sort -u "$PANEL_ERR_FILE" | head -3 | while IFS= read -r e; do
+      printf '  %s! %s%s\n' "$C_RED" "${e:0:$(( cols > 8 ? cols - 5 : 40 ))}" "$C_RESET"
+    done)
+    if (( err_n > 3 )); then
+      errs="$errs"$'\n'"$(printf '  %s! and %d more failure(s)%s' "$C_RED" "$(( err_n - 3 ))" "$C_RESET")"
+    fi
+  fi
+  guaranteed="$summary_block"${errs:+$'\n'"$errs"}$'\n'"$(build_session_table 2>>"$PANEL_ERR_FILE")"
   used_lines=$(printf '%s\n' "$guaranteed" | wc -l | tr -d ' ')
   remaining=$(( rows - 1 - used_lines ))
 
@@ -2776,7 +2828,12 @@ mkdir -p "$CCUSAGE_CACHE_DIR" 2>/dev/null
 
 since7=$(date -v-7d +%Y%m%d 2>/dev/null || date -d '7 days ago' +%Y%m%d)
 
-cache_args="session --json --since $since7 --offline"
+# Scoped to Claude Code, like the panel's own queries. Unscoped, `ccusage
+# session` covers every detected agent CLI, so the 7-day average this hook
+# alerts against was diluted by OpenCode and anything else installed -- and
+# an alert threshold computed from the wrong denominator fires at the wrong
+# time, in a hook whose per-session throttle then eats the real crossing.
+cache_args="claude session --json --since $since7 --offline"
 cache_key=$(printf '%s' "$cache_args" | shasum -a 256 | cut -c1-16)
 cache_file="$CCUSAGE_CACHE_DIR/$cache_key.json"
 
@@ -2788,7 +2845,11 @@ if [ -f "$cache_file" ]; then
   fi
 fi
 if [ -z "$sessions_json" ]; then
-  sessions_json=$(ccusage session --json --since "$since7" --offline 2>/dev/null)
+  # `claude session` nests under `.sessions`; normalised to the `.session`
+  # this file and the panel both read. Same adapter, same reason, as
+  # ccusage-panel.sh's all_sessions().
+  sessions_json=$(ccusage claude session --json --since "$since7" --offline 2>/dev/null \
+    | jq -c '{session: (.sessions // .session // [])}' 2>/dev/null)
   # Only a parseable payload is cached -- writing an empty or truncated
   # result would poison the panel's cache too, since they share this file.
   if [ -n "$sessions_json" ] && jq -e '.session' >/dev/null 2>&1 <<<"$sessions_json"; then
