@@ -115,6 +115,9 @@ calls_for() { grep -c "^$1 " "$CCUSAGE_CALL_LOG" 2>/dev/null || true; }
 # Load the panel's functions without entering its render loop.
 load_panel() { # $@ = panel args
   PANEL_LIB_ONLY=1 source "$PANEL_SH" "$@" </dev/null
+  # Stable alias: checks that reach into the cache directly should not have
+  # to know which of the panel's globals happens to name it this month.
+  CCUSAGE_CACHE_DIR_REAL="$CCUSAGE_CACHE_DIR"
 }
 
 # Local midnight for a given YYYY-MM-DD, as an epoch. Tests that cross a day

@@ -42,12 +42,19 @@ JSON
   done
   assert_eq "and share ONE refetch when it lapses" "2" "$(calls_for daily)"
 
-  # statusline is the exception, and it is the expensive one.
-  local before; before=$(calls_for statusline)
+  # Phase 2 removed the one query that could not be shared. An additional
+  # session must now add ZERO ccusage invocations: everything a session
+  # needs to know about ITSELF comes from parsing its own transcript, which
+  # is local work proportional to what that session actually did rather
+  # than a scan of the whole corpus.
+  local tp before
+  tp="$HOME/.claude/projects/test-project/sess.jsonl"
+  printf '%s\n' '{"type":"assistant","timestamp":"2026-09-01T10:00:00.000Z","message":{"id":"m1","model":"claude-opus-5","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200}}}' > "$tp"
+  before=$(wc -l < "$CCUSAGE_CALL_LOG" | tr -d ' ')
   for i in 1 2 3; do
-    ( load_panel 10 12 ""
-      ccusage_cached_stdin "{\"session_id\":\"sess-$i\"}" statusline -B text >/dev/null )
+    ( load_panel 10 12 ""; latest="$tp"; session_stats_refresh )
   done
-  assert_eq "statusline is per-session: 3 sessions, 3 fetches" \
-    "$(( before + 3 ))" "$(calls_for statusline)"
+  assert_eq "3 more sessions add zero ccusage invocations" "$before" \
+    "$(wc -l < "$CCUSAGE_CALL_LOG" | tr -d ' ')"
+  assert_eq "and no statusline query exists to make" "0" "$(calls_for statusline)"
 }

@@ -411,22 +411,61 @@ So Phase 2 is mostly a composition change, not new computation. The only new
 data is a model → context-window table, alongside the `PRICES` table the panel
 already carries and maintains for exactly the same reason.
 
-### 7.2 The one real risk
+### 7.2 What it actually took — done 2026-09-05
 
-An unknown model id. The panel already documents what goes wrong here: an
-unset model made ccusage assume a 200k window against Sonnet 5's actual 1M and
-context read >100%.
+Smaller than this section expected, because two of the three fields were
+already in hand:
 
-**Rule: an unknown model renders `Context —`, never a number.** A wrong
-percentage is indistinguishable from a right one; a dash is not. The test
-(check I) asserts that an unmapped model produces no percentage at all.
+- **Model name** was never ccusage's to give. The panel resolved it from the
+  transcript and *passed it into* the statusline payload, then read it back
+  out of the rendered string it came home in.
+- **Session cost and context tokens** were both already computed by the
+  turn-table parser as a by-product of pricing each turn — they simply were
+  not emitted. The parser now prints a `#META` line the shell strips before
+  the table reaches the screen, and `session_stats_refresh()` splits it into
+  `SESS_COST` / `SESS_CTX` / `SESS_WIN` on every fast tick, before either
+  builder runs, so the slow-tier summary and the fast-tier table read the
+  same session from the same parse.
+- **The context window** turned out to be duplicated: `context_window_size()`
+  existed in the bash panel *and* in the python parser, "kept in sync
+  manually", both computing a denominator for the same displayed percentage.
+  The window now travels in the metadata line from the newest turn's own
+  model, and the bash copy is deleted. One rule, one copy — and it is the
+  model that actually served that context, not whatever `resolve_session`
+  last saw, which differ across a mid-session model switch.
 
-### 7.3 Verification before deletion
+`ccusage_cached_stdin()` was left with no callers and is deleted too (61
+lines). Dead code that still looks live is a hazard: the next person needing
+a stdin query would find a tested-looking path that had not run in months.
 
-Ship Phase 2 behind a comparison, not a leap: for one working day, compute
-both and log any field disagreeing by more than 1%. Delete the fetch once the
-log is clean. The disagreement log is itself the acceptance criterion — see
-check J.
+**Still open — the unknown-model rule.** §7.2 originally called for `Context
+—` on an unmapped model. That is *not* implemented, and deliberately:
+`context_window_size()` returns 1M for anything it does not recognise, and
+turning it into an allowlist means asserting context windows for nine model
+ids I cannot verify from here. Inventing those numbers is precisely the
+"plausible wrong figure" failure this plan exists to avoid. The behaviour is
+unchanged from before Phase 2 — it was already the shell's default for the
+same displayed percentage — so this is a pre-existing gap, now recorded
+rather than newly introduced.
+
+### 7.3 Verification
+
+Check J asserts the arithmetic exactly rather than within a tolerance — the
+fixture's token counts and Anthropic's published rates are both exact:
+
+```
+m1 = (100*5 + 50*25 + 1000*5*0.1 + 200*5*1.25) / 1e6 = 0.003500
+m2 = (200*5 + 100*25 + 2000*5*0.1 + 400*5*1.25) / 1e6 = 0.007000
+                                          SESS_COST = 0.010500
+```
+
+plus: the context figure is the newest turn's occupancy, the window comes
+from the same parse, neither costs a ccusage query, and `#META` never reaches
+the screen. It also covers the upgrade path — a cache entry written before
+the metadata line existed stays valid (it is keyed on the transcript's
+mtime+size) and stays served, so the figures must come back **empty** and the
+summary print `--`, rather than being parsed out of a table row and rendered
+as money.
 
 ---
 

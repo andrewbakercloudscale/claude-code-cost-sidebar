@@ -307,25 +307,6 @@ ctx_tier_color() {
   awk -v v="$v" -v t="$pt" 'BEGIN{exit !(v+0>t)}' && color="$C_MAGENTA"
   printf '%s' "$color"
 }
-# Every current-generation model has a native 1M window except Haiku 4.5
-# (still 200k) — verified against Anthropic's published model table
-# (claude-api skill cache, 2026-06-24). This used to list only Sonnet 5 and
-# Fable 5 as 1M, which was true when written but went stale as Opus 5/4.8/
-# 4.7/4.6 and Sonnet 4.6 picked up 1M too — the panel silently kept treating
-# a 220k-token Opus 5 turn as 110% of a 200k ceiling that was never real.
-# CLAUDE_CODE_DISABLE_1M_CONTEXT=1 forces any of these back to the 200k
-# boundary — see the comment above the "Context cap" line below for why
-# that distinction matters.
-context_window_size() {
-  local size=1000000
-  case "$1" in
-    claude-haiku-4-5) size=200000 ;;
-  esac
-  if [ "$size" = "1000000" ] && [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-0}" = "1" ]; then
-    size=200000
-  fi
-  printf '%s' "$size"
-}
 # model id -> green (cheapest tier, e.g. Haiku) / yellow (mid, e.g. Sonnet) /
 # cyan (most expensive, e.g. Opus/Fable/Mythos) — mirrors the PRICES table in
 # the per-turn-table python block below, but keyed on model-name substrings
@@ -733,69 +714,6 @@ ccusage_cached() {
   printf '%s' "$out"
 }
 
-# Same cache/lock as ccusage_cached(), for the one call (statusline) that
-# needs a JSON payload piped to ccusage's stdin instead of plain args. Kept
-# as a separate function rather than teaching ccusage_cached() to read
-# stdin: the panel's own stdin is the terminal, not a pipe, on every OTHER
-# call site, so a shared `cat`-from-stdin path would hang those forever
-# waiting for input that will never arrive. $1 = payload, $2... = ccusage
-# args; the payload is folded into the cache key since it carries the
-# session id/transcript path/model that make the answer session-specific.
-ccusage_cached_stdin() {
-  local payload="$1"; shift
-  local key cache_file lock_dir now_epoch cache_mtime lock_age waited out have_lock
-  local ttl
-  key=$(printf '%s\x00%s' "$payload" "$*" | shasum -a 256 | cut -c1-16)
-  cache_file="$CCUSAGE_CACHE_DIR/$key.json"
-  lock_dir="$cache_file.lock"
-  now_epoch=$(panel_now)
-  ttl=$(ccusage_ttl_jittered "${1:-}" "$key")
-
-  if [ -f "$cache_file" ]; then
-    cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
-    if (( now_epoch - cache_mtime < ttl )); then
-      cat "$cache_file"
-      return
-    fi
-    # TTL lapsed, but nothing this answer depends on has changed.
-    if ccusage_query_is_gated "${1:-}" && ! corpus_changed_since "$cache_file"; then
-      cat "$cache_file"
-      return
-    fi
-  fi
-
-  have_lock=1
-  if ! mkdir "$lock_dir" 2>/dev/null; then
-    have_lock=0
-    lock_age=$(( now_epoch - $(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo "$now_epoch") ))
-    if (( lock_age > 30 )); then
-      rmdir "$lock_dir" 2>/dev/null
-      mkdir "$lock_dir" 2>/dev/null && have_lock=1
-    fi
-  fi
-
-  if [ "$have_lock" = 0 ]; then
-    if [ -f "$cache_file" ]; then
-      cat "$cache_file"
-      return
-    fi
-    waited=0
-    while [ -d "$lock_dir" ] && [ ! -f "$cache_file" ] && (( waited < 10 )); do
-      sleep 0.1
-      waited=$(( waited + 1 ))
-    done
-    if [ -f "$cache_file" ]; then
-      cat "$cache_file"
-      return
-    fi
-  fi
-
-  out=$(printf '%s' "$payload" | ccusage "$@" 2>/dev/null)
-  printf '%s' "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
-  [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
-  printf '%s' "$out"
-}
-
 # ---- one daily+weekly+monthly load instead of four separate ones ----
 # `daily --last 1`, `weekly --last 1`, `monthly --last 1` and `daily --since
 # <30d>` were four independent ccusage invocations per refresh, and since
@@ -1089,8 +1007,11 @@ def fmt_k(n):
         return f"{n/1000:.0f}k"
     return str(n)
 
-# Mirrors context_window_size() in the bash panel — kept in sync manually,
-# same as the PRICES table above, since this heredoc is its own process.
+# The ONLY copy of this rule. It used to be mirrored in the bash panel and
+# "kept in sync manually", with both computing a denominator for the same
+# displayed percentage; the window now travels out of here in the metadata
+# line instead, so the row colours below and the Context Usage line above
+# cannot be divided by different numbers.
 # Every current-generation model is 1M except Haiku 4.5 (200k) — see the
 # bash version's comment for why this used to be a Sonnet-5/Fable-5-only
 # allowlist and why that went stale.
@@ -1281,6 +1202,15 @@ shown = turns[-max_rows:]
 # baseline and suppresses the very spikes delta_color exists to flag.
 primary_turns = [t for t in turns if not t[6]]
 avg_delta = (sum(t[2] for t in primary_turns) / len(primary_turns)) if primary_turns else 0.0
+# Machine-readable first line, stripped by the shell before the table
+# reaches the screen. Both figures were computed above as a by-product of
+# pricing the turns, and both were previously bought a SECOND time from
+# `ccusage statusline` -- 2.11 CPU-s, the most expensive query this panel
+# made, and the only one whose cache key carries a session id, so it could
+# not be shared between panels and cost that much again for every extra
+# Claude Code session running.
+print(f"#META\t{sum(t[4] for t in turns):.6f}\t{turns[-1][1] if turns else 0}"
+      f"\t{context_window_size(turns[-1][5]) if turns else 0}")
 turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
 model_h = f"{col_model}{'Model':<10}{c_reset}"
 input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
@@ -1348,6 +1278,47 @@ if shown:
 PYEOF
   } > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
   tail -n +2 "$cache_file"
+}
+
+# ---- this session's own figures, from the parse that already happened ---
+# The turn table, this session's total cost and its current context size all
+# fall out of one cached transcript parse. Read three times, computed once.
+#
+# This is what replaces `ccusage statusline`. That query supplied exactly two
+# numbers the panel could not otherwise reach -- session cost and context
+# tokens -- and a third, the model name, that it had already resolved and was
+# passing INTO the query to get back out again. Today and the block figures
+# were already computed independently and its versions of them ignored.
+#
+# Set on every FAST tick, before either builder runs, so the slow-tier
+# summary and the fast-tier table read the same session from the same parse
+# rather than two snapshots that can disagree on screen.
+SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""
+session_stats_refresh() {
+  SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""
+  [ -n "${latest:-}" ] || return 0
+  local out meta
+  out=$(turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
+    "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
+    "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
+    "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_DIM")
+  meta=$(printf '%s\n' "$out" | head -1)
+  case "$meta" in
+    '#META'*)
+      SESS_COST=$(printf '%s' "$meta" | cut -f2)
+      SESS_CTX=$(printf '%s' "$meta" | cut -f3)
+      SESS_WIN=$(printf '%s' "$meta" | cut -f4)
+      SESS_TABLE=$(printf '%s\n' "$out" | tail -n +2)
+      ;;
+    *)
+      # A cache entry written before this line existed -- the file is keyed
+      # on the transcript's mtime+size, so it stays valid and stays served
+      # until the next turn lands. Render the table, leave the figures
+      # empty: an absent number shows as "--", where a wrong one would show
+      # as money.
+      SESS_TABLE="$out"
+      ;;
+  esac
 }
 
 # Save the real terminal fd BEFORE the loop ever redirects fd1 through a
@@ -1663,13 +1634,10 @@ build_summary() {
   [ -z "$prev_spend30" ] && prev_spend30=0
   prev_avg_daily_30=$(awk -v s="$prev_spend30" 'BEGIN{ printf "%.4f", s/29 }')
 
-  # ---- today's spend + EOD forecast: computed unconditionally, not
-  # scraped from ccusage's own statusline text — it's the same
-  # account-wide total either way, so it renders fine with no session
-  # resolved yet (see the "live status line" section right below, which
-  # now only gates the three fields — Model, Session, Context Usage —
-  # that genuinely can't be known without one). Was nested inside the
-  # statusline cost-segment parsing below; pulled out here unchanged.
+  # ---- today's spend + EOD forecast: an account-wide total, so it renders
+  # fine with no session resolved yet. Only the three fields below it —
+  # Model, Session, Context Usage — genuinely need one, and all three now
+  # come from this pane's own transcript parse rather than from a query.
   today_daily_json=$(today_daily_shape "$recent_json")
   today_amt="0.00"
   if [ -n "$today_daily_json" ] && [ "$(jq -r '.daily | length' <<<"$today_daily_json" 2>/dev/null)" != "0" ]; then
@@ -1722,46 +1690,14 @@ build_summary() {
   # session — showed nothing at all except "no active session found"
   # instead of the account-wide context it could show all along.
   if [ -n "$latest" ]; then
-    payload=$(printf '{"session_id":"%s","transcript_path":"%s","cwd":"%s","model":{"id":"%s","display_name":"%s"},"workspace":{"current_dir":"%s","project_dir":"%s"},"version":"1.0","output_style":{"name":"default"}}' \
-      "$sess_id" "$latest" "$PWD" "$model_id" "$model_label" "$PWD" "$PWD")
-    statusline_out=$(ccusage_cached_stdin "$payload" statusline -B text)
-    # One metric per line rather than piping the whole thing through `fold`
-    # — a fold-wrapped line breaks mid-word depending on pane width, which
-    # reads badly at 1/3 width. ccusage joins fields with " | "; split on
-    # that and print each on its own line instead.
-    old_ifs="$IFS"
-    IFS='|' read -ra statusline_segs <<< "$statusline_out"
-    IFS="$old_ifs"
-    n_segs=${#statusline_segs[@]}
-    # Each segment carries the " | " separator's own leading/trailing
-    # space — trim both, or a leading space eats the emoji entirely
-    # below (`${seg%% *}` on a string that STARTS with a space matches
-    # the whole string, not just the part after it).
-    for si in "${!statusline_segs[@]}"; do
-      seg="${statusline_segs[$si]}"
-      seg="${seg#"${seg%%[![:space:]]*}"}"
-      seg="${seg%"${seg##*[![:space:]]}"}"
-      statusline_segs[$si]="$seg"
-    done
-
-    # "🤖 Sonnet 5" -> "🤖 Model: Sonnet 5" — every metric below gets the
-    # same "icon  Label: value" shape, icons unchanged.
-    model_seg="${statusline_segs[0]:-}"
-    m_emoji="${model_seg%% *}"; m_rest="${model_seg#* }"
+    # Model: already resolved from the transcript by resolve_session(). It
+    # used to be sent to ccusage inside the statusline payload and read back
+    # out of the rendered string it came home in.
     mtc=$(model_tier_color "${model_id:-}")
-    printf '  %s Model: %s%s%s\n' "${m_emoji:-🤖}" "$mtc" "${m_rest:-Unknown}" "$C_RESET"
+    printf '  🤖 Model: %s%s%s\n' "$mtc" "${model_label:-Unknown}" "$C_RESET"
 
-    # The cost segment ("💰 $X session / $Y today / $Z block (...)") —
-    # only its first (session) field is used here now; the today/block
-    # fields it also carries are ignored in favor of the independent
-    # computations above/below, which are the same real numbers without
-    # depending on scraping ccusage's rendered string.
-    cost_seg="${statusline_segs[1]:-}"
-    IFS=$'\n' read -rd '' -a cost_parts < <(printf '%s' "$cost_seg" | sed 's# / #\n#g'; printf '\0')
-    sess_part="${cost_parts[0]:-}"
-    sess_emoji="${sess_part%% *}"
-    if [[ "$sess_part" =~ \$(-?[0-9.]+) ]]; then
-      sess_amt="${BASH_REMATCH[1]}"
+    if [ -n "$SESS_COST" ]; then
+      sess_amt=$(awk -v c="$SESS_COST" 'BEGIN{ printf "%.2f", c }')
       sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
       # THIS session's own $/hr (spend so far ÷ time since its first
       # message) — separate from the block burn rate below, which is
@@ -1770,10 +1706,13 @@ build_summary() {
       # from rather than its own line.
       sess_rate=$(awk -v c="$sess_amt" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
       src=$(threshold_color "$sess_rate" "$BURN_YELLOW" "$BURN_RED")
-      printf '  %s Session: %s$%s%s, Burn %s$%s/hr%s\n' \
-        "$sess_emoji" "$sc" "$sess_amt" "$C_RESET" "$src" "$sess_rate" "$C_RESET"
+      printf '  💰 Session: %s$%s%s, Burn %s$%s/hr%s\n' \
+        "$sc" "$sess_amt" "$C_RESET" "$src" "$sess_rate" "$C_RESET"
     else
-      printf '  %s\n' "${sess_part:-💰 Session: \$-0.00, Burn \$0.00/hr}"
+      # The parse produced no metadata line (a pre-existing cache entry, or
+      # a session with no priced turns yet). Say so rather than print a
+      # figure that would be indistinguishable from a real $0.00.
+      printf '  💰 Session: --, Burn --\n'
     fi
   else
     printf '  🤖 Model: %sUnknown%s\n' "$C_DIM" "$C_RESET"
@@ -1800,16 +1739,15 @@ build_summary() {
   fi
 
   if [ -n "$latest" ]; then
-    ctx_seg="${statusline_segs[$((n_segs - 1))]:-}"
-    if [[ "$ctx_seg" =~ ([0-9,]+)\ \(([0-9]+)%\) ]]; then
+    if [ -n "$SESS_CTX" ] && [ "$SESS_CTX" != "0" ]; then
       # Context segment — recompute the window size and % ourselves rather
       # than trust ccusage's own %. ccusage assumes each model's native
       # window (1M for Sonnet 5) regardless of whether
       # CLAUDE_CODE_DISABLE_1M_CONTEXT forced the real active boundary
       # back to 200k, which is exactly the mismatch that made context
       # usage impossible to keep in check this week.
-      ctx_tokens="${BASH_REMATCH[1]//,/}"
-      win_size=$(context_window_size "$model_id")
+      ctx_tokens="$SESS_CTX"
+      win_size="$SESS_WIN"
       ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
       ctx_color=$(ctx_tier_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")
       forced_note=""
@@ -1823,10 +1761,10 @@ build_summary() {
       printf '  🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
         "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
     else
-      # ccusage couldn't compute context this round (e.g. bare "N/A") —
-      # keep our row label instead of dropping to the raw segment, which
-      # printed as a naked "N/A" with no indication of what it meant.
-      printf '  🧠 Context Usage: %s\n' "${ctx_seg#🧠 }"
+      # No context figure from the parse -- a session whose first turn has
+      # not landed yet, or an older cache entry. "N/A" is the honest answer;
+      # a 0% would read as an empty context window.
+      printf '  🧠 Context Usage: N/A\n' 
     fi
   else
     printf '  🧠 Context Usage: N/A\n'
@@ -1905,10 +1843,7 @@ build_session_table() {
     printf '%sThis Session%s, Burn  %s%s/hr%s %s\n' \
       "$C_BOLD$C_CYAN" "$C_RESET" "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" "$C_RESET" \
       "$(rate_tag "$RATE_FAST")"
-    turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
-      "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
-      "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
-      "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_DIM"
+    printf '%s\n' "$SESS_TABLE"
   else
     header "This Session $(rate_tag "$RATE_FAST")"
     echo "  (no active Claude Code session found)"
@@ -2095,6 +2030,10 @@ while true; do
 
   now_epoch=$(panel_now)
   resolve_session
+  # Before either builder: the slow-tier summary and the fast-tier table
+  # must read the same session from the same parse, or they can disagree
+  # on screen about what this session has cost.
+  session_stats_refresh
 
   slow_due=0
   (( now_epoch - last_slow >= SLOW_REFRESH )) && slow_due=1
