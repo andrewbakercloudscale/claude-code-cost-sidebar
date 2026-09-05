@@ -2590,10 +2590,49 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
 
   result=$(osascript <<APPLESCRIPT 2>&1
 tell application "System Events"
-  set frontApp to first application process whose frontmost is true
+  -- Identify the focused instance POSITIVELY, and refuse to type if we
+  -- cannot.
+  --
+  -- `first application process whose frontmost is true` returns whichever
+  -- match comes first in System Events' own process order. That is fine
+  -- with one Ghostty and wrong with several: on 2026-09-05 the shell-side
+  -- poll logged "frontmost confirmed (pid 37092)" and this script, asking
+  -- the identical question a second later, read pid 87107 -- an OLDER
+  -- instance -- and skipped, on all three attempts, for every new window
+  -- opened while a second Ghostty was alive.
+  --
+  -- So enumerate every ghostty and ask each one directly, rather than
+  -- asking the list who is first. Proceed only when EXACTLY ONE claims
+  -- frontmost and it is ours. Anything else skips.
+  --
+  -- Skipping is the right failure. The alternative -- assume it is ours and
+  -- type anyway -- was tried and is far worse: `keystroke` goes to whatever
+  -- window holds keyboard focus system-wide, NOT to the process an
+  -- enclosing `tell` names (see the comment on the raise above), so a wrong
+  -- guess types a shell command into whatever the user is actually working
+  -- in. It did: six panels appeared in one unrelated window, and since the
+  -- typed command lands in a shell that runs the autolaunch hook, it
+  -- recursed into a second launcher run. No panel is a small problem;
+  -- keystrokes in the wrong window is not.
+  --
+  -- Every skip reports the full per-instance picture, because "which of
+  -- these two cases is it" is exactly what could not be answered from the
+  -- old one-line message.
+  set diag to ""
+  set frontIds to {}
+  repeat with g in (every application process whose name is "ghostty")
+    set gid to unix id of g
+    set gFront to frontmost of g
+    set diag to diag & gid & "(front=" & (gFront as string) & ",win=" & (count of windows of g) & ") "
+    if gFront then set end of frontIds to gid
+  end repeat
   if $TARGET_PID is not 0 then
-    if unix id of frontApp is not $TARGET_PID then return "skip: frontmost is " & (name of frontApp) & " pid " & (unix id of frontApp) & ", not our ghostty instance $TARGET_PID"
+    if (count of frontIds) is 0 then return "skip: no ghostty instance reports frontmost -- " & diag
+    if (count of frontIds) is greater than 1 then return "skip: " & (count of frontIds) & " ghostty instances claim frontmost, cannot tell which is focused -- " & diag
+    if (item 1 of frontIds) is not $TARGET_PID then return "skip: focused ghostty is pid " & (item 1 of frontIds) & ", not our instance $TARGET_PID -- " & diag
+    set frontApp to first application process whose unix id is $TARGET_PID
   else
+    set frontApp to first application process whose frontmost is true
     if name of frontApp is not "ghostty" then return "skip: frontmost is " & (name of frontApp)
   end if
   -- A Ghostty instance whose windows have all been closed still exists as
