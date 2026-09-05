@@ -2535,9 +2535,17 @@ tell application "System Events"
     if name of frontApp is not "ghostty" then return "skip: frontmost is " & (name of frontApp)
   end if
   -- A Ghostty instance whose windows have all been closed still exists as
-  -- a process, and asking it for `front window` raises a bare "Invalid
+  -- a process, and asking it for the front window raises a bare "Invalid
   -- index (-1719)" that reads like a permissions or scripting fault rather
   -- than the plain fact it is. Say the plain fact instead.
+  --
+  -- No backticks anywhere in this heredoc body: it is deliberately UNQUOTED
+  -- (<<APPLESCRIPT, not <<'APPLESCRIPT') so $TARGET_PID/$PANEL_CMD expand --
+  -- which means bash also runs any backtick-quoted text in here as a real
+  -- command substitution before osascript ever sees it. A "front window"
+  -- comment written with markdown-style backtick code-formatting shipped as
+  -- a live bug: bash executed "front window" as a command and osascript got
+  -- the AppleScript with that comment line silently missing, every run.
   if (count of windows of frontApp) is 0 then return "skip: ghostty pid " & (unix id of frontApp) & " has no windows"
   tell frontApp
     set winSize to size of front window
