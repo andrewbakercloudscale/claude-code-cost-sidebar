@@ -131,9 +131,23 @@ moving between fetches without one.
 - **`/context` shows 200k even though I selected Sonnet 5 — did it silently downgrade to 4.6?** Not necessarily. `/context` reports usage against whichever window is *currently active* for the session, and if `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` is set (or you're behind an LLM gateway that defaults Sonnet 5 to 200k), you'll correctly see a 200k ceiling while genuinely running Sonnet 5. Check the per-turn `Model` column in the panel — it reads the real model ID out of the transcript for every turn — rather than inferring the model from the context-window size alone.
 - **Does the generic `sonnet` alias always mean the latest Sonnet?** It's provider-dependent, not a bug: on the Anthropic API directly, `sonnet` resolves to the latest Sonnet (Sonnet 5 as of this writing). On Claude Platform via AWS it currently resolves to Sonnet 4.6; on Bedrock/Google Cloud/Microsoft Foundry it resolves to Sonnet 4.5. If you want a specific version regardless of provider, select it explicitly rather than relying on the bare alias.
 
+## Design & investigation notes
+
+Longer write-ups of the work behind the current behaviour. Read these before
+changing the areas they cover — each one records a bug that was shipped, and
+in two cases shipped twice.
+
+| Document | Covers |
+|---|---|
+| [`SLOW-TIER-PLAN.md`](SLOW-TIER-PLAN.md) | The Claude panel's refresh tiers, caching, TTL buckets, error surfacing, and every gate that failed silently on the way. The rollout log at §10 is the index. |
+| [`OPENCODE-TIER-PLAN.md`](OPENCODE-TIER-PLAN.md) | The same pass for the OpenCode panel, which had no caching at all (28.44 → 8.57 CPU-s / 60s). |
+| [`LAUNCHER-TARGETING.md`](LAUNCHER-TARGETING.md) | **Which window gets the panel**, and why that is a hard question. The panel is not bound to the terminal process — the launcher types keystrokes into whatever window has focus. Read this before touching the frontmost check. |
+| [`OPTIMIZATION-PLAN.md`](OPTIMIZATION-PLAN.md) | Superseded by `SLOW-TIER-PLAN.md`; kept as the record of an investigation whose conclusion was right and whose attribution was wrong. |
+
 ## Troubleshooting
 
 - **Panel never opens automatically** — check `~/.cache/claude-panel-launch.log` or `~/.cache/opencode-panel-launch.log`. If you're outside tmux, the most common cause is Ghostty missing Accessibility permission (System Settings → Privacy & Security → Accessibility). If you're inside tmux, confirm `tmux` is actually on `$PATH` for that shell (the log will say `TMUX is set but tmux binary not found` if not).
+- **A new window opens with no panel, but only sometimes** — the launcher can only split the window that has keyboard focus, and it refuses to type when it cannot positively identify that window as the one it was launched from. With several Ghostty instances running that identification can be ambiguous, and it skips rather than risk typing a shell command into whatever you are working in. The log line names every instance it saw and which one held focus. Recover by running `~/.local/bin/ccusage-panel.sh` in a split yourself. Background in [`LAUNCHER-TARGETING.md`](LAUNCHER-TARGETING.md).
 - **Split opens but stays 50/50** — outside tmux, make sure `~/.config/ghostty/config` has the `resize_split` keybinds the installer adds (`ctrl+shift+h` / `ctrl+shift+l`); if that file didn't exist when you installed, create it and re-run the installer. Inside tmux this shouldn't happen — the launcher opens the split at 1/3 width directly via `split-window -l 33%`.
 - **Context % looks wrong / costs look off** — the Claude panel infers the model ID from the live transcript to price each turn and size the context window correctly; if pricing changes on Anthropic's side, update the `PRICES` table inside `ccusage-panel.sh`.
 - **"Value" figures don't match my actual bill** — expected on Pro/Max/Team plans. Every $ figure in both panels is `local token count × pay-as-you-go API rate`, not a real charge — it's a proxy for how much of the model you're using, not an invoice. Flat-rate subscribers will see numbers well above (or below) what they're actually billed.
