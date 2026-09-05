@@ -153,6 +153,128 @@ BASELINE_AVG='
 # file) as long as that fd itself is a real tty.
 exec 3>&1
 
+# ---- shared cache + corpus-change gate -----------------------------------
+# Every refresh shelled out to `opencode` 4-5 times -- session list, export,
+# and up to three stats calls -- UNCONDITIONALLY, every tick, forever, with
+# no cache at all. Measured over 60s of real activity: 26.54 CPU-s of a 60s
+# window, 44% of a core, continuously, for a panel whose numbers cannot
+# change unless a turn actually landed. Same failure this repo already fixed
+# once in ccusage-panel.sh -- applied here with the same two ideas: a shared
+# on-disk cache so N open panels pay for one fetch, and a change gate so an
+# idle pane costs nothing.
+#
+# OpenCode's transcript IS a SQLite database (~/.local/share/opencode/
+# opencode.db, in WAL mode) rather than JSONL files, but the same principle
+# holds: every report here is a pure function of that database's content, so
+# if nothing has written to it since a cached answer was computed, re-running
+# the query cannot produce a different answer. `-newer` against all three
+# files (db + -wal + -shm) rather than just the main db, because WAL mode
+# can leave the shm/wal files as the only ones that moved between
+# checkpoints -- checking the main file alone would miss writes.
+OC_CACHE_DIR="$HOME/.cache/opencode-panel-cache"
+OC_DB_DIR="$HOME/.local/share/opencode"
+mkdir -p "$OC_CACHE_DIR"
+
+oc_corpus_changed_since() {
+  [ -n "$(find "$OC_DB_DIR" -maxdepth 1 -name 'opencode.db*' -newer "$1" -print -quit 2>/dev/null)" ]
+}
+
+# The TTL's only job is to stop concurrent panels stampeding one query at
+# once -- the corpus gate above is the real arbiter of "has this actually
+# gone stale". Kept short and NOT a whole multiple of REFRESH (the ccusage
+# panel's fix for the same coin-flip: an entry aged exactly its TTL makes
+# `age < TTL` a rounding accident). `--days 7`/`--days 30` move to a longer
+# TTL: a 7/30-day average cannot move meaningfully inside a couple of
+# minutes, and each `opencode stats` call is ~0.5s of pure Node/Bun startup
+# regardless of the window it reports on.
+TTL_LIVE=$(( REFRESH * 3 + 1 ))
+TTL_HISTORY=137
+
+oc_ttl_for() {
+  case "$1" in
+    stats) case "${2:-}" in --days) case "${3:-}" in 7|30) printf '%s' "$TTL_HISTORY"; return;; esac;; esac ;;
+  esac
+  printf '%s' "$TTL_LIVE"
+}
+
+# $@ = opencode subcommand + args. Prints the (possibly cached) output.
+# Same mkdir-lock pattern as ccusage-panel.sh's ccusage_cached(): atomic on
+# POSIX, no flock dependency, shared across every panel via the filesystem.
+opencode_cached() {
+  local key cache_file lock_dir now_epoch cache_mtime lock_age have_lock waited out ttl
+  key=$(printf '%s' "$*" | shasum -a 256 | cut -c1-16)
+  cache_file="$OC_CACHE_DIR/$key.json"
+  lock_dir="$cache_file.lock"
+  now_epoch=$(date +%s)
+  ttl=$(oc_ttl_for "$@")
+
+  if [ -f "$cache_file" ]; then
+    cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+    if (( now_epoch - cache_mtime < ttl )); then cat "$cache_file"; return; fi
+    if ! oc_corpus_changed_since "$cache_file"; then cat "$cache_file"; return; fi
+  fi
+
+  have_lock=1
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    have_lock=0
+    lock_age=$(( now_epoch - $(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo "$now_epoch") ))
+    if (( lock_age > 15 )); then
+      rmdir "$lock_dir" 2>/dev/null
+      mkdir "$lock_dir" 2>/dev/null && have_lock=1
+    fi
+  fi
+  if [ "$have_lock" = 0 ]; then
+    if [ -f "$cache_file" ]; then cat "$cache_file"; return; fi
+    waited=0
+    while [ -d "$lock_dir" ] && [ ! -f "$cache_file" ] && (( waited < 10 )); do
+      sleep 0.1; waited=$(( waited + 1 ))
+    done
+    [ -f "$cache_file" ] && { cat "$cache_file"; return; }
+  fi
+
+  out=$(opencode "$@" 2>/dev/null)
+  printf '%s' "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
+  printf '%s' "$out"
+}
+
+# `opencode export` is keyed on the session's OWN "updated" timestamp rather
+# than a TTL or the whole-database gate above -- a tighter, cheaper, and more
+# correct signal than either: this session's export cannot have changed
+# unless THIS session's updated time moved, regardless of what any other
+# session in the database is doing. One file per session id (not per
+# updated-value) with the stamp as its first line, same pattern as
+# turn_table_cached() in ccusage-panel.sh, so re-running this session
+# overwrites its own entry instead of leaving a new file behind every turn.
+oc_export_cached() { # $1 = session_id, $2 = updated_ms (the stamp)
+  local sid="$1" stamp="$2" cache_file cached out
+  cache_file="$OC_CACHE_DIR/export-$(printf '%s' "$sid" | shasum -a 256 | cut -c1-16).json"
+  if [ -f "$cache_file" ]; then
+    IFS= read -r cached < "$cache_file"
+    if [ "$cached" = "$stamp" ]; then tail -n +2 "$cache_file"; return; fi
+  fi
+  out=$(opencode export "$sid" 2>/dev/null)
+  if [ -n "$out" ]; then
+    { printf '%s\n' "$stamp"; printf '%s' "$out"; } > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  fi
+  printf '%s' "$out"
+}
+
+# One entry per session id accumulates for the life of the machine, same as
+# ccusage-panel.sh's turns-<key>.out cache (a pre-existing, unaddressed gap
+# there too -- flagged, not silently fixed elsewhere, since that file is out
+# of scope here). Pruned on a TTL of its own, cheaply: touch is ~free, `find`
+# over a cache directory holding at most a few hundred small files is not the
+# 30-day corpus scan this whole effort exists to avoid.
+find "$OC_CACHE_DIR" -maxdepth 1 -name 'export-*.json' -mtime +7 -delete 2>/dev/null
+
+# Test seam, same pattern as ccusage-panel.sh: source this file with
+# PANEL_LIB_ONLY=1 to get the cache functions above without entering the
+# render loop or touching a real terminal.
+if [ -n "${PANEL_LIB_ONLY:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 while true; do
   SECONDS=0
   # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
@@ -182,8 +304,9 @@ while true; do
   if ! command -v opencode >/dev/null 2>&1; then
     echo "opencode CLI not found on PATH."
   else
-    list_json=$(opencode session list --format json 2>/dev/null)
+    list_json=$(opencode_cached session list --format json)
     session_id=""
+    session_updated=0
     if [ -n "$list_json" ]; then
       # Scoped to sessions whose .directory matches THIS project — not the
       # newest session across every opencode session on the machine. The
@@ -196,6 +319,14 @@ while true; do
       project_list_json=$(jq -c --arg d "$PWD" '[ .[] | select((.directory // "") == $d) ]' <<<"$list_json" 2>/dev/null)
       if [ -n "$project_list_json" ] && [ "$project_list_json" != "[]" ]; then
         session_id=$(jq -r "$FIND_LATEST" <<<"$project_list_json" 2>/dev/null)
+        # The stamp oc_export_cached() keys on -- this session's OWN updated
+        # timestamp, not the whole database's. Cheap: it comes straight out
+        # of the session-list payload already fetched above, so learning
+        # "did THIS session move" never costs a second query.
+        session_updated=$(jq -r --arg sid "$session_id" \
+          '[ .[] | select((.id // .sessionID // .session_id) == $sid) | (.updated // .time.updated // 0) ][0] // 0' \
+          <<<"$project_list_json" 2>/dev/null)
+        [ -z "$session_updated" ] && session_updated=0
       fi
     fi
 
@@ -227,9 +358,9 @@ while true; do
     # query itself) — fetched once per day-range here and reused below by
     # both the headline block and the TODAY/LAST 7 DAYS sections, instead
     # of hitting the same range twice per refresh tick.
-    today_stats=$(opencode stats --days 1 2>/dev/null)
-    week_stats=$(opencode stats --days 7 2>/dev/null)
-    month_stats=$(opencode stats --days 30 2>/dev/null)
+    today_stats=$(opencode_cached stats --days 1)
+    week_stats=$(opencode_cached stats --days 7)
+    month_stats=$(opencode_cached stats --days 30)
     stats_field() { awk -F'\\$' -v pat="$2" '$0 ~ pat {gsub(/[ │]/,"",$2); print $2}' <<<"$1"; }
 
     # ---- headline status block, "icon Label: value" per row like the
@@ -242,7 +373,7 @@ while true; do
     # skipped rather than faked.
     export_tmp=""
     if [ -n "$session_id" ]; then
-      export_json=$(opencode export "$session_id" 2>/dev/null)
+      export_json=$(oc_export_cached "$session_id" "$session_updated")
       if [ -n "$export_json" ]; then
         export_tmp=$(mktemp)
         printf '%s\n' "$export_json" > "$export_tmp"

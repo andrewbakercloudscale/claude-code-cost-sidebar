@@ -765,3 +765,18 @@ ever done: keep ccusage as a periodic cross-check and fail loudly on
 divergence, rather than replacing it outright.
 
 Revisit only if the post-Phase-2 measurement (step 4) justifies it.
+
+## 12. The OpenCode panel — done separately
+
+`opencode-panel-setup.sh` / `opencode-panel.sh` were out of scope for this
+plan — different backing CLI (`opencode stats`/`export`, not `ccusage`),
+different storage (SQLite, not JSONL). Given its own pass, 2026-09-05: see
+[`OPENCODE-TIER-PLAN.md`](OPENCODE-TIER-PLAN.md).
+
+It turned out to have no caching at all — worse than this file's bug, not
+the same one: **28.44 → 8.57 CPU-s over a 60s window (−70%), 60 → 9
+`opencode` invocations.** Same two ideas applied — a shared on-disk cache
+and a corpus-change gate, the gate checked against the SQLite database's
+own mtime instead of a JSONL tree's — plus a session-keyed cache for
+`export`, tighter than either a TTL or the whole-database gate: it refetches
+only when *that* session's own `updated` timestamp moves.
