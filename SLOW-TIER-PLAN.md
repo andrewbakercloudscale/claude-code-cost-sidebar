@@ -470,6 +470,26 @@ least not a lie. Do not leave it as-is and undocumented.
 
 1. **Seams + harness + checks A, B, D, E, K** — no behaviour change. D and E
    should fail on the current code (E is a live bug); fix E, confirm D passes.
+
+   **Done 2026-09-05.** `panel_now()`/`panel_date()` route all 47 wall-clock
+   reads and honour `PANEL_FAKE_NOW`; `PANEL_LIB_ONLY=1` sources the file
+   without entering the render loop. `tests/run-tests.sh` runs 5 checks / 29
+   assertions against the installed panel (`PANEL_SH=` to point elsewhere).
+   The block-expiry bug (§6.4) is fixed in `block_clock_tick()`, and check E
+   was verified to fail against the same panel with only that fix removed —
+   rendering `Current Block: $4.50 (0h 00m left)`, the symptom itself. D
+   passes: crossing local midnight with an unchanged corpus re-slices Today
+   to 0.00 and refetches nothing.
+
+   Two traps hit while writing the checks, both worth knowing before adding
+   more: `corpus_changed_since()` has no `-type` filter, so a fixture that
+   backdates only its files leaves the DIRECTORIES at "now" and the gate
+   fires on those; and the panel runs under `set -u` with globals that
+   `resolve_session()` sets, so calling `build_summary()` directly yields a
+   one-line stump that silently satisfies any `assert_not_contains`. Both
+   produced a check that passed while measuring nothing. Hence
+   `panel_tick_slow()` (drive the loop's real order) and the positive
+   control in E.
 2. **Phase 1**, with checks C, G, H, L. Verify by hand:
    `/usr/bin/time -l timeout 600 bash ccusage-panel.sh 10 12 <sid>` before and
    after, on a machine with a second session active. Record both numbers here.

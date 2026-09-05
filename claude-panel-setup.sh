@@ -116,7 +116,33 @@ PIN_SESSION_ID="${3:-}"
 # Recorded once so the unpinned session-detection fallback below can tell
 # "a session that started after I did" from "a session that was already
 # running when I started" — see that fallback for why this matters.
-PANEL_START_EPOCH=$(date +%s)
+# ---- clock seam ----
+# Every wall-clock read in this file goes through these two, so a test can
+# pin "now" with PANEL_FAKE_NOW (an epoch) and reach the boundaries that are
+# otherwise only reachable by waiting: midnight rollover, and a 5h block
+# ageing out. Both are places where the panel's answer depends on the CLOCK
+# and not on the transcript corpus -- which is precisely what
+# corpus_changed_since() cannot see, so they are the two boundaries most
+# likely to break silently.
+#
+# BSD date takes a base time with -r. GNU date cannot be pinned the same
+# way, so under a pinned clock the GNU branch REFUSES rather than quietly
+# answering from the real clock: a test that believes it moved the clock and
+# did not is worse than a test that cannot run at all.
+panel_now() {
+  if [ -n "${PANEL_FAKE_NOW:-}" ]; then printf '%s' "$PANEL_FAKE_NOW"; else date +%s; fi
+}
+panel_date() {
+  if [ -z "${PANEL_FAKE_NOW:-}" ]; then date "$@"; return; fi
+  case " $* " in
+    *" -d "*)
+      printf 'panel_date: PANEL_FAKE_NOW cannot pin GNU date -d\n' >&2
+      return 64 ;;
+  esac
+  date -r "$PANEL_FAKE_NOW" "$@"
+}
+
+PANEL_START_EPOCH=$(panel_now)
 
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
@@ -160,7 +186,7 @@ proxy_state_line() {
   secondary="${secondary%-passthrough}"
   overflow_until=0
   [ -f "$state" ] && overflow_until=$(jq -r '.overflow_until // 0' "$state" 2>/dev/null)
-  now=$(date +%s)
+  now=$(panel_now)
   if [ "${overflow_until:-0}" -gt "$now" ] 2>/dev/null; then
     route_label="SECONDARY ($secondary)"; route_color="$C_YELLOW"
   else
@@ -185,7 +211,7 @@ license_line() {
   # ccusage cache machinery) -- computed here, not as a top-level global,
   # so this function is safe to define before that point under `set -u`.
   local LICENSE_CACHE="$CCUSAGE_CACHE_DIR/license.txt"
-  now=$(date +%s)
+  now=$(panel_now)
 
   # Route-aware: claude-burst's secondary path hits a totally different
   # vendor (config's secondary.provider, e.g. "openai-compatible" against
@@ -364,7 +390,7 @@ HOURLY_BUCKET_WINDOW_DAYS=30
 
 refresh_hourly_buckets() {
   local cache_mtime now_epoch lock_dir lock_age
-  now_epoch=$(date +%s)
+  now_epoch=$(panel_now)
   if [ -f "$HOURLY_BUCKET_CACHE" ]; then
     cache_mtime=$(stat -f %m "$HOURLY_BUCKET_CACHE" 2>/dev/null || stat -c %Y "$HOURLY_BUCKET_CACHE" 2>/dev/null || echo 0)
     if (( now_epoch - cache_mtime < HOURLY_BUCKET_TTL )); then
@@ -583,7 +609,7 @@ ccusage_cached() {
   key=$(printf '%s' "$*" | shasum -a 256 | cut -c1-16)
   cache_file="$CCUSAGE_CACHE_DIR/$key.json"
   lock_dir="$cache_file.lock"
-  now_epoch=$(date +%s)
+  now_epoch=$(panel_now)
 
   if [ -f "$cache_file" ]; then
     cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
@@ -655,7 +681,7 @@ ccusage_cached_stdin() {
   key=$(printf '%s\x00%s' "$payload" "$*" | shasum -a 256 | cut -c1-16)
   cache_file="$CCUSAGE_CACHE_DIR/$key.json"
   lock_dir="$cache_file.lock"
-  now_epoch=$(date +%s)
+  now_epoch=$(panel_now)
 
   if [ -f "$cache_file" ]; then
     cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
@@ -782,7 +808,7 @@ daily_window() {
 # labelled "today:". No row means no usage today, which is exactly what the
 # callers' empty-`.daily` branch already prints.
 today_daily_shape() {
-  jq -c --arg t "$(date +%Y-%m-%d)" '
+  jq -c --arg t "$(panel_date +%Y-%m-%d)" '
     [ .daily[]? | select(.period == $t) ] as $rows |
     { daily: $rows,
       totals: ( ($rows[0] // {}) |
@@ -1380,7 +1406,20 @@ refresh_active_block() {
 block_clock_tick() {
   [ "${has_block:-0}" = "1" ] || return
   local now_s
-  now_s=$(date +%s)
+  now_s=$(panel_now)
+  # A block that has ENDED is not an active block, and the cached
+  # `blocks --active` payload cannot notice on its own: with no new turn the
+  # corpus gate correctly holds that entry, nothing refetches, and the
+  # section renders a countdown pinned at "0m left" for as long as the pane
+  # stays open. The end epoch is already known here, so retire the block on
+  # the CLOCK -- the same clock-vs-corpus split the seam at the top exists
+  # for. Idempotent: a slow tick re-reads the held payload and sets
+  # has_block=1 again, and this clears it again on the same tick, before
+  # anything renders.
+  if [ -n "${blk_end_epoch:-}" ] && (( now_s >= blk_end_epoch )); then
+    has_block=0
+    return
+  fi
   IFS=$'\t' read -r blk_elapsed_h blk_cph blk_rem <<<"$(awk \
     -v now="$now_s" -v st="$blk_start_epoch" -v en="$blk_end_epoch" -v c="$blk_cost" 'BEGIN{
       h=(now-st)/3600; if(h<0.05) h=0.05
@@ -1496,7 +1535,7 @@ resolve_session() {
     IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(session_identity_cached "$latest")
     # Floor elapsed time at 3 minutes — a session-so-far rate computed over
     # the first few seconds swings wildly and would flash red/green noise.
-    sess_elapsed_h=$(awk -v s="$sess_start_epoch" -v n="$(date +%s)" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
+    sess_elapsed_h=$(awk -v s="$sess_start_epoch" -v n="$(panel_now)" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
   fi
 }
 
@@ -1512,12 +1551,12 @@ resolve_session() {
 # number underneath, and it advances at exactly the rate the header claims.
 build_summary() {
   printf '%sClaude Code Usage — %s %s\n' \
-    "$C_BOLD$C_CYAN" "$(date '+%a %H:%M:%S')" "$(rate_tag "$RATE_SLOW")"
+    "$C_BOLD$C_CYAN" "$(panel_date '+%a %H:%M:%S')" "$(rate_tag "$RATE_SLOW")"
   # ---- baselines: average per-session cost over 7 days, total spend over
   # 30 days. Session average needs >=3 real sessions to trust — otherwise a
   # single earlier tiny/huge session would skew it.
-  since7=$(date -v-7d +%Y%m%d 2>/dev/null || date -d '7 days ago' +%Y%m%d)
-  since7_iso=$(date -v-7d +%Y-%m-%d 2>/dev/null || date -d '7 days ago' +%Y-%m-%d)
+  since7=$(panel_date -v-7d +%Y%m%d 2>/dev/null || panel_date -d '7 days ago' +%Y%m%d)
+  since7_iso=$(panel_date -v-7d +%Y-%m-%d 2>/dev/null || panel_date -d '7 days ago' +%Y-%m-%d)
   baseline_json=$(sessions_window "$(all_sessions)" "$since7_iso" "")
   avg_session_cost=$(jq -r '
     [.session[].totalCost] | map(select(. > 0.05)) |
@@ -1525,8 +1564,8 @@ build_summary() {
   ' <<<"$baseline_json" 2>/dev/null)
   [ -z "$avg_session_cost" ] && avg_session_cost=0
 
-  since30=$(date -v-29d +%Y%m%d 2>/dev/null || date -d '29 days ago' +%Y%m%d)
-  since30_iso=$(date -v-29d +%Y-%m-%d 2>/dev/null || date -d '29 days ago' +%Y-%m-%d)
+  since30=$(panel_date -v-29d +%Y%m%d 2>/dev/null || panel_date -d '29 days ago' +%Y%m%d)
+  since30_iso=$(panel_date -v-29d +%Y-%m-%d 2>/dev/null || panel_date -d '29 days ago' +%Y-%m-%d)
   recent_json=$(recent_sections)
   # Same 30-day window `daily --since "$since30"` covered; summing the rows
   # reproduces that call's .totals.totalCost exactly (verified).
@@ -1538,20 +1577,20 @@ build_summary() {
   # 7-day-avg and 30-day-spend lines can be traffic-lit against "am I
   # spending more than I was a week/month ago" rather than against
   # themselves (a baseline has nothing to compare to but its own past).
-  prev7_since=$(date -v-14d +%Y%m%d 2>/dev/null || date -d '14 days ago' +%Y%m%d)
-  prev7_until=$(date -v-8d +%Y%m%d 2>/dev/null || date -d '8 days ago' +%Y%m%d)
-  prev7_since_iso=$(date -v-14d +%Y-%m-%d 2>/dev/null || date -d '14 days ago' +%Y-%m-%d)
-  prev7_until_iso=$(date -v-8d +%Y-%m-%d 2>/dev/null || date -d '8 days ago' +%Y-%m-%d)
+  prev7_since=$(panel_date -v-14d +%Y%m%d 2>/dev/null || panel_date -d '14 days ago' +%Y%m%d)
+  prev7_until=$(panel_date -v-8d +%Y%m%d 2>/dev/null || panel_date -d '8 days ago' +%Y%m%d)
+  prev7_since_iso=$(panel_date -v-14d +%Y-%m-%d 2>/dev/null || panel_date -d '14 days ago' +%Y-%m-%d)
+  prev7_until_iso=$(panel_date -v-8d +%Y-%m-%d 2>/dev/null || panel_date -d '8 days ago' +%Y-%m-%d)
   prev7_avg=$(sessions_window "$(all_sessions)" "$prev7_since_iso" "$prev7_until_iso" | jq -r '
     [.session[].totalCost] | map(select(. > 0.05)) |
     if length >= 3 then (add/length) else 0 end
   ' 2>/dev/null)
   [ -z "$prev7_avg" ] && prev7_avg=0
 
-  prev30_since=$(date -v-58d +%Y%m%d 2>/dev/null || date -d '58 days ago' +%Y%m%d)
-  prev30_until=$(date -v-30d +%Y%m%d 2>/dev/null || date -d '30 days ago' +%Y%m%d)
-  prev30_since_iso=$(date -v-58d +%Y-%m-%d 2>/dev/null || date -d '58 days ago' +%Y-%m-%d)
-  prev30_until_iso=$(date -v-30d +%Y-%m-%d 2>/dev/null || date -d '30 days ago' +%Y-%m-%d)
+  prev30_since=$(panel_date -v-58d +%Y%m%d 2>/dev/null || panel_date -d '58 days ago' +%Y%m%d)
+  prev30_until=$(panel_date -v-30d +%Y%m%d 2>/dev/null || panel_date -d '30 days ago' +%Y%m%d)
+  prev30_since_iso=$(panel_date -v-58d +%Y-%m-%d 2>/dev/null || panel_date -d '58 days ago' +%Y-%m-%d)
+  prev30_until_iso=$(panel_date -v-30d +%Y-%m-%d 2>/dev/null || panel_date -d '30 days ago' +%Y-%m-%d)
   prev_spend30=$(daily_window "$(recent_sections)" "$prev30_since_iso" "$prev30_until_iso" | jq -r '.totals.totalCost // 0')
   [ -z "$prev_spend30" ] && prev_spend30=0
   prev_avg_daily_30=$(awk -v s="$prev_spend30" 'BEGIN{ printf "%.4f", s/29 }')
@@ -1585,7 +1624,7 @@ build_summary() {
   # = today_amt ÷ the same buckets' historical average for hours 0..now;
   # ratio 1 (no scaling) when there's no historical baseline yet (cold
   # cache).
-  current_hour=$(( 10#$(date +%H) ))
+  current_hour=$(( 10#$(panel_date +%H) ))
   IFS=$'\t' read -r typical_so_far remaining_avg <<<"$(jq -r --argjson ch "$current_hour" '
     ( [.buckets[]? | select(.hour <= $ch) | .avgCost] | add // 0 ) as $ts |
     ( [.buckets[]? | select(.hour >  $ch) | .avgCost] | add // 0 ) as $ra |
@@ -1852,8 +1891,8 @@ build_trailing() {
   else
     echo "  (no usage yet today)"
   fi
-  since3=$(date -v-2d +%Y%m%d 2>/dev/null || date -d '2 days ago' +%Y%m%d)
-  since3_iso=$(date -v-2d +%Y-%m-%d 2>/dev/null || date -d '2 days ago' +%Y-%m-%d)
+  since3=$(panel_date -v-2d +%Y%m%d 2>/dev/null || panel_date -d '2 days ago' +%Y%m%d)
+  since3_iso=$(panel_date -v-2d +%Y-%m-%d 2>/dev/null || panel_date -d '2 days ago' +%Y-%m-%d)
   trend_json=$(daily_window "$(recent_sections)" "$since3_iso" "")
   if [ -n "$trend_json" ]; then
     trend_line=""
@@ -1869,11 +1908,11 @@ build_trailing() {
   # silently report the PREVIOUS one. Absent means $0, which is the truth.
   # Week keys are Mondays -- verified against five consecutive `ccusage
   # weekly` periods and against `weekly --last 1` for the current week.
-  week_start=$(date -v-$(( $(date +%u) - 1 ))d +%Y-%m-%d 2>/dev/null || date -d "$(( $(date +%u) - 1 )) days ago" +%Y-%m-%d)
+  week_start=$(panel_date -v-$(( $(panel_date +%u) - 1 ))d +%Y-%m-%d 2>/dev/null || panel_date -d "$(( $(panel_date +%u) - 1 )) days ago" +%Y-%m-%d)
   recent_json=$(recent_sections)
   week_cost=$(jq -r --arg w "$week_start" '[.weekly[]? | select(.period == $w) | .totalCost][0] // 0' <<<"$recent_json" 2>/dev/null)
   [ -z "$week_cost" ] && week_cost=0
-  month_cost=$(jq -r --arg m "$(date +%Y-%m)" '[.monthly[]? | select(.period == $m) | .totalCost][0] // 0' <<<"$recent_json" 2>/dev/null)
+  month_cost=$(jq -r --arg m "$(panel_date +%Y-%m)" '[.monthly[]? | select(.period == $m) | .totalCost][0] // 0' <<<"$recent_json" 2>/dev/null)
   [ -z "$month_cost" ] && month_cost=0
   printf '  %sweek:%s %s | %smonth:%s %s\n' \
     "$C_CYAN" "$C_RESET" "$(fmt_money "$week_cost")" "$C_CYAN" "$C_RESET" "$(fmt_money "$month_cost")"
@@ -1881,7 +1920,7 @@ build_trailing() {
 
   # ---- top sessions today: which session is consuming the day's spend ----
   header "Top Sessions Today $(rate_tag "$RATE_SLOW")"
-  session_json=$(sessions_window "$(all_sessions)" "$(date +%Y-%m-%d)" "")
+  session_json=$(sessions_window "$(all_sessions)" "$(panel_date +%Y-%m-%d)" "")
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     # ccusage's per-session totalCost/totalTokens are all-time-per-session,
     # not date-scoped — `--since` only decides which sessions get *listed*
@@ -1894,7 +1933,7 @@ build_trailing() {
     # prices from its model-rate table, not per-entry), so today's cost is
     # estimated as a share of the session's all-time cost proportional to
     # its token share.
-    today_str=$(date +%Y-%m-%d)
+    today_str=$(panel_date +%Y-%m-%d)
     tmpdir=$(mktemp -d)
     # Wait on the pids we actually spawned, never a bare `wait`. This runs
     # inside a $(...) command substitution, and such a subshell inherits the
@@ -1951,6 +1990,14 @@ last_cols=0
 summary_block=""
 trailing_raw=""
 
+# Test seam: source this file with PANEL_LIB_ONLY=1 to get every function
+# above without entering the render loop. The tty setup further up is
+# already guarded by `[ -t 0 ]`, so a sourced panel touches no terminal and
+# installs no traps.
+if [ -n "${PANEL_LIB_ONLY:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 while true; do
   # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
   # whole pane for one frame before the redraw lands, which reads as a
@@ -1978,7 +2025,7 @@ while true; do
   # it cannot land on the shell prompt when the panel exits.
   drain_stdin
 
-  now_epoch=$(date +%s)
+  now_epoch=$(panel_now)
   resolve_session
 
   slow_due=0

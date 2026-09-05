@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Counting ccusage stub. Records every invocation and serves a fixture.
+#
+# Invocation counts are the primary assertion in this suite: they are exact,
+# fast and hermetic, where asserting CPU seconds would be none of those and
+# would produce a flaky gate that gets ignored, then disabled, then deleted.
+printf '%s\n' "$*" >> "${CCUSAGE_CALL_LOG:-/dev/null}"
+
+case "$1" in
+  daily)      fixture=sections.json ;;
+  session)    fixture=session.json ;;
+  blocks)     fixture=blocks.json ;;
+  # statusline takes its payload on stdin; drain it or the caller sees EPIPE.
+  statusline) cat >/dev/null; fixture=statusline.txt ;;
+  *)          printf 'ccusage stub: unhandled subcommand %s\n' "$1" >&2; exit 70 ;;
+esac
+
+path="${CCUSAGE_FIXTURE_DIR:?}/$fixture"
+if [ ! -f "$path" ]; then
+  printf 'ccusage stub: missing fixture %s\n' "$path" >&2
+  exit 70
+fi
+cat "$path"
