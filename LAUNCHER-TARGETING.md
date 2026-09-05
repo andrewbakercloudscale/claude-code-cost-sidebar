@@ -2,9 +2,10 @@
 
 Written 2026-09-05, after a launcher change of mine put six cost panels into
 a window the user was working in. This is the record of what the launcher
-actually does, what broke, what is deployed now, and the one open question.
+actually does, what broke, what is deployed now, and the answer to the question
+that would make all of it unnecessary.
 
-## State as of 2026-09-05, 16:05
+## State as of 2026-09-05, 16:30
 
 | | |
 |---|---|
@@ -12,7 +13,7 @@ actually does, what broke, what is deployed now, and the one open question.
 | Symptom before | new windows opened with no panel, whenever a second Ghostty was alive |
 | Symptom now | should be fixed; **not yet confirmed by the user in normal use** |
 | Known remaining risk | a genuinely ambiguous focus state still skips, so a window can still come up without a panel — by design, see "Why skipping is right" |
-| Open question | can keystrokes be delivered to a **non-focused** window (`CGEventPostToPid`)? **Untested** — see "The open question" |
+| Answered 2026-09-05 | keystrokes **can** be delivered to a non-focused window by pid — tested, works end to end. See "The open question, answered". Not yet implemented. |
 
 Commits, in order: `75374c1` (my bad fix) → `af1e67e` (revert) → `fa3dd2f`
 (the guard that shipped). `75374c1` is in history and **must not be
@@ -49,7 +50,8 @@ refuse to type when it cannot say yes.
 There is a second path, and it is the one that has none of these problems:
 inside tmux the launcher uses `tmux split-window`, a real API, no focus, no
 keystrokes. The Ghostty path is the way it is because Ghostty offers no
-equivalent (see "The open question").
+equivalent through its CLI — though it turns out there is another way in, see
+"The open question, answered".
 
 ## Why there are several Ghostty processes at all
 
@@ -147,42 +149,77 @@ Not verified: normal day-to-day use. The user had not yet opened fresh
 windows in anger when the session ended. **First thing to check next
 session.**
 
-## The open question: keystrokes to a non-focused window
+## The open question, answered: yes
 
-If keystrokes could be delivered to a specific window regardless of focus,
-this entire class disappears — no guard, no skip, no possibility of typing
-into the wrong place.
-
-What is established:
+**Tested 2026-09-05. Keystrokes can be delivered to a specific, non-focused
+window, and the full launcher operation works that way.**
 
 | Route | Verdict |
 |---|---|
-| `System Events` `keystroke` | **No.** Focus-based by design, no targeting. |
+| `System Events` `keystroke` | **No.** Focus-based by design, no targeting. This is what the whole guard exists to work around. |
 | Ghostty CLI | **No.** 1.3.1 has `+new-window` but no `+new-split` — checked `+list-actions`. |
-| `CGEventPostToPid` | **Unknown — worth testing.** |
+| `CGEventPostToPid` | **Yes.** Verified end to end. |
 
-`CGEventPostToPid` posts an event to a specific **process**. Because each
-Ghostty window here is its own process, and the launcher already resolves
-that pid by ancestry, it maps exactly onto what is needed. pyobjc is present
-(`/opt/homebrew/bin/python3 -c "import Quartz"`), so it is reachable without
-new dependencies.
+`CGEventPostToPid` posts an event to a specific **process**. Each Ghostty
+window here is its own process, and the launcher already resolves that pid by
+ancestry, so it maps exactly onto what is needed.
 
-**It has not been tested.** I tried; the throwaway probe window kept exiting
-before the control case ran, so both the focused and the background test
-returned empty. That is a broken harness, not a result — do not read it as
-"it does not work". The control case has to pass before the background case
-means anything.
+Driven through Hammerspoon (`hs.eventtap`, which wraps that API) because it
+is already installed here and reachable via `osascript -e 'tell application
+"Hammerspoon" to execute lua code "..."'` — no config change, no `hs.ipc`, no
+new dependency needed for the test itself.
 
-The real caveat to settle: many macOS apps ignore synthesised key events
-while not the active app. Ghostty may be one of them.
+### What was measured
 
-**Fastest way to get a yes/no:** Hammerspoon is installed and running on this
-machine, and `hs.eventtap.keyStroke(mods, key, delay, app)` wraps this same
-API. Try that before writing any python.
+A throwaway Ghostty instance, focus deliberately held on an unrelated window
+throughout, verified before and after each step:
 
-If it works, `fa3dd2f`'s guard becomes unnecessary rather than merely
-careful, and the launcher stops depending on focus at all — the same property
-the tmux path already has.
+1. **Plain text.** `hs.eventtap.keyStrokes(text, app)` typed a command into
+   the unfocused probe. It ran. Focus never moved.
+2. **The `cmd+d` chord.** Sent alone, to the unfocused probe. Focus never
+   moved; the probe gained a second shell child, so the split happened.
+3. **The whole sequence** — split, type the panel command, Return. A panel
+   process appeared, and its own process ancestry places it in the **probe's**
+   Ghostty, not in the focused one. Focus stayed on the unrelated window
+   before and after.
+
+An earlier attempt at this via pyobjc returned empty for both the focused and
+the background case and is recorded above as *untested* rather than negative.
+It was a broken harness: the probe window was launched with `-e "bash -c 'cat
+> file'"` and exited immediately, so the events were posted to a dead pid.
+The fix was a probe running an ordinary interactive shell, which persists.
+**The control case has to pass before the background case means anything** —
+the first three attempts here all failed that way.
+
+### Why this matters more than "one fewer skip"
+
+It removes the failure class rather than managing it. Events addressed to a
+pid cannot land in the wrong window **no matter what focus is doing**, so:
+
+- The whole positive-identification guard becomes unnecessary rather than
+  merely careful.
+- The six-panels-in-the-wrong-window incident becomes structurally
+  impossible, not just guarded against.
+- Windows stop being skipped, because there is nothing left to be ambiguous
+  about.
+
+It is the same property the tmux path already has, which is why that path has
+never produced a bug of this kind.
+
+### Not implemented — the open decision is the dependency
+
+The mechanism is proven; what it should be built on is not decided.
+Hammerspoon is a third-party app that happens to be installed on this
+machine, and this repo is public — most users will not have it. pyobjc is not
+guaranteed either. So an implementation needs:
+
+- a posting mechanism with no hard third-party dependency (a small compiled
+  helper, or pyobjc when present), **and**
+- a fallback to today's guarded osascript path when it is unavailable, which
+  means the guard stays even once this ships, and
+- the `keyblock` guard reconsidered: it exists because keystrokes could be
+  interleaved with real typing, which is far less of a concern once they are
+  addressed to a specific process.
 
 ## Debugging notes for next time
 
