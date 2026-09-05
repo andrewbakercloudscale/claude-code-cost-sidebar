@@ -2037,6 +2037,46 @@ build_session_table() {
 # Emitted untruncated; the caller applies `head -n $remaining` at PRINT
 # time, not here, because the height left over depends on how many rows the
 # fast-tier turn table happens to have this tick.
+# Is the slow-tier frame due to be rebuilt this tick?
+#
+# A function, not three lines inline, because the third condition is the only
+# part of this panel's refresh behaviour that is neither a clock nor a resize
+# -- and a decision that cannot be called from a test is a decision that gets
+# asserted by grepping the source for a variable name, which proves nothing
+# about what the loop does with it.
+#
+# The three reasons a frame is due:
+#   1. SLOW_REFRESH has elapsed.
+#   2. The pane was resized, so the whole frame must be re-laid out.
+#   3. The session identity CHANGED.
+#
+# (3) exists because identity is resolved on every FAST tick but rendered by
+# the header, which is slow tier -- so a model learned at 10s did not reach
+# the screen for up to two minutes. Every new pane starts in exactly that
+# state: the panel launches with the session's first line on disk but no
+# ASSISTANT line yet, so the scan correctly reports "unknown", the first
+# frame renders `Model: Unknown` / `Context Usage: N/A`, and it sits there
+# while the fast-tier turn table two lines below already names the model on
+# every row. One frame contradicting itself, for two minutes, on every
+# session start.
+#
+# Identity is not on a cadence at all -- it changes when it changes, and
+# noticing is free because resolve_session has already run this tick. So
+# redraw on the change rather than waiting for the clock. This also catches a
+# genuine mid-session model switch, which had the same two-minute lag for the
+# same reason.
+#
+# Pure: it reads the "what did the last frame show" state but never writes
+# it. Those are updated where the frame is actually rendered, next to
+# last_slow and last_cols, so a tick that decides "due" and then does not
+# render cannot mark the identity as already shown.
+slow_frame_due() { # $1 = now epoch
+  (( $1 - last_slow >= SLOW_REFRESH )) && return 0
+  [ "$cols" != "$last_cols" ] && return 0
+  [ "${model_label:-}" != "${last_model_label:-}" ] && return 0
+  return 1
+}
+
 build_trailing() {
   echo
   echo
@@ -2199,7 +2239,6 @@ while true; do
   (( rows < 10 )) && rows=10
   export COLS="$cols"
 
-
   # Discard anything typed into this read-only pane since the last tick, so
   # it cannot land on the shell prompt when the panel exits.
   drain_stdin
@@ -2212,8 +2251,7 @@ while true; do
   session_stats_refresh
 
   slow_due=0
-  (( now_epoch - last_slow >= SLOW_REFRESH )) && slow_due=1
-  [ "$cols" != "$last_cols" ] && slow_due=1
+  slow_frame_due "$now_epoch" && slow_due=1
 
   # One fetch+merge per slow tick, read by every section below it. The error
   # file is cleared first so the panel reports this tick's failures rather
@@ -2234,6 +2272,7 @@ while true; do
     trailing_raw=$(build_trailing 2>>"$PANEL_ERR_FILE")
     last_slow=$now_epoch
     last_cols=$cols
+    last_model_label="${model_label:-}"
   fi
 
   # Everything through the per-turn table is GUARANTEED — printed in full,

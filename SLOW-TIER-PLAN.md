@@ -858,6 +858,54 @@ an entry's mtime fresh — so 7 days here means "no session whose transcript
 has moved in a week", and deleting one costs exactly one refetch if that
 session is ever shown again.
 
+## 10.5 `Model: Unknown` for two minutes, on every session start
+
+Reported from a live pane: the header said `Model: Unknown`, `Session:
+$-0.00`, `Context Usage: N/A` while the turn table two lines below it listed
+seven turns of **Opus 5** with real costs. One frame contradicting itself.
+
+Both halves were behaving as written. Session identity is resolved by
+`resolve_session` on every **fast** tick, but it is *rendered* by the header,
+which is **slow tier** — so an identity learned at 10s did not reach the
+screen until the next 120s frame. The turn table is fast tier, so it was
+right immediately.
+
+Every new pane starts in exactly that state, which is why this was not an
+edge case but the common one: the panel launches with the session's first
+line already on disk and no ASSISTANT line yet, so the identity scan
+correctly reports "unknown" — and that answer then sits on screen for up to
+two minutes after it stopped being true.
+
+The scan was never the problem. Run by hand against the reported session it
+returned `claude-opus-5 / Opus 5 / hamadi-labs-audit` in one pass; the fix is
+in *when the header is redrawn*, not in what it computes. Identity is not on
+a cadence at all — it changes when it changes, and noticing costs nothing
+because `resolve_session` has already run. So the frame is now due on the
+change itself, which also fixes a mid-session model switch lagging by the
+same two minutes.
+
+### The seam is the point
+
+The decision moved out of the loop into `slow_frame_due()`. Not tidiness —
+the first version of check V asserted `build_summary`'s **output** and
+**passed against the unfixed panel**, because `build_summary` always renders
+the current identity; the bug was that the loop never called it. The only
+assertion that failed was a grep of the panel source for a variable name,
+which proves nothing about what the loop does with it. That is this file's
+recurring failure in a new costume, caught this time only because the plan
+requires running new checks against the pre-change script.
+
+A decision that cannot be called from a test gets asserted by grepping for
+it. So it is a function now, and check V calls it: not due when nothing
+changed, due the instant the label changes on an unmoved clock, and **not
+due again once shown** — that last one because an identity that stayed a
+reason to redraw would make every tick a slow tick and quietly delete the
+slow tier.
+
+`slow_frame_due()` is pure. `last_model_label` is written where the frame is
+actually rendered, next to `last_slow`/`last_cols`, so a tick that decides
+"due" and then does not render cannot mark the identity as already shown.
+
 ## 11. Phase 3 — incremental rollup (deferred, not scheduled)
 
 The honest answer to "surely not much data changes": in a 10-minute window,
