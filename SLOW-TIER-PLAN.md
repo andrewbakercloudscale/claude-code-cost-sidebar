@@ -282,7 +282,9 @@ Two consequences:
   three are cache **hits**, but each still re-reads and re-parses a 131KB
   payload. Memoising it in a shell variable for the duration of one tick is
   worth ~0.1 CPU-s/tick and is a clean, separate change. Do it after the
-  harness exists.
+  harness exists. **Done — see §10.2**, which also corrects the estimate
+  (~0.03 CPU-s/tick measured, not ~0.1) and the mechanism: a memo variable
+  could not have worked at all.
 
 ---
 
@@ -746,6 +748,115 @@ renders:
 — and, because Phase 2 moved this session's own figures out of ccusage, it
 still shows Session, Burn, Context Usage and the full per-turn table with the
 tool completely dead.
+
+## 10.2 The four `all_sessions` calls — done 2026-09-05
+
+§5.2 deferred this until the harness existed. It does, so it is done.
+
+Three of the four calls are in `build_summary`, and they are three views of
+one report: the 7-day baseline, the previous 7 days it is compared against,
+and this project's share. Each fetched the report for itself. The fourth is
+in `build_trailing` and is the only one there, so it stays as it is.
+
+The fix is a call-site refactor — `all_sess=$(all_sessions)` once at the top
+of `build_summary` — and **not** a memo inside `all_sessions`, which is what
+was tried first and is worth recording because it looked obviously right:
+
+> Every call site is `$(all_sessions)`, its own subshell. A memo variable set
+> inside one cannot be read back out, so the memo would have been invisible
+> and saved exactly nothing — while reading, in the diff, like a fix. The
+> panel already documents this trap in `PANEL_ERR_FILE`'s own comment ("A
+> FILE rather than a variable, because the section builders run inside
+> `$(...)`"), one screen above the code that repeated it.
+
+**What it is worth.** Not enough to see end to end, and saying so is the
+point. Per redundant call, measured on the real 150KB payload: 0.0097 CPU-s
+for the `cat`+`jq` re-parse, against 0.001 for a `cat` alone — so ~0.03
+CPU-s of a slow tick, plus one `corpus_changed_since` walk per call on a tick
+where the TTL has lapsed. Against the 17.02 CPU-s the §10 measurement took
+over 420s that is ~0.6%, which is **below what that method can resolve**. A
+`/usr/bin/time` run over any practical window would report noise, and
+reporting noise as a saving is how a number gets quoted back later as fact.
+So the gate is the count, exactly as §8.4 says: check S asserts three fetches
+became one, and fails against the pre-change panel with `expected 1, actual 3`.
+
+The better reason is coherence anyway. The three calls were three separate
+command substitutions, so a TTL lapsing between two of them handed one frame
+two different payloads and the trend arrow could be coloured against a
+baseline the figure beside it was not computed from — §6.1's drift, arriving
+through the cache rather than through a bucket.
+
+### The check had to be rebuilt twice before it measured anything
+
+Both failures produced a green check, which is this file's recurring theme:
+
+- **The counter was a variable.** Same subshell trap as the fix it was
+  testing, one layer up: it reported "1 call" whatever the panel did.
+- **`build_summary` died a third of the way through.** `cols`/`rows`/`COLS`
+  are set by the render loop, not by `resolve_session`, so under `set -u` the
+  function aborts at the Context Usage line — *before* the third call site,
+  having already emitted a plausible eight-line frame. The count was over two
+  of three sections while reading as all three. The check now asserts the
+  `Folder:` line, which is the section the third call feeds and therefore the
+  only proof the third call was reached.
+
+## 10.3 Two panels fought over one temp filename
+
+Found by §10's step 5 — run the panel and read it — and findable no other
+way, because it needs two panels and the suite had always run one.
+
+Every cache write here is `> "$f.tmp" && mv "$f.tmp" "$f"`, which is atomic
+for the reader. The temp name was not per-process, and three of these caches
+are keyed by session with no lock around them. Two panels on the same session
+both wrote `<file>.tmp`; whichever renamed first won; the loser's `mv` failed
+on a path that no longer existed.
+
+Not silent, either — the builders' stderr goes to `PANEL_ERR_FILE`, so §10.1
+faithfully rendered it onto the panel:
+
+```
+! mv: /Users/…/.cache/ccusage-panel-cache/sessid-938aabfa5b67ccb2.tsv.tmp: No such file or directory
+```
+
+Reproduced on the pre-change panel (3 concurrent, 1 of 3 errored) and clean
+on the fixed one (3 concurrent, 0 errors, 0 temp files left). Eight write
+sites now carry `$$`; the rename is still a rename within one directory, so
+it is still atomic. A panel killed between the write and the rename leaves a
+temp behind, which the prune below now sweeps.
+
+## 10.4 The per-session caches grew forever
+
+`OPENCODE-TIER-PLAN.md` flagged this when the OpenCode panel's equivalent was
+pruned and this one was left alone as out of scope. It is in scope now.
+
+`turns-<key>.out`, `sessid-<key>.tsv` and `todaytok-<key>.tsv` are keyed by
+SESSION, not by query, so unlike the `<key>.json` query cache they never
+converge on a fixed set of files — one entry per session ever shown, kept
+forever, against 203 transcripts already in `~/.claude/projects` here.
+`errors-<pid>.log` is the same shape with a faster clock: one per panel
+process. `restore_tty` removes it on a clean exit, but that trap is only
+installed when stdin is a tty, so a panel killed with SIGKILL or run without
+a terminal leaves its file for good.
+
+One `find … -mtime +7 -delete` at panel startup, over the four families plus
+orphaned `*.tmp`. Not per tick: cheap is not free, and nothing here moves
+that fast.
+
+Two things it deliberately does **not** touch, both asserted by check T:
+
+- **The `<key>.json` query cache.** Age on disk is not staleness there — an
+  old entry is a *correct* entry when the corpus has not moved, which is the
+  entire point of the gate. A prune that swept it would be invisible, every
+  figure still right, while silently forcing a full ccusage refetch of every
+  report: the exact cost this plan exists to avoid.
+- **This panel's own error log**, which is created immediately after the
+  prune runs. A prune placed one line later would break that and nothing
+  else, so the check asserts the file exists afterwards.
+
+Since a cache entry is only rewritten on a MISS, being *served* does not keep
+an entry's mtime fresh — so 7 days here means "no session whose transcript
+has moved in a week", and deleting one costs exactly one refetch if that
+session is ever shown again.
 
 ## 11. Phase 3 — incremental rollup (deferred, not scheduled)
 

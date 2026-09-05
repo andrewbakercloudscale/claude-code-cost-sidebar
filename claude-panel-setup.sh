@@ -248,7 +248,7 @@ license_line() {
     local org_type mult
     org_type=$(jq -r '.oauthAccount.organizationType // empty' "$acct_file" 2>/dev/null)
     if [ -z "$org_type" ]; then
-      printf 'none' > "$LICENSE_CACHE.tmp" && mv "$LICENSE_CACHE.tmp" "$LICENSE_CACHE"
+      printf 'none' > "$LICENSE_CACHE.$$.tmp" && mv "$LICENSE_CACHE.$$.tmp" "$LICENSE_CACHE"
       return
     fi
     case "$org_type" in
@@ -261,7 +261,7 @@ license_line() {
     esac
     mult=$(jq -r '.oauthAccount.organizationRateLimitTier // empty' "$acct_file" 2>/dev/null | grep -oE '[0-9]+x$')
     [ -n "$mult" ] && label="$label ($mult)"
-    printf '%s' "$label" > "$LICENSE_CACHE.tmp" && mv "$LICENSE_CACHE.tmp" "$LICENSE_CACHE"
+    printf '%s' "$label" > "$LICENSE_CACHE.$$.tmp" && mv "$LICENSE_CACHE.$$.tmp" "$LICENSE_CACHE"
   fi
   [ "$label" = "none" ] && return
   printf '  📜 License: %s%s%s\n' "$C_CYAN" "$label" "$C_RESET"
@@ -555,6 +555,53 @@ TTL_HISTORY=$(( SLOW_REFRESH * 15 / 2 ))
 (( TTL_HISTORY < TTL_LIVE )) && TTL_HISTORY=$TTL_LIVE
 mkdir -p "$CCUSAGE_CACHE_DIR"
 
+# ---- prune the per-session caches --------------------------------------
+# Three of the caches below are keyed by SESSION, not by query, so they do
+# not converge on a fixed set of files the way the `<key>.json` query cache
+# does -- `turns-<key>.out`, `sessid-<key>.tsv` and `todaytok-<key>.tsv`
+# gain one entry per session and never lose one. There are already 200+
+# transcripts in ~/.claude/projects on this machine, and nothing ever
+# removed the entries for the ones last touched months ago. Same shape as
+# opencode-panel.sh's `export-*.json`, which is pruned; this side was
+# flagged as a known gap when that one was written and is fixed here.
+#
+# `errors-<pid>.log` is the same problem with a faster clock: one per panel
+# PROCESS. restore_tty removes it on a clean exit, but that trap is only
+# installed when stdin is a tty, so a panel killed with SIGKILL, or run
+# without a terminal, leaves its file behind for good.
+#
+# A cache entry is only rewritten on a MISS, so an entry being served from
+# cache does not keep its own mtime fresh -- 7 days here means "no session
+# whose transcript last moved a week ago", and deleting one costs exactly
+# one refetch the next time that session is shown. A live panel's error log
+# is truncated every slow tick (120s), so it can never approach the cutoff.
+#
+# Once per panel launch, not per tick: a `find` over a few hundred small
+# files is cheap, but it is not free, and nothing here changes fast enough
+# to need it more often.
+find "$CCUSAGE_CACHE_DIR" -maxdepth 1 \
+  \( -name 'turns-*.out' -o -name 'sessid-*.tsv' -o -name 'todaytok-*.tsv' \
+     -o -name 'errors-*.log' -o -name '*.tmp' \) -mtime +7 -delete 2>/dev/null
+
+# ---- why every temp file carries a pid -----------------------------------
+# The write pattern throughout this file is `> "$f.tmp" && mv "$f.tmp" "$f"`,
+# so the rename is atomic and a reader never sees half a file. The TEMP name
+# was not per-process though, and three of these caches are keyed by session
+# with no lock around them -- so two panels open on the same session both
+# wrote `<file>.tmp`, one renamed it, and the other's `mv` failed on a path
+# that no longer existed.
+#
+# That is not a silent loss: the builders' stderr is routed into
+# PANEL_ERR_FILE, so it rendered as `! mv: ...tmp: No such file or
+# directory` on the panel itself. Found by running the panel and reading it
+# while a second one was open -- which is the only way it could have been
+# found, since with one panel running there is nothing to race.
+#
+# `$$` makes the temp name unique per process; the rename stays atomic
+# because it is still a rename within one directory. A panel killed between
+# the write and the rename leaves its temp behind, which is what the `.tmp`
+# glob in the prune above is for.
+
 # ---- errors are rendered, never swallowed ------------------------------
 # Everything in this panel is a number, and a number that failed to compute
 # looks exactly like a number that computed to zero. Almost every call here
@@ -748,7 +795,7 @@ ccusage_cached() {
     return 0
   fi
   rm -f "$err_tmp"
-  printf '%s' "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  printf '%s' "$out" > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
   [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
   printf '%s' "$out"
 }
@@ -954,7 +1001,7 @@ session_today_tokens_cached() {
   # Only a real answer gets cached -- caching "" on a failed/interrupted
   # fetch would pin the empty result until the next turn landed.
   [ -n "$out" ] || return
-  printf '%s\t%s\n' "$stamp:$today" "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  printf '%s\t%s\n' "$stamp:$today" "$out" > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
   printf '%s' "$out"
 }
 
@@ -1017,7 +1064,7 @@ if first_ts:
 print(f"{sid}\t{model}\t{label}\t{folder}\t{epoch}")
 PYEOF
 )
-  printf '%s\t%s\n' "$stamp" "$out" > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
+  printf '%s\t%s\n' "$stamp" "$out" > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
   printf '%s' "$out"
 }
 
@@ -1378,12 +1425,12 @@ if shown:
     if saw_secondary:
         print(f"  {c_dim}* served by claude-burst secondary; not Anthropic spend{c_reset}")
 PYEOF
-  } > "$cache_file.tmp"
-  if [ $? -eq 0 ] && [ -s "$cache_file.tmp" ]; then
-    mv "$cache_file.tmp" "$cache_file"
+  } > "$cache_file.$$.tmp"
+  if [ $? -eq 0 ] && [ -s "$cache_file.$$.tmp" ]; then
+    mv "$cache_file.$$.tmp" "$cache_file"
     tail -n +2 "$cache_file"
   else
-    rm -f "$cache_file.tmp"
+    rm -f "$cache_file.$$.tmp"
     printf '  %sturn table unavailable: transcript parse failed%s\n' "$C_RED" "$C_RESET"
   fi
 }
@@ -1705,7 +1752,22 @@ build_summary() {
   # single earlier tiny/huge session would skew it.
   since7=$(panel_date -v-7d +%Y%m%d 2>/dev/null || panel_date -d '7 days ago' +%Y%m%d)
   since7_iso=$(panel_date -v-7d +%Y-%m-%d 2>/dev/null || panel_date -d '7 days ago' +%Y-%m-%d)
-  baseline_json=$(sessions_window "$(all_sessions)" "$since7_iso" "")
+  # Fetched ONCE for the whole frame. Three sections below are three views of
+  # this one report -- the 7-day baseline, the previous 7 days it is compared
+  # against, and this project's share of it -- and each used to call
+  # all_sessions() for itself. On a cache hit that is still a re-read and a
+  # re-parse of a 150KB payload (~0.01 CPU-s each, measured), and on a tick
+  # where the TTL has lapsed it is additionally a `corpus_changed_since` walk
+  # each.
+  #
+  # Coherence is the better reason. The three calls were three separate
+  # command substitutions, so a TTL lapsing between two of them handed the
+  # same frame two different payloads, and the trend arrow could be coloured
+  # against a baseline the figure beside it was not computed from -- section
+  # 6.1's drift, arriving through the cache rather than through a bucket.
+  # One fetch, one frame, one set of numbers that agree.
+  all_sess=$(all_sessions)
+  baseline_json=$(sessions_window "$all_sess" "$since7_iso" "")
   avg_session_cost=$(jq -r '
     [.session[].totalCost] | map(select(. > 0.05)) |
     if length >= 3 then (add/length) else 0 end
@@ -1729,7 +1791,7 @@ build_summary() {
   prev7_until=$(panel_date -v-8d +%Y%m%d 2>/dev/null || panel_date -d '8 days ago' +%Y%m%d)
   prev7_since_iso=$(panel_date -v-14d +%Y-%m-%d 2>/dev/null || panel_date -d '14 days ago' +%Y-%m-%d)
   prev7_until_iso=$(panel_date -v-8d +%Y-%m-%d 2>/dev/null || panel_date -d '8 days ago' +%Y-%m-%d)
-  prev7_avg=$(sessions_window "$(all_sessions)" "$prev7_since_iso" "$prev7_until_iso" | jq -r '
+  prev7_avg=$(sessions_window "$all_sess" "$prev7_since_iso" "$prev7_until_iso" | jq -r '
     [.session[].totalCost] | map(select(. > 0.05)) |
     if length >= 3 then (add/length) else 0 end
   ' 2>/dev/null)
@@ -1903,7 +1965,7 @@ build_summary() {
   # the folder name rather than the account-wide block projection that
   # used to sit here. $project_dir needs no resolved session either.
   proj_ids_json=$(ls "$project_dir"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | jq -R -s -c 'split("\n") | map(select(length>0))')
-  proj_spend=$(all_sessions | jq -r --argjson ids "$proj_ids_json" '
+  proj_spend=$(printf '%s' "$all_sess" | jq -r --argjson ids "$proj_ids_json" '
     [.session[] | select(.period as $p | $ids | index($p) != null) | .totalCost] | add // 0
   ')
   printf '  📁 Folder: %s (%s)\n' "$folder_disp" "$(fmt_money "$proj_spend")"
@@ -2861,8 +2923,8 @@ if [ -z "$sessions_json" ]; then
   # Only a parseable payload is cached -- writing an empty or truncated
   # result would poison the panel's cache too, since they share this file.
   if [ -n "$sessions_json" ] && jq -e '.session' >/dev/null 2>&1 <<<"$sessions_json"; then
-    printf '%s' "$sessions_json" > "$cache_file.tmp" 2>/dev/null &&
-      mv "$cache_file.tmp" "$cache_file" 2>/dev/null
+    printf '%s' "$sessions_json" > "$cache_file.$$.tmp" 2>/dev/null &&
+      mv "$cache_file.$$.tmp" "$cache_file" 2>/dev/null
   fi
 fi
 
