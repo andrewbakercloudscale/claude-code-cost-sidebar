@@ -107,10 +107,27 @@ sandbox_new() { # $1 = name
   # test would be asserting nothing it thought it was.
   printf '{}\n' > "$HOME/.claude/projects/test-project/seed.jsonl"
   age_corpus 3600
+
+  # Empty-but-valid defaults for every query the panel makes. A check
+  # overrides only the ones it is about; without these a missing fixture
+  # makes the stub exit 70, and an empty report is indistinguishable from a
+  # deliberate one.
+  printf '{"daily":[]}\n'   > "$CCUSAGE_FIXTURE_DIR/daily.json"
+  printf '{"weekly":[]}\n'  > "$CCUSAGE_FIXTURE_DIR/weekly.json"
+  printf '{"monthly":[]}\n' > "$CCUSAGE_FIXTURE_DIR/monthly.json"
+  printf '{"sessions":[]}\n' > "$CCUSAGE_FIXTURE_DIR/session.json"
+  printf '{"blocks":[]}\n'  > "$CCUSAGE_FIXTURE_DIR/blocks.json"
 }
 
-# Number of times the stub was invoked for a given ccusage subcommand.
-calls_for() { grep -c "^$1 " "$CCUSAGE_CALL_LOG" 2>/dev/null || true; }
+# Number of times the stub was invoked for a given ccusage subcommand,
+# counting the `claude <sub>` form the panel actually uses as well as a bare
+# one, so a check cannot pass by counting a query shape nobody makes.
+calls_for() { grep -cE "^(claude )?$1 " "$CCUSAGE_CALL_LOG" 2>/dev/null || true; }
+
+# Seed the merged daily/weekly/monthly report the loop normally fetches once
+# per slow tick. Checks that read recent_sections() must go through this, or
+# they read an empty memo and assert nothing.
+seed_recent() { RECENT_JSON=$(recent_sections_fetch); }
 
 # Load the panel's functions without entering its render loop.
 load_panel() { # $@ = panel args

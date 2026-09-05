@@ -6,11 +6,11 @@
 check_A_ttl_bucketing() {
   sandbox_new A
   local TICKS=6
-  cat > "$CCUSAGE_FIXTURE_DIR/sections.json" <<'JSON'
-{"daily":[{"period":"2026-09-01","totalCost":1.5,"totalTokens":100}],"weekly":[],"monthly":[]}
+  cat > "$CCUSAGE_FIXTURE_DIR/daily.json" <<'JSON'
+{"daily":[{"date":"2026-09-01","totalCost":1.5,"totalTokens":100}],"weekly":[],"monthly":[]}
 JSON
   cat > "$CCUSAGE_FIXTURE_DIR/session.json" <<'JSON'
-{"session":[{"period":"sess-1","totalCost":1.5,"totalTokens":100,"metadata":{"lastActivity":"2026-09-01T10:00:00.000Z"}}]}
+{"sessions":[{"sessionId":"sess-1","totalCost":1.5,"totalTokens":100,"lastActivity":"2026-09-01T10:00:00.000Z"}]}
 JSON
   printf '{"blocks":[]}' > "$CCUSAGE_FIXTURE_DIR/blocks.json"
   printf '{}' > "$HOME/.cache/claude-hourly-buckets.json"
@@ -26,9 +26,9 @@ JSON
     for f in "$HOME/.cache/ccusage-panel-cache"/*.json; do
       [ -e "$f" ] && age_file "$f" 600
     done
-    recent_sections >/dev/null
+    recent_sections_fetch >/dev/null
     all_sessions >/dev/null
-    ccusage_cached blocks --active --json --offline >/dev/null
+    ccusage_cached claude blocks --active --json --offline >/dev/null
   done
 
   # Live bucket: today's total rides in the daily payload, so it refetches
@@ -60,7 +60,7 @@ JSON
     for f in "$HOME/.cache/ccusage-panel-cache"/*.json; do
       [ -e "$f" ] && age_file "$f" 600
     done
-    recent_sections >/dev/null
+    recent_sections_fetch >/dev/null
   done
   assert_eq "an idle corpus costs zero scans over $TICKS ticks" "$before_daily" "$(calls_for daily)"
 }

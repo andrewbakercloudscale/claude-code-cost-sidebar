@@ -417,7 +417,9 @@ PRICES = {
     "claude-opus-4-7":   (5.00, 25.00),
     "claude-opus-4-6":   (5.00, 25.00),
     "claude-fable-5":    (10.00, 50.00),
+    "claude-fable-5-1":  (10.00, 50.00),
     "claude-mythos-5":   (10.00, 50.00),
+    "claude-mythos-5-1": (10.00, 50.00),
 }
 DEFAULT_PRICE = (3.00, 15.00)
 CACHE_READ_MULT, CACHE_WRITE_5M_MULT, CACHE_WRITE_1H_MULT = 0.1, 1.25, 2.0
@@ -577,9 +579,15 @@ RATE_HISTORY="$(fmt_interval "$TTL_HISTORY")"
 # Phase 2 (drop the statusline fetch) and Phase 3 (incremental rollup) are
 # the levers on it; this one is not.
 ccusage_ttl_for() {
-  case "$1" in
-    session) printf '%s' "$TTL_HISTORY" ;;
-    *)       printf '%s' "$TTL_LIVE" ;;
+  # Every query is `claude <subcommand> ...` now, so the subcommand is the
+  # SECOND word. Keyed on the first, everything would read as "claude" and
+  # land in the live bucket -- which is the safe direction, but silently,
+  # and the history bucket would quietly stop existing.
+  local q="$1"
+  [ "$q" = "claude" ] && q="${2:-}"
+  case "$q" in
+    session|weekly|monthly) printf '%s' "$TTL_HISTORY" ;;
+    *)                      printf '%s' "$TTL_LIVE" ;;
   esac
 }
 
@@ -595,9 +603,9 @@ ccusage_ttl_for() {
 #
 # Subtracted, never added, so the effective TTL is at most the advertised
 # one. A label may under-promise freshness; it may never over-promise it.
-ccusage_ttl_jittered() { # $1 = subcommand, $2 = cache key
+ccusage_ttl_jittered() { # $1 = subcommand, $2 = cache key, $3 = 2nd word
   local ttl j
-  ttl=$(ccusage_ttl_for "$1")
+  ttl=$(ccusage_ttl_for "$1" "${3:-}")
   j=$(( 0x$(printf '%s' "$2" | cut -c1-2) % 15 ))
   printf '%s' $(( ttl - ttl * j / 100 ))
 }
@@ -656,7 +664,7 @@ ccusage_cached() {
   cache_file="$CCUSAGE_CACHE_DIR/$key.json"
   lock_dir="$cache_file.lock"
   now_epoch=$(panel_now)
-  ttl=$(ccusage_ttl_jittered "$1" "$key")
+  ttl=$(ccusage_ttl_jittered "$1" "$key" "${2:-}")
 
   if [ -f "$cache_file" ]; then
     cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
@@ -735,7 +743,43 @@ ccusage_cached() {
 # cost, not the serialization) and cannot be wrong. spend30 is recovered by
 # filtering the daily rows below, which matches `daily --since <30d>`
 # exactly.
-recent_sections() { ccusage_cached daily --json --sections daily,weekly,monthly --offline; }
+# `ccusage daily` means EVERY detected agent CLI -- Codex, OpenCode, Gemini,
+# Copilot and the rest -- so a panel titled "Claude Code Usage" was reporting
+# other agents' spend as its own. Measured simultaneously (generic run either
+# side of the scoped one, both giving the identical figure): $6823.37
+# all-agent against $6809.21 Claude-only, a real $14.16.
+#
+# The `claude` subcommand does not accept --sections, so the one combined
+# load becomes three. That is affordable only because of where each lands:
+# `daily` carries TODAY and stays in the live bucket at the same 1.01 CPU-s
+# the combined call cost, while `weekly` and `monthly` move to the history
+# bucket (0.73 + 0.72, 96 fetches a day instead of 720) for about +2.3
+# CPU-min/day. Merged back into the shape every caller already reads, so
+# nothing downstream knows the difference.
+recent_sections_fetch() {
+  local d w m
+  d=$(ccusage_cached claude daily --json --offline)
+  w=$(ccusage_cached claude weekly --json --offline)
+  m=$(ccusage_cached claude monthly --json --offline)
+  # The scoped reports do NOT use the unified report's key names -- the
+  # period each row covers is `date`, `week` and `month` respectively, where
+  # `--sections` called all three `period`. Nothing errors on the
+  # difference: `select(.period == $t)` simply matches no row, and Today,
+  # Folder and 30-Day Value all render a confident $0.00. Caught by running
+  # the panel, not by the suite, which is why the smoke test is in the
+  # rollout and not optional.
+  #
+  # Renamed here, in the one adapter, so every consumer downstream keeps
+  # reading `.period` and none of them has to know which report it came from.
+  jq -c -n --argjson d "${d:-null}" --argjson w "${w:-null}" --argjson m "${m:-null}" \
+    '{ daily:   [ ($d.daily   // [])[] | .period = .date  ],
+       weekly:  [ ($w.weekly  // [])[] | .period = .week  ],
+       monthly: [ ($m.monthly // [])[] | .period = .month ] }' 2>/dev/null
+}
+# Fetched once per slow tick by the loop and read from here, so the three
+# cache reads and the merge above happen once rather than once per caller.
+RECENT_JSON=""
+recent_sections() { printf '%s' "$RECENT_JSON"; }
 
 # The full session report, fetched once and sliced locally. Every windowed
 # `session --since/--until` variant the panel used to ask for (7-day
@@ -745,7 +789,18 @@ recent_sections() { ccusage_cached daily --json --sections daily,weekly,monthly 
 # one dataset. Verified equivalent: a windowed `session --since` returns the same
 # session set as filtering this payload does, and the computed averages
 # match exactly.
-all_sessions() { ccusage_cached session --json --offline; }
+# `claude session` returns its array under `.sessions`; the all-agent report
+# used `.session`. Normalised here to the singular every caller already
+# reads, rather than renaming it in each of them.
+all_sessions() {
+  # Same shape drift as the daily report above: the scoped session report
+  # nests under `.sessions`, names the id `sessionId` rather than `period`,
+  # and puts `lastActivity` at the top level instead of under `metadata`.
+  ccusage_cached claude session --json --offline \
+    | jq -c '{session: [ (.sessions // .session // [])[]
+        | .period = (.sessionId // .period)
+        | .metadata = ((.metadata // {}) + {lastActivity: (.lastActivity // .metadata.lastActivity)}) ]}' 2>/dev/null
+}
 
 # $1 = all_sessions payload, $2 = since (YYYY-MM-DD, day-inclusive),
 # $3 = until (YYYY-MM-DD, day-EXCLUSIVE) or "" for no upper bound.
@@ -980,7 +1035,9 @@ PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-opus-4-7":   (5.00, 25.00),
     "claude-opus-4-6":   (5.00, 25.00),
     "claude-fable-5":    (10.00, 50.00),
+    "claude-fable-5-1":  (10.00, 50.00),
     "claude-mythos-5":   (10.00, 50.00),
+    "claude-mythos-5-1": (10.00, 50.00),
 }
 DEFAULT_PRICE = (3.00, 15.00)
 CACHE_READ_MULT, CACHE_WRITE_5M_MULT, CACHE_WRITE_1H_MULT = 0.1, 1.25, 2.0
@@ -1016,6 +1073,8 @@ def fmt_k(n):
 # bash version's comment for why this used to be a Sonnet-5/Fable-5-only
 # allowlist and why that went stale.
 def context_window_size(model_id):
+    if model_id not in PRICES:
+        return 0
     size = 200_000 if model_id == "claude-haiku-4-5" else 1_000_000
     if size == 1_000_000 and os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0") == "1":
         size = 200_000
@@ -1184,6 +1243,7 @@ for line in lines:
         if not total_ctx and ev_in:
             in_tok, total_ctx = ev_in, ev_in
 
+    is_estimated = model not in PRICES and not is_secondary
     price_in, price_out = PRICES.get(model, DEFAULT_PRICE)
     cost = (
         in_tok * price_in
@@ -1193,7 +1253,7 @@ for line in lines:
         + cw_5m * price_in * CACHE_WRITE_5M_MULT
     ) / 1_000_000
 
-    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model, is_secondary))
+    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model, is_secondary, is_estimated))
 
 total_n = len(turns)
 shown = turns[-max_rows:]
@@ -1224,7 +1284,7 @@ if shown:
     # one row that scrolls out of view first as the session grows.
     saw_secondary = False
     for i in reversed(range(len(shown))):
-        label, total_ctx, delta, cache_pct, cost, model, is_secondary = shown[i]
+        label, total_ctx, delta, cache_pct, cost, model, is_secondary, is_estimated = shown[i]
         turn_no = start_idx + i
         total_str, delta_str = fmt_k(total_ctx), fmt_k(delta)
         plain_cell = f"{total_str} (+{delta_str})"
@@ -1248,7 +1308,11 @@ if shown:
                   f"{pad}{total_str} (+{delta_str})"
                   f"{c_dim}{'--':>6}{'?':>8}{c_reset}")
             continue
-        ctx_pct = total_ctx / context_window_size(model) * 100
+        win = context_window_size(model)
+        # 0 means the model is not in PRICES, so its window is unknown --
+        # see context_window_size. No denominator, no percentage; the row
+        # still prices and still renders, under the footnote below.
+        ctx_pct = (total_ctx / win * 100) if win else 0.0
         # Cache hit % is the odd one out: low is bad (unlike ctx_pct/delta,
         # where high is bad), so its bands run the opposite direction —
         # below 95% red, below 90% purple, 95%+ reads as normal.
@@ -1273,11 +1337,24 @@ if shown:
             input_cell = f"{pad}{total_colored} (+{delta_colored})"
             cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
             print(f"  {turn_no:<5}{label:<10}{input_cell}{cache_cell}{cost_cell:>8}")
+    if any(t[7] for t in turns):
+        # Named, not hidden: a model absent from PRICES is priced at
+        # DEFAULT_PRICE, and that figure is a stand-in rather than a rate.
+        # Add the id above and this line goes away.
+        unpriced = sorted({t[5] for t in turns if t[7]})
+        print(f"  {c_dim}* estimated at default rates, model not in price "
+              f"table: {', '.join(unpriced)}{c_reset}")
     if saw_secondary:
         print(f"  {c_dim}* served by claude-burst secondary; not Anthropic spend{c_reset}")
 PYEOF
-  } > "$cache_file.tmp" && mv "$cache_file.tmp" "$cache_file"
-  tail -n +2 "$cache_file"
+  } > "$cache_file.tmp"
+  if [ $? -eq 0 ] && [ -s "$cache_file.tmp" ]; then
+    mv "$cache_file.tmp" "$cache_file"
+    tail -n +2 "$cache_file"
+  else
+    rm -f "$cache_file.tmp"
+    printf '  %sturn table unavailable: transcript parse failed%s\n' "$C_RED" "$C_RESET"
+  fi
 }
 
 # ---- this session's own figures, from the parse that already happened ---
@@ -1399,7 +1476,7 @@ refresh_active_block() {
   # ---- active 5h block: fetched once here (not down in the ACTIVE BLOCK
   # section) so the summary line above can show the same burn-rate-derived
   # color as the detailed section — one source of truth, one API call.
-  block_json=$(ccusage_cached blocks --active --json --offline)
+  block_json=$(ccusage_cached claude blocks --active --json --offline)
   has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
   if [ "${has_block:-0}" = "1" ]; then
     # `localtime` before `strftime` is required — fromdateiso8601 hands back
@@ -1739,7 +1816,11 @@ build_summary() {
   fi
 
   if [ -n "$latest" ]; then
-    if [ -n "$SESS_CTX" ] && [ "$SESS_CTX" != "0" ]; then
+    # A zero window means the parser did not recognise the model, so the
+    # percentage has no denominator. Fall through to N/A rather than divide
+    # by a number nobody knows -- a 0% reads as an empty context window.
+    if [ -n "$SESS_CTX" ] && [ "$SESS_CTX" != "0" ] \
+       && [ -n "$SESS_WIN" ] && [ "$SESS_WIN" != "0" ]; then
       # Context segment — recompute the window size and % ourselves rather
       # than trust ccusage's own %. ccusage assumes each model's native
       # window (1M for Sonnet 5) regardless of whether
@@ -2001,6 +2082,8 @@ if [ -n "${PANEL_LIB_ONLY:-}" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
+last_frame=""
+
 while true; do
   # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
   # whole pane for one frame before the redraw lands, which reads as a
@@ -2008,7 +2091,6 @@ while true; do
   # works because clear_eol() (above) truncates every line to $COLS, so a
   # frame's physical row count can never silently exceed $rows and desync
   # this cursor-home overwrite against the previous frame.
-  printf '\033[H'
   # `tput cols`/`tput lines` run inside $(...) have their OWN stdout
   # redirected to the capture pipe, so the ioctl they'd normally use to ask
   # the terminal for its real size fails and they silently return the
@@ -2039,6 +2121,8 @@ while true; do
   (( now_epoch - last_slow >= SLOW_REFRESH )) && slow_due=1
   [ "$cols" != "$last_cols" ] && slow_due=1
 
+  # One fetch+merge per slow tick, read by every section below it.
+  (( slow_due )) && RECENT_JSON=$(recent_sections_fetch)
   (( slow_due )) && refresh_active_block
   # Always: re-derives the countdown and the $/hr denominator from the
   # block's fixed epochs. Pure arithmetic, no fetch.
@@ -2071,9 +2155,28 @@ while true; do
     trailing=$(printf '%s\n' "$trailing_raw" | head -n "$remaining")
   fi
 
-  printf '%s\n' "$guaranteed" | clear_eol
-  [ -n "$trailing" ] && printf '%s\n' "$trailing" | clear_eol
-  printf '\033[0J'
+  # Write only when the frame actually differs from the one already on
+  # screen. On a pane between slow ticks nothing in it can have moved unless
+  # a turn landed: the summary block and the trailing sections are rebuilt on
+  # the slow tier, and the header's clock string is rebuilt with them, so
+  # eleven of every twelve fast ticks compose a frame identical to the last.
+  #
+  # The saving is not mostly ours. Every write is a repaint in the terminal
+  # emulator too, and that cost is charged to Ghostty, once per open panel --
+  # so it is the part that scales with the number of Claude Code sessions
+  # running, which is the whole reason this pane is cheap to leave open.
+  #
+  # No separate periodic repaint is needed: a slow tick rebuilds the header
+  # with a new clock string, so the frame always differs at least once every
+  # $SLOW_REFRESH and the pane cannot sit stale after an external scribble.
+  frame="$guaranteed"$'\n'"$trailing"
+  if [ "$frame" != "$last_frame" ]; then
+    printf '\033[H'
+    printf '%s\n' "$guaranteed" | clear_eol
+    [ -n "$trailing" ] && printf '%s\n' "$trailing" | clear_eol
+    printf '\033[0J'
+    last_frame="$frame"
+  fi
 
   # Backgrounded and waited on, not a plain `sleep`. Bash defers every trap
   # until the current FOREGROUND child returns, so with a bare `sleep

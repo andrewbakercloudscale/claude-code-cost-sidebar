@@ -13,12 +13,12 @@
 check_C_bucket_coherence() {
   sandbox_new C
   local today; today="2026-09-01"
-  cat > "$CCUSAGE_FIXTURE_DIR/sections.json" <<JSON
-{"daily":[{"period":"$today","totalCost":10.00,"totalTokens":1000}],"weekly":[],"monthly":[]}
+  cat > "$CCUSAGE_FIXTURE_DIR/daily.json" <<JSON
+{"daily":[{"date":"$today","totalCost":10.00,"totalTokens":1000}],"weekly":[],"monthly":[]}
 JSON
   cat > "$CCUSAGE_FIXTURE_DIR/session.json" <<JSON
-{"session":[{"period":"s1","totalCost":6.00,"totalTokens":600,"metadata":{"lastActivity":"${today}T10:00:00.000Z"}},
-            {"period":"s2","totalCost":4.00,"totalTokens":400,"metadata":{"lastActivity":"${today}T11:00:00.000Z"}}]}
+{"sessions":[{"sessionId":"s1","totalCost":6.00,"totalTokens":600,"lastActivity":"${today}T10:00:00.000Z"},
+            {"sessionId":"s2","totalCost":4.00,"totalTokens":400,"lastActivity":"${today}T11:00:00.000Z"}]}
 JSON
   printf '{"blocks":[]}' > "$CCUSAGE_FIXTURE_DIR/blocks.json"
   printf '{}' > "$HOME/.cache/claude-hourly-buckets.json"
@@ -26,21 +26,21 @@ JSON
   export PANEL_FAKE_NOW=$(( $(local_midnight "$today") + 43200 ))
 
   local day_total sess_total
-  day_total=$(today_daily_shape "$(recent_sections)" | jq -r '.totals.totalCost')
+  day_total=$(today_daily_shape "$(recent_sections_fetch)" | jq -r '.totals.totalCost')
   sess_total=$(sessions_window "$(all_sessions)" "$today" "" | jq -r '[.session[].totalCost] | add')
   assert_eq "baseline: the two agree before anything moves" "10.00" "$(num "$day_total")"
   assert_eq "and the sessions sum to the same" "10.00" "$(num "$sess_total")"
 
   # A turn lands. daily is live and picks it up; session is held by its
   # bucket. Cost the day $5 more without touching the session report.
-  cat > "$CCUSAGE_FIXTURE_DIR/sections.json" <<JSON
-{"daily":[{"period":"$today","totalCost":15.00,"totalTokens":1500}],"weekly":[],"monthly":[]}
+  cat > "$CCUSAGE_FIXTURE_DIR/daily.json" <<JSON
+{"daily":[{"date":"$today","totalCost":15.00,"totalTokens":1500}],"weekly":[],"monthly":[]}
 JSON
   touch "$HOME/.claude/projects/test-project/seed.jsonl"
   local f
   for f in "$HOME/.cache/ccusage-panel-cache"/*.json; do [ -e "$f" ] && age_file "$f" 600; done
 
-  day_total=$(today_daily_shape "$(recent_sections)" | jq -r '.totals.totalCost')
+  day_total=$(today_daily_shape "$(recent_sections_fetch)" | jq -r '.totals.totalCost')
   sess_total=$(sessions_window "$(all_sessions)" "$today" "" | jq -r '[.session[].totalCost] | add')
   assert_eq "Today moved with the live bucket" "15.00" "$(num "$day_total")"
   assert_eq "the session ranking stayed on its own snapshot" "10.00" "$(num "$sess_total")"

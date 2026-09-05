@@ -6,13 +6,18 @@
 # would produce a flaky gate that gets ignored, then disabled, then deleted.
 printf '%s\n' "$*" >> "${CCUSAGE_CALL_LOG:-/dev/null}"
 
-case "$1" in
-  daily)      fixture=sections.json ;;
-  session)    fixture=session.json ;;
-  blocks)     fixture=blocks.json ;;
-  # statusline takes its payload on stdin; drain it or the caller sees EPIPE.
-  statusline) cat >/dev/null; fixture=statusline.txt ;;
-  *)          printf 'ccusage stub: unhandled subcommand %s\n' "$1" >&2; exit 70 ;;
+# Every query the panel makes is `claude <subcommand> ...` -- scoped so the
+# panel reports Claude Code's spend rather than every agent CLI's. Accept the
+# unscoped form too, so this stub keeps working if a query is ever added
+# without the prefix rather than silently serving the wrong fixture.
+sub="$1"; [ "$sub" = "claude" ] && sub="$2"
+case "$sub" in
+  daily)   fixture=daily.json ;;
+  weekly)  fixture=weekly.json ;;
+  monthly) fixture=monthly.json ;;
+  session) fixture=session.json ;;
+  blocks)  fixture=blocks.json ;;
+  *)       printf 'ccusage stub: unhandled subcommand %s\n' "$sub" >&2; exit 70 ;;
 esac
 
 path="${CCUSAGE_FIXTURE_DIR:?}/$fixture"

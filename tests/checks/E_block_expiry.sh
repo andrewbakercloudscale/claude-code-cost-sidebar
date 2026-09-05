@@ -26,11 +26,11 @@ JSON
   # the summary comes back a stump, and the "no Current Block line"
   # assertion below passes for a reason that has nothing to do with the bug
   # -- which is how a check ends up guarding nothing while reporting ok.
-  cat > "$CCUSAGE_FIXTURE_DIR/sections.json" <<'JSON'
-{"daily":[{"period":"2026-09-01","totalCost":6.0,"totalTokens":500}],"weekly":[],"monthly":[]}
+  cat > "$CCUSAGE_FIXTURE_DIR/daily.json" <<'JSON'
+{"daily":[{"date":"2026-09-01","totalCost":6.0,"totalTokens":500}],"weekly":[],"monthly":[]}
 JSON
   cat > "$CCUSAGE_FIXTURE_DIR/session.json" <<'JSON'
-{"session":[{"period":"sess-1","totalCost":6.0,"totalTokens":500,"metadata":{"lastActivity":"2026-09-01T10:00:00.000Z"}}]}
+{"sessions":[{"sessionId":"sess-1","totalCost":6.0,"totalTokens":500,"lastActivity":"2026-09-01T10:00:00.000Z"}]}
 JSON
   # The hourly-bucket rebuild is a slow-tier concern of its own and is not
   # what this check is about; a fresh cache file keeps it out of the way.

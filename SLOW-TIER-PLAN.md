@@ -529,28 +529,101 @@ in this file.
 
 ---
 
-## 9. Separate finding: the panel's totals are not Claude-only
+## 9. Scoping to Claude Code — done 2026-09-05
 
-`ccusage daily` means *all detected agent CLIs*. Measured minutes apart:
+`ccusage daily` means *every detected agent CLI*. Measured simultaneously,
+with the unscoped run repeated either side of the scoped one and giving the
+identical figure both times:
 
-- generic: **$6803.45** → **$6803.56** (drifted $0.11 across the window)
-- `ccusage claude daily`: **$6789.40**
+- all-agent: **$6823.37** (before **and** after)
+- Claude-only: **$6809.21**
 
-A real **$14.16** gap, not drift — OpenCode and any other agent's spend is
-folded into the Claude panel's headline "value" figures. The user runs
-OpenCode, so this is live, not theoretical.
+A real **$14.16** being reported by a panel titled "Claude Code Usage".
 
-Fixing it is not free: `ccusage claude` **does not accept `--sections`**
-("Unknown daily option '--sections'"), so daily/weekly/monthly becomes three
-scans (~3.0 CPU-s) instead of one combined (1.03). At the history bucket's 96
-refetches/day that is ~+190 CPU-s/day (~3 min) — comfortably affordable once
-Phase 2 has removed 25 minutes, and not affordable before it.
+`ccusage claude` rejects `--sections`, so the one combined load becomes three.
+That is affordable only because of where each lands: `daily` carries Today and
+stays in the live bucket at the same ~1.01 CPU-s the combined call cost, while
+`weekly` (0.73) and `monthly` (0.72) move to the history bucket — 96 fetches a
+day instead of 720, about **+2.3 CPU-min/day** for the correctness.
 
-**Sequence it after Phase 2.** Alternative if the cost is ever unwelcome:
-keep the generic call and label the figures honestly as all-agent, which is at
-least not a lie. Do not leave it as-is and undocumented.
+### 9.1 The trap in it, and why the suite did not catch it
 
----
+**The scoped reports do not use the unified report's key names.**
+
+| unified (`--sections`) | scoped (`claude <sub>`) |
+|---|---|
+| `.daily[].period` | `.daily[].date` |
+| `.weekly[].period` | `.weekly[].week` |
+| `.monthly[].period` | `.monthly[].month` |
+| `.session[]` | `.sessions[]` |
+| `.session[].period` (id) | `.sessions[].sessionId` |
+| `.session[].metadata.lastActivity` | `.sessions[].lastActivity` |
+
+Nothing errors on any of that. `select(.period == $t)` matches no row, and
+**Today, Folder and 30-Day Value each render a confident $0.00** — which is
+exactly what the panel did, while all fourteen checks reported green.
+
+They reported green because every fixture had been written in the *old*
+shape. **A fixture that does not match what the real tool emits is not a
+test; it is a second copy of the bug.** All fixtures are now the real shapes,
+verified against live output, and check Q covers the adapter directly —
+removing the rename now fails C, D and Q.
+
+It was the **live smoke test** that caught this, not the suite. That is why
+the smoke run is a numbered step in the rollout below rather than a nicety.
+
+## 9.2 Model table — verified, and two models were missing
+
+Checked against the `claude-api` skill's model table (cached 2026-06-24). All
+nine existing prices were correct. Two current models were **absent**:
+`claude-fable-5-1` and `claude-mythos-5-1`, both $10/$50.
+
+A turn served by either was priced at `DEFAULT_PRICE` ($3/$15) — **under-reported
+3.3x**, and indistinguishable from any other row. Both added.
+
+The same table confirms every context window: 1M for everything except Haiku
+4.5 at 200K. That closes §7.2's open item, and closes it with facts rather
+than guesses:
+
+- `context_window_size()` is now an allowlist keyed on `PRICES`. An id it does
+  not know returns **0**, and the panel renders `Context Usage: N/A` rather
+  than dividing by a window nobody knows. (It also returned 1M for anything
+  unrecognised *before* Phase 2 — this was a pre-existing gap, not a new one.)
+- An unpriced model is still charged at `DEFAULT_PRICE`, because excluding it
+  would silently understate the session total, which is worse. But the table
+  now prints `* estimated at default rates, model not in price table: <id>`
+  underneath. Add the id and the line goes away.
+- Check N asserts the two duplicated `PRICES` tables (one per python heredoc,
+  a documented manual sync) still agree, and spot-checks the rates that would
+  be expensive to get wrong.
+
+## 9.3 Two bugs found while doing the above
+
+- **A crashed parser served a stale turn table forever.** `{ ... } > tmp && mv`
+  skipped the `mv` on failure, then `tail` ran unconditionally on the previous
+  file — so a parse that died showed a correct-looking, arbitrarily old table
+  with nothing to indicate either. It now prints `turn table unavailable:
+  transcript parse failed` and leaves the cache untouched. Same failure shape
+  as every gate in this project that reported OK while measuring the wrong
+  thing.
+- **Row colouring divided by the context window without checking it.**
+  Returning 0 for an unrecognised model turned that into a hard crash on the
+  first such turn — found by check I, before it could ship.
+
+## 9.4 Frame elision
+
+Between slow ticks nothing in the pane can move unless a turn landed: the
+summary and trailing sections are rebuilt on the slow tier, and the header's
+clock string with them. So eleven of every twelve fast ticks composed a frame
+identical to the one already on screen and wrote it anyway.
+
+The frame is now compared before it is written. The saving is mostly **not**
+the panel's: every write is a repaint in the terminal emulator, charged to
+Ghostty, **once per open panel** — so it is the part of the fast tier that
+scales with the number of concurrent sessions. No separate periodic repaint is
+needed: a slow tick rebuilds the header with a new clock string, so the frame
+differs at least once every `SLOW_REFRESH` and the pane cannot sit stale after
+an external scribble.
 
 ## 10. Rollout
 
@@ -576,15 +649,30 @@ least not a lie. Do not leave it as-is and undocumented.
    produced a check that passed while measuring nothing. Hence
    `panel_tick_slow()` (drive the loop's real order) and the positive
    control in E.
-2. **Phase 1**, with checks C, G, H, L. Verify by hand:
-   `/usr/bin/time -l timeout 600 bash ccusage-panel.sh 10 12 <sid>` before and
-   after, on a machine with a second session active. Record both numbers here.
-3. **Phase 2 behind the parity log** (§7.3, check J). One working day of clean
-   log before deleting the fetch.
-4. **Re-measure over 24h.** Record here. Decide on Phase 3 only against that
-   number — not against this plan's projections.
-5. **`ccusage claude` scoping** (§9), with a before/after of the headline
-   figures recorded so the $14 step is explained rather than discovered.
+2. **Phase 1**, with checks C, G, H, L. **Done.**
+3. **Phase 2** (§7). **Done** — check J asserts the arithmetic exactly rather
+   than needing a day of parity logging.
+4. **`ccusage claude` scoping** (§9). **Done**, and it moved ahead of the
+   re-measurement because Phase 2 had already paid for it.
+5. **Run the panel and read it.** Not optional, and not last: the shape drift
+   in §9.1 rendered three headline figures as $0.00 with the entire suite
+   green. Every step above ends with
+   `timeout 30 bash ~/.local/bin/ccusage-panel.sh 10 12 <sid>` from the
+   project directory, and with looking at what it prints.
+6. **Measure.** `/usr/bin/time -l` (never `ps` — see §2.1), same corpus, cold
+   cache, **nothing else running**: a live panel sharing the cache directory
+   silently serves the run under measurement and the numbers become
+   meaningless. Record below.
+7. **Phase 3** only against that number, not against this plan's projections.
+
+### Measured, 2026-09-05
+
+420s per side, sequential, cold cache, no other panel running:
+
+| | CPU | vs before |
+|---|---|---|
+| before (`45f9f73`) | _pending_ | — |
+| final | _pending_ | _pending_ |
 
 **Rollback:** `rollback-cost-panel.sh` restores the previous
 `ccusage-panel.sh`. Every phase is independently revertible; Phase 2 is the

@@ -8,15 +8,16 @@
 check_L_invocation_budget() {
   sandbox_new L
   local TICKS=30
-  # 30 live-bucket ticks (daily + blocks) and, at 600s of ageing per tick,
-  # a single history fetch held across all of them.
-  local BUDGET=$(( TICKS * 2 + 1 ))
+  # Live bucket, once per tick: `claude daily` (it carries Today) and
+  # `claude blocks`. History bucket, once for the whole run at 600s of
+  # ageing per tick: `claude session`, `claude weekly`, `claude monthly`.
+  local BUDGET=$(( TICKS * 2 + 3 ))
 
-  cat > "$CCUSAGE_FIXTURE_DIR/sections.json" <<'JSON'
-{"daily":[{"period":"2026-09-01","totalCost":1.5,"totalTokens":100}],"weekly":[],"monthly":[]}
+  cat > "$CCUSAGE_FIXTURE_DIR/daily.json" <<'JSON'
+{"daily":[{"date":"2026-09-01","totalCost":1.5,"totalTokens":100}],"weekly":[],"monthly":[]}
 JSON
   cat > "$CCUSAGE_FIXTURE_DIR/session.json" <<'JSON'
-{"session":[{"period":"s1","totalCost":1.5,"totalTokens":100,"metadata":{"lastActivity":"2026-09-01T10:00:00.000Z"}}]}
+{"sessions":[{"sessionId":"s1","totalCost":1.5,"totalTokens":100,"lastActivity":"2026-09-01T10:00:00.000Z"}]}
 JSON
   printf '{"blocks":[]}' > "$CCUSAGE_FIXTURE_DIR/blocks.json"
   printf '{}' > "$HOME/.cache/claude-hourly-buckets.json"
@@ -28,9 +29,9 @@ JSON
     for f in "$HOME/.cache/ccusage-panel-cache"/*.json; do
       [ -e "$f" ] && age_file "$f" 600
     done
-    recent_sections >/dev/null
+    recent_sections_fetch >/dev/null
     all_sessions >/dev/null
-    ccusage_cached blocks --active --json --offline >/dev/null
+    ccusage_cached claude blocks --active --json --offline >/dev/null
   done
 
   local total; total=$(wc -l < "$CCUSAGE_CALL_LOG" | tr -d ' ')

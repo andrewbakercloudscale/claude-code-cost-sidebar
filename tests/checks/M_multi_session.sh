@@ -13,11 +13,11 @@
 # asserted so the cost stays visible rather than becoming folklore.
 check_M_multi_session() {
   sandbox_new M
-  cat > "$CCUSAGE_FIXTURE_DIR/sections.json" <<'JSON'
-{"daily":[{"period":"2026-09-01","totalCost":1.5,"totalTokens":100}],"weekly":[],"monthly":[]}
+  cat > "$CCUSAGE_FIXTURE_DIR/daily.json" <<'JSON'
+{"daily":[{"date":"2026-09-01","totalCost":1.5,"totalTokens":100}],"weekly":[],"monthly":[]}
 JSON
   cat > "$CCUSAGE_FIXTURE_DIR/session.json" <<'JSON'
-{"session":[{"period":"s1","totalCost":1.5,"totalTokens":100,"metadata":{"lastActivity":"2026-09-01T10:00:00.000Z"}}]}
+{"sessions":[{"sessionId":"s1","totalCost":1.5,"totalTokens":100,"lastActivity":"2026-09-01T10:00:00.000Z"}]}
 JSON
   printf 'x' > "$CCUSAGE_FIXTURE_DIR/statusline.txt"
 
@@ -25,7 +25,7 @@ JSON
   # one machine.
   local i
   for i in 1 2 3; do
-    ( load_panel 10 12 ""; recent_sections >/dev/null; all_sessions >/dev/null )
+    ( load_panel 10 12 ""; recent_sections_fetch >/dev/null; all_sessions >/dev/null )
   done
   assert_eq "3 panels share ONE daily scan"   "1" "$(calls_for daily)"
   assert_eq "3 panels share ONE session scan" "1" "$(calls_for session)"
@@ -38,7 +38,7 @@ JSON
   touch "$HOME/.claude/projects/test-project/seed.jsonl"
   for f in "$HOME/.cache/ccusage-panel-cache"/*.json; do [ -e "$f" ] && age_file "$f" 600; done
   for i in 1 2 3; do
-    ( load_panel 10 12 ""; recent_sections >/dev/null )
+    ( load_panel 10 12 ""; recent_sections_fetch >/dev/null )
   done
   assert_eq "and share ONE refetch when it lapses" "2" "$(calls_for daily)"
 
