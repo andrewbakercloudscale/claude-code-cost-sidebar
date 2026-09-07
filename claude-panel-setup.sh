@@ -193,16 +193,81 @@ fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 # it installed. Print nothing at all (not even a placeholder row) unless
 # both the binary and its config are actually present, so the panel stays
 # identical for everyone else.
+# proxy_in_path: is Claude Code's traffic actually going through the proxy?
+#
+# Separate from which provider the proxy WOULD pick, because those two came
+# apart in practice: config.json can say PRIMARY (oauth) while nothing has
+# ever been enabled and every request goes straight to Anthropic. The panel
+# printed the green PRIMARY line throughout, which is true about the proxy's
+# routing table and says nothing about whether the proxy is being used.
+#
+# The evidence differs completely by mode, which is why this can't be one
+# file check:
+#   base-url    -- ANTHROPIC_BASE_URL in ~/.claude/settings.json must name
+#                  the gateway. Config alone does nothing; `claude-burst
+#                  enable` is what puts it in the path.
+#   transparent -- that variable must stay UNSET (it's what preserves Remote
+#                  Control), so the evidence is /etc/hosts sending the
+#                  hostname to loopback, plus the local CA being trusted so
+#                  the handshake against it succeeds. Redirect without CA
+#                  trust is worse than no redirect -- requests arrive and
+#                  fail TLS -- so it counts as not-in-path, loudly.
+#
+# Deliberately all local file reads, no curl: this runs on the panel's
+# refresh timer, and a network probe with a timeout would stall the whole
+# panel exactly when the network is the thing that is broken.
+proxy_in_path() {
+  local cfg="$1" mode host listen bundle settings base_url
+  mode=$(jq -r '.intercept.mode // "base-url"' "$cfg" 2>/dev/null)
+  if [ "$mode" = "transparent" ]; then
+    host=$(jq -r '.intercept.host // "api.anthropic.com"' "$cfg" 2>/dev/null)
+    bundle=$(jq -r '.intercept.ca_bundle // ""' "$cfg" 2>/dev/null)
+    [ -n "$bundle" ] || bundle="$HOME/.claude/certs/node-extra-ca-certs.pem"
+    # A live redirect line, not merely claude-burst's marker block: `remove`
+    # deletes the whole block, so an empty-but-present block only happens by
+    # hand -- but a commented-out entry is common, and reports installed
+    # while the hostname resolves straight to the real Anthropic IP.
+    awk -v h="$host" '
+      { sub(/#.*/, "") }
+      ($1 == "127.0.0.1" || $1 == "::1") {
+        for (i = 2; i <= NF; i++) if (tolower($i) == tolower(h)) { found = 1 }
+      }
+      END { exit !found }
+    ' "${CLAUDE_BURST_HOSTS_FILE:-/etc/hosts}" 2>/dev/null \
+      || { printf 'no /etc/hosts redirect'; return 1; }
+    grep -q '# BEGIN claude-burst CA' "$bundle" 2>/dev/null \
+      || { printf 'CA untrusted, TLS will fail'; return 1; }
+    return 0
+  fi
+  listen=$(jq -r '.listen // "127.0.0.1:7777"' "$cfg" 2>/dev/null)
+  settings="$HOME/.claude/settings.json"
+  base_url=$(jq -r '.env.ANTHROPIC_BASE_URL // ""' "$settings" 2>/dev/null)
+  case "$base_url" in
+    "")        printf 'ANTHROPIC_BASE_URL unset'; return 1 ;;
+    *"$listen"*) return 0 ;;
+    *)         printf 'points at %s' "$base_url"; return 1 ;;
+  esac
+}
+
 proxy_state_line() {
   command -v claude-burst >/dev/null 2>&1 || return
   local cfg="$HOME/.config/claude-burst/config.json"
   [ -f "$cfg" ] || return
   local state="$HOME/.config/claude-burst/state.json"
-  local primary secondary overflow_until now route_label route_color
+  local primary secondary overflow_until now route_label route_color why
   primary=$(jq -r '.primary.provider // "?"' "$cfg" 2>/dev/null)
   secondary=$(jq -r '.secondary.provider // "?"' "$cfg" 2>/dev/null)
   primary="${primary%-passthrough}"
   secondary="${secondary%-passthrough}"
+
+  # Which slot the proxy would choose only matters if it is in the path at
+  # all, so this outranks PRIMARY/SECONDARY rather than sitting beside it.
+  if ! why=$(proxy_in_path "$cfg"); then
+    printf '  🔀 Proxy State: %sNOT IN USE%s %s(%s)%s\n' \
+      "$C_RED" "$C_RESET" "$C_DIM" "$why" "$C_RESET"
+    return
+  fi
+
   overflow_until=0
   [ -f "$state" ] && overflow_until=$(jq -r '.overflow_until // 0' "$state" 2>/dev/null)
   now=$(panel_now)
