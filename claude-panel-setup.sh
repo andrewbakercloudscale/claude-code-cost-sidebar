@@ -113,6 +113,25 @@ rate_tag() { printf '%s(refresh %s)%s' "$C_ELECTRIC" "$1" "$C_RESET"; }
 # in the same directory apart. Empty for anything else (manual runs,
 # `claude --resume`, etc.), which fall back to the directory-scoped guess.
 PIN_SESSION_ID="${3:-}"
+# How long a pin gets to name a transcript that exists before resolve_session
+# throws it away and falls back to the unpinned heuristic. Long enough to
+# cover a slow cold start and a trust prompt; short enough that a corrupted
+# pin does not cost the whole session. See resolve_session for the corruption
+# this exists to survive.
+PIN_GRACE_SECS="${PANEL_PIN_GRACE:-90}"
+PIN_LOG="$HOME/.cache/claude-panel-pin.log"
+pin_log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$1" >> "$PIN_LOG" 2>/dev/null; }
+# A pin that is not a UUID is corrupt on its face — it cannot name a
+# transcript Claude Code would ever write, so there is nothing to wait for.
+# Drop it here rather than spend the grace period above discovering it.
+case "$PIN_SESSION_ID" in
+  '') ;;
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *)
+    pin_log "ignoring malformed pin '$PIN_SESSION_ID' (not a UUID) — falling back to session detection"
+    PIN_SESSION_ID=""
+    ;;
+esac
 # Recorded once so the unpinned session-detection fallback below can tell
 # "a session that started after I did" from "a session that was already
 # running when I started" — see that fallback for why this matters.
@@ -1635,6 +1654,18 @@ block_clock_tick() {
 # one, and a command-substitution subshell can read variables from outside
 # itself but never write them back out.
 resolve_session() {
+  # The scan below is scratch work, and it must stay scratch work. Bash
+  # scoping is dynamic: an unlocalised assignment here does not create a
+  # global, it overwrites whatever `f` (or `birth`, or `newest_birth`)
+  # belongs to the nearest caller that declared one. The fallback loop had
+  # barely ever run -- a pin resolved first almost every time -- so its `f`
+  # had never collided with anything; the moment an unresolvable pin started
+  # falling through to it, it silently emptied a caller's `f` and the
+  # redirect built from it wrote to "". Everything this function is meant to
+  # publish (latest, sess_id, model_id, model_label, folder_name,
+  # sess_start_epoch, sess_elapsed_h, project_dir) is deliberately NOT in
+  # this list.
+  local birth f newest_birth other_jsonls
   # ---- current session identity: fetched once here (not inside the
   # guaranteed subshell below) so TOP SESSIONS TODAY, further down, can
   # mark which row is THIS session — a command-substitution subshell can
@@ -1653,11 +1684,34 @@ resolve_session() {
   project_dir="$HOME/.claude/projects/$(printf '%s' "$PWD" | tr '/' '-')"
   if [ -n "$PIN_SESSION_ID" ]; then
     latest="$project_dir/$PIN_SESSION_ID.jsonl"
-    # The pinned session may not have written its first line yet (osascript
-    # is still typing into the new pane) — treat "not there yet" as "no
-    # session", same as the unpinned case; the next 5s refresh picks it up.
-    [ -f "$latest" ] || latest=""
-  else
+    # The pinned session may not have written its first line yet (the
+    # launcher is still typing into the new pane) — treat "not there yet"
+    # as "no session", same as the unpinned case; the next fast refresh
+    # picks it up.
+    if [ ! -f "$latest" ]; then
+      latest=""
+      # ...but only for a WHILE. The pin arrives as synthetic keystrokes
+      # typed into a brand-new pane, and a keystroke that is dropped or
+      # interleaved with the user's own typing silently rewrites it: an
+      # observed pane ran with
+      #   9e435181h-888e-4f0c-811-3befb80226t3d
+      # against a real session id of
+      #   9e435181-888e-4f0c-81f1-3befb802263d
+      # — an 'h' and a 't' woven in from the real keyboard, an 'f' lost.
+      # That names a transcript that will NEVER exist, so the pane showed
+      # "Model: Unknown" and "no active session found" for its entire life,
+      # hours into a busy session, with everything else on screen correct.
+      # A pin that has not resolved by now is not slow, it is wrong: drop
+      # it and let the unpinned birth-time heuristic below take over on
+      # this same tick. It is a guess, but a guess that converges on the
+      # right transcript beats a certainty that names none.
+      if (( $(panel_now) - PANEL_START_EPOCH > PIN_GRACE_SECS )); then
+        pin_log "abandoning pin '$PIN_SESSION_ID' after ${PIN_GRACE_SECS}s: $project_dir/$PIN_SESSION_ID.jsonl never appeared"
+        PIN_SESSION_ID=""
+      fi
+    fi
+  fi
+  if [ -z "$PIN_SESSION_ID" ]; then
     # "Most recently modified" picks whichever session is actively being
     # chatted with — including one that's NOT this pane's, if another
     # session in this same project dir is currently mid-conversation. That
@@ -2567,6 +2621,44 @@ log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RUN_ID" "$1" >> "
 
 panel_pids() { pgrep -f '[b]in/ccusage-panel\.sh' 2>/dev/null | sort; }
 
+# Did the pin we typed actually ARRIVE intact? "A new panel process appeared"
+# was the whole of this launcher's success test, and it cannot tell a panel
+# that got the right session id from one that got a mangled one -- which is a
+# real outcome, not a theoretical one: keystrokes are synthetic, and a
+# dropped or interleaved character rewrites the id in place. One observed
+# pane ran with `9e435181h-888e-4f0c-811-3befb80226t3d` against a real
+# session id of `9e435181-888e-4f0c-81f1-3befb802263d`, and spent hours
+# reporting "Model: Unknown / no active session found" while every
+# account-wide figure beside it stayed correct.
+#
+# The panel now recovers on its own (it abandons a pin that names no
+# transcript and falls back to detecting the session itself), so this does
+# not kill or relaunch anything -- a second split would be a worse outcome
+# than a self-healing one. It exists so the corruption is VISIBLE in the log
+# rather than only in a symptom that looks like a panel bug.
+verify_pin() { # $1 = newline-separated pids
+  [ -n "$PIN_SID" ] || return 0
+  local pid argv
+  for pid in $1; do
+    [ -n "$pid" ] || continue
+    argv=$(ps -o args= -p "$pid" 2>/dev/null)
+    case "$argv" in
+      *"$PIN_SID"*) ;;
+      *) log "attempt $attempt: WARNING — panel $pid did not receive the pin intact (sent '$PIN_SID', got '${argv##* }'); the panel will fall back to detecting the session itself" ;;
+    esac
+  done
+}
+
+# Swallow real keyboard input for a few seconds while synthetic keystrokes
+# are in flight, so anything typed during window setup cannot be woven into
+# the command being typed into the new split. Best-effort: a missing binary
+# or an ungranted permission just means no guard.
+start_keyboard_guard() { # $1 = seconds
+  [ -x "$HOME/.local/bin/claude-panel-keyblock" ] || return 0
+  "$HOME/.local/bin/claude-panel-keyblock" "$1" >>"$LOG" 2>&1 &
+  log "attempt $attempt: keyboard guard started (pid $!, $1s)"
+}
+
 # Passed by the autolaunch hook only for a bare `claude` invocation, which
 # it forces to run with this same ID via --session-id — lets the panel open
 # that exact transcript instead of guessing by mtime. Empty for anything
@@ -2746,12 +2838,23 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
       *)
         presses=$(( (geom / 6) / 40 ))
         log "attempt $attempt: targeted send to pid $ghostty_pid (width=$geom presses=$presses) via $panel_python"
+        # The guard belongs on THIS path too. It used to be started only
+        # further down, on the AppleScript path, so the targeted path -- the
+        # one that runs whenever pyobjc is available, i.e. the normal one
+        # here -- typed the command with the real keyboard wide open. That is
+        # how a session id acquires an 'h' and a 't' it never had: the user
+        # keeps typing in the window they were already working in while this
+        # types into the new split, and both streams reach the same pane.
+        # The keysend sequence is ~3s at its slowest (0.6s settle + two
+        # events per character at 12ms + the resize repeats).
+        start_keyboard_guard 5
         if "$panel_python" "$BIN_DIR_KEYSEND" "$ghostty_pid" "$PANEL_CMD" "$presses" >>"$LOG" 2>&1; then
           sleep 1
           after_pids=$(panel_pids)
           new_pids=$(comm -13 <(echo "$before_pids") <(echo "$after_pids") 2>/dev/null)
           if [ -n "$new_pids" ]; then
             log "attempt $attempt: VERIFIED — new panel process(es): $(echo "$new_pids" | tr '\n' ' ')"
+            verify_pin "$new_pids"
             success=1
             continue
           fi
@@ -2809,10 +2912,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
   # script dies first — see claude-panel-keyblock's own comments for the
   # safety valves. Best-effort: missing binary or ungranted permissions
   # just mean no guard, same as before this existed.
-  if [ -x "$HOME/.local/bin/claude-panel-keyblock" ]; then
-    "$HOME/.local/bin/claude-panel-keyblock" 6 >>"$LOG" 2>&1 &
-    log "attempt $attempt: keyboard guard started (pid $!, 6s)"
-  fi
+  start_keyboard_guard 6
 
   # Settle delay: frontmost can flip true right as a cold `open -na` launch
   # is still mid-activation-animation, before the window can reliably
@@ -2918,6 +3018,7 @@ APPLESCRIPT
   new_pids=$(comm -13 <(echo "$before_pids") <(echo "$after_pids") 2>/dev/null)
   if [ -n "$new_pids" ]; then
     log "attempt $attempt: VERIFIED — new panel process(es): $(echo "$new_pids" | tr '\n' ' ')"
+    verify_pin "$new_pids"
     success=1
   else
     log "attempt $attempt: FAILED — no new panel process appeared (before=[$(echo "$before_pids" | tr '\n' ' ')] after=[$(echo "$after_pids" | tr '\n' ' ')])"
