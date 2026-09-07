@@ -86,3 +86,4 @@ check_W_pin_recovery() {
   ) > "$TEST_TMP/W.wins"
   assert_eq "a resolvable pin beats the newest-file guess" "$pinned" "$(cat "$TEST_TMP/W.wins")"
 }
+

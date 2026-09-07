@@ -26,14 +26,23 @@
 #                                           execs `claude` directly, with
 #                                           no interactive shell involved)
 #                                           also gets the split panel
+#   ~/.local/bin/claude-panel-session-hook.sh - SessionStart hook script:
+#                                           records which session id is
+#                                           running in which directory, to
+#                                           ~/.cache/claude-panel-pin/, so
+#                                           the panel opens THIS pane's
+#                                           transcript instead of guessing
+#                                           which of a directory's dozen
+#                                           transcripts is the live one
 #   ~/.local/bin/claude-cost-alert-check.sh - UserPromptSubmit hook script:
 #                                           alerts in the chat itself (works
 #                                           over Remote Control) when session
 #                                           cost hits red/purple vs its 7-day
 #                                           average, or the panel launcher
 #                                           failed
-#   ~/.claude/settings.json (merged via jq, idempotent) - wires the hook
-#                                           above into UserPromptSubmit
+#   ~/.claude/settings.json (merged via jq, idempotent) - wires the two hooks
+#                                           above into SessionStart and
+#                                           UserPromptSubmit
 #
 # Requirements: macOS + Ghostty (for the auto-split part — the panel script
 # itself works in any terminal), Node.js (for `ccusage`), jq, clang (Xcode
@@ -111,27 +120,75 @@ rate_tag() { printf '%s(refresh %s)%s' "$C_ELECTRIC" "$1" "$C_RESET"; }
 # that EXACT transcript instead of guessing "most recently modified file in
 # this project directory", which still can't tell two concurrent sessions
 # in the same directory apart. Empty for anything else (manual runs,
-# `claude --resume`, etc.), which fall back to the directory-scoped guess.
+# `claude --resume`, etc.), which fall back to the handoff file below and
+# then to the directory-scoped guess.
+#
+# This argv slot is now the LEGACY path. It survives only so an older
+# installed launcher keeps working; nothing this installer writes types a
+# session id into a terminal any more. See PIN_HANDOFF_FILE.
 PIN_SESSION_ID="${3:-}"
-# How long a pin gets to name a transcript that exists before resolve_session
-# throws it away and falls back to the unpinned heuristic. Long enough to
-# cover a slow cold start and a trust prompt; short enough that a corrupted
-# pin does not cost the whole session. See resolve_session for the corruption
-# this exists to survive.
+PIN_SOURCE=""
+[ -n "$PIN_SESSION_ID" ] && PIN_SOURCE="argv"
+# How long an ARGV pin gets to name a transcript that exists before
+# resolve_session throws it away and falls back. Long enough to cover a slow
+# cold start and a trust prompt; short enough that a corrupted pin does not
+# cost the whole session. Only argv pins are subject to it — a handoff-file
+# pin cannot be corrupted in transit, so there is nothing to time out. See
+# resolve_session for the corruption this exists to survive.
 PIN_GRACE_SECS="${PANEL_PIN_GRACE:-90}"
 PIN_LOG="$HOME/.cache/claude-panel-pin.log"
 pin_log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$1" >> "$PIN_LOG" 2>/dev/null; }
+# ---- the handoff file: how this panel learns its session id now ----
+# One file per project directory, holding "<session-id>\t<epoch-written>".
+# Two writers, both out-of-band — neither passes through a keyboard:
+#   * claude-panel-session-hook.sh, wired as a Claude Code SessionStart hook,
+#     writes the session id Claude Code ACTUALLY chose. Fires on every launch
+#     path there is, including `--resume`/`--continue`, a GUI window and an
+#     IDE-embedded terminal, none of which the ~/.zshrc preexec hook can pin.
+#   * claude-panel-launch.sh writes the id it is about to launch `claude`
+#     with, so the pin still works when ~/.claude/settings.json has no hooks.
+#
+# The id used to ride in on argv — which meant the launcher TYPED it, as
+# synthetic keystrokes, into a brand-new pane. A keystroke dropped or
+# interleaved with the user's own typing silently rewrote it: an observed
+# pane ran with
+#   9e435181h-888e-4f0c-811-3befb80226t3d
+# against a real session id of
+#   9e435181-888e-4f0c-81f1-3befb802263d
+# — an 'h' and a 't' woven in from the real keyboard, an 'f' lost. That
+# names a transcript that will never exist. The pane showed "Model: Unknown"
+# and "no active session found" for five hours, with every other figure on
+# screen correct, because nothing downstream could recover: the unpinned
+# fallback only accepts a transcript BORN AFTER the panel started, and that
+# session's transcript was already 50 minutes old when the panel restarted.
+# A file the launcher writes and the panel reads cannot be corrupted that
+# way, and — because it persists — a panel restarted mid-conversation reads
+# the same answer it would have had at launch.
+PIN_HANDOFF_DIR="${PANEL_PIN_DIR:-$HOME/.cache/claude-panel-pin}"
+PIN_HANDOFF_FILE="$PIN_HANDOFF_DIR/$(printf '%s' "$PWD" | tr '/' '-')"
+# A handoff written within this many seconds of the panel starting was
+# written FOR this launch, and is adopted unconditionally. An older one is
+# adopted only on positive evidence that the session it names is still live
+# (see adopt_handoff_pin) — a panel restarted mid-conversation is the case
+# that needs it.
+PIN_HANDOFF_FRESH_SECS="${PANEL_PIN_FRESH:-180}"
+# How recently the transcript a STALE handoff names must have been written
+# for the panel to believe that session is the one in this pane.
+PIN_HANDOFF_LIVE_SECS="${PANEL_PIN_LIVE:-1800}"
+is_uuid() {
+  case "$1" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 # A pin that is not a UUID is corrupt on its face — it cannot name a
 # transcript Claude Code would ever write, so there is nothing to wait for.
 # Drop it here rather than spend the grace period above discovering it.
-case "$PIN_SESSION_ID" in
-  '') ;;
-  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-  *)
-    pin_log "ignoring malformed pin '$PIN_SESSION_ID' (not a UUID) — falling back to session detection"
-    PIN_SESSION_ID=""
-    ;;
-esac
+if [ -n "$PIN_SESSION_ID" ] && ! is_uuid "$PIN_SESSION_ID"; then
+  pin_log "ignoring malformed argv pin '$PIN_SESSION_ID' (not a UUID) — falling back to the handoff file"
+  PIN_SESSION_ID=""
+  PIN_SOURCE=""
+fi
 # Recorded once so the unpinned session-detection fallback below can tell
 # "a session that started after I did" from "a session that was already
 # running when I started" — see that fallback for why this matters.
@@ -1711,6 +1768,51 @@ block_clock_tick() {
   [ "$burn_color" = "$C_RED" ] && burn_label="High"
 }
 
+# ---- adopt the session id from the handoff file ----
+# Called at the top of every resolve_session tick. Sets PIN_SESSION_ID (and
+# PIN_SOURCE) or leaves them alone; never prints.
+#
+# Two admission rules, because the same file answers two different
+# questions. A handoff written around the time this panel started was
+# written FOR this panel by the launcher or by this pane's SessionStart
+# hook, and is simply the answer. An OLDER one is the previous session in
+# this directory — which is the right answer exactly when the panel was
+# restarted into a conversation already in progress (the case the
+# birth-after-panel-start heuristic below structurally cannot see), and the
+# wrong answer for a brand-new pane whose `claude` has not started yet. The
+# transcript's own mtime separates them: a stale handoff is believed only
+# while the session it names is still being written to.
+#
+# Note what this is NOT: the reverted "most recently modified transcript in
+# this directory" heuristic, which had no identity behind it and would
+# happily hand a blank pane a different pane's live conversation. This one
+# starts from an id that some launcher or hook explicitly recorded for THIS
+# directory and only asks whether it is still current.
+adopt_handoff_pin() {
+  local sid written age tsc now
+  # An argv pin is the caller being explicit; do not second-guess it until
+  # resolve_session has given up on it and cleared PIN_SOURCE.
+  [ "$PIN_SOURCE" = "argv" ] && return 0
+  [ -r "$PIN_HANDOFF_FILE" ] || return 0
+  IFS=$'\t' read -r sid written < "$PIN_HANDOFF_FILE" 2>/dev/null || return 0
+  is_uuid "${sid:-}" || return 0
+  [ "$sid" = "$PIN_SESSION_ID" ] && return 0
+  case "${written:-}" in ''|*[!0-9]*) written=0 ;; esac
+  now=$(panel_now)
+  if (( written < PANEL_START_EPOCH - PIN_HANDOFF_FRESH_SECS )); then
+    # Stale handoff: only believe it while its transcript is still live.
+    tsc="$project_dir/$sid.jsonl"
+    [ -f "$tsc" ] || return 0
+    age=$(( now - $(stat -f %m "$tsc" 2>/dev/null || echo 0) ))
+    (( age >= 0 && age <= PIN_HANDOFF_LIVE_SECS )) || return 0
+    pin_log "adopting stale handoff pin '$sid' (written $(( now - written ))s ago, transcript touched ${age}s ago) — panel restarted mid-session"
+  else
+    pin_log "adopting handoff pin '$sid' for $PWD"
+  fi
+  PIN_SESSION_ID="$sid"
+  PIN_SOURCE="handoff"
+}
+
 # ---- which transcript is this pane's session? ----
 # Runs on every FAST tick: a session started in this pane after the panel
 # has to appear in the turn table now, not on the next slow tier. It sets
@@ -1747,6 +1849,13 @@ resolve_session() {
   # project this panel belongs to; Claude Code encodes that project's
   # transcript directory as $PWD with every "/" replaced by "-".
   project_dir="$HOME/.claude/projects/$(printf '%s' "$PWD" | tr '/' '-')"
+  # Every tick, not just at startup. The panel and `claude` start at the
+  # same moment (the ~/.zshrc preexec hook backgrounds the launcher and then
+  # lets the command run), so on the first few ticks the SessionStart hook
+  # may not have written the handoff yet. This also re-reads it while a pin
+  # is held but unresolved, so the authoritative id from the hook supersedes
+  # the launcher's guess if the two ever disagree.
+  adopt_handoff_pin
   if [ -n "$PIN_SESSION_ID" ]; then
     latest="$project_dir/$PIN_SESSION_ID.jsonl"
     # The pinned session may not have written its first line yet (the
@@ -1755,24 +1864,25 @@ resolve_session() {
     # picks it up.
     if [ ! -f "$latest" ]; then
       latest=""
-      # ...but only for a WHILE. The pin arrives as synthetic keystrokes
-      # typed into a brand-new pane, and a keystroke that is dropped or
-      # interleaved with the user's own typing silently rewrites it: an
-      # observed pane ran with
-      #   9e435181h-888e-4f0c-811-3befb80226t3d
-      # against a real session id of
-      #   9e435181-888e-4f0c-81f1-3befb802263d
-      # — an 'h' and a 't' woven in from the real keyboard, an 'f' lost.
-      # That names a transcript that will NEVER exist, so the pane showed
-      # "Model: Unknown" and "no active session found" for its entire life,
-      # hours into a busy session, with everything else on screen correct.
-      # A pin that has not resolved by now is not slow, it is wrong: drop
-      # it and let the unpinned birth-time heuristic below take over on
-      # this same tick. It is a guess, but a guess that converges on the
-      # right transcript beats a certainty that names none.
-      if (( $(panel_now) - PANEL_START_EPOCH > PIN_GRACE_SECS )); then
-        pin_log "abandoning pin '$PIN_SESSION_ID' after ${PIN_GRACE_SECS}s: $project_dir/$PIN_SESSION_ID.jsonl never appeared"
+      # ...but only for a WHILE, and only for an ARGV pin — the one path
+      # where the id may have been TYPED into the pane and silently rewritten
+      # by an interleaved keystroke (see PIN_HANDOFF_FILE for the observed
+      # corruption). A pin like that names a transcript that will never
+      # exist, so waiting on it costs the whole session; drop it and let the
+      # handoff file, then the birth-time heuristic, take over on this same
+      # tick.
+      #
+      # A handoff pin is deliberately NOT timed out. Nothing can corrupt it,
+      # so "the transcript is not there yet" only ever means the session has
+      # not written its first line — which happens whenever the user reads
+      # for a couple of minutes before typing, and is not the panel's cue to
+      # start guessing. The 90s timer used to fire on exactly that: an
+      # observed pane abandoned a perfectly good pin at 14:21:53 and the
+      # transcript appeared at 14:22:09, 16 seconds later.
+      if [ "$PIN_SOURCE" = "argv" ] && (( $(panel_now) - PANEL_START_EPOCH > PIN_GRACE_SECS )); then
+        pin_log "abandoning argv pin '$PIN_SESSION_ID' after ${PIN_GRACE_SECS}s: $project_dir/$PIN_SESSION_ID.jsonl never appeared"
         PIN_SESSION_ID=""
+        PIN_SOURCE=""
       fi
     fi
   fi
@@ -2554,6 +2664,56 @@ else
 fi
 rm -f "$KEYBLOCK_SRC"
 
+echo "Installing claude-panel-session-hook.sh ..."
+cat > "$BIN_DIR/claude-panel-session-hook.sh" <<'SESSHOOK_EOF'
+#!/usr/bin/env bash
+# Claude Code SessionStart hook: tell the usage panel which session is
+# running in this directory.
+#
+# Reads the hook payload on stdin and writes "<session-id>\t<epoch>" to
+# ~/.cache/claude-panel-pin/<cwd-with-slashes-as-dashes>, which
+# ccusage-panel.sh reads (adopt_handoff_pin) to open the right transcript.
+#
+# This is the only pin source that is authoritative rather than predictive.
+# The ~/.zshrc preexec hook has to CHOOSE the session id in advance and force
+# it on with --session-id, which it cannot do for `claude --resume`,
+# `--continue`, a GUI window or an IDE-embedded terminal — all of which were
+# therefore unpinned, every time, and left the panel guessing. Here the
+# session has already started and simply reports what it is.
+#
+# Must print nothing: SessionStart hook stdout is injected into the model's
+# context.
+set -uo pipefail
+
+PIN_DIR="${PANEL_PIN_DIR:-$HOME/.cache/claude-panel-pin}"
+LOG="$HOME/.cache/claude-panel-pin.log"
+
+payload=$(cat 2>/dev/null)
+[ -n "$payload" ] || exit 0
+
+sid=$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)
+cwd=$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)
+[ -n "$sid" ] && [ -n "$cwd" ] || exit 0
+
+case "$sid" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) exit 0 ;;
+esac
+
+mkdir -p "$PIN_DIR" 2>/dev/null || exit 0
+key=$(printf '%s' "$cwd" | tr '/' '-')
+# Same-directory write + rename, so a panel reading the file mid-write never
+# sees half a UUID — the exact class of half-written id this whole mechanism
+# exists to stop happening.
+tmp="$PIN_DIR/.$key.$$"
+printf '%s\t%s\n' "$sid" "$(date +%s)" > "$tmp" 2>/dev/null &&
+  mv -f "$tmp" "$PIN_DIR/$key" 2>/dev/null
+rm -f "$tmp" 2>/dev/null
+printf '%s [%s] SessionStart: %s -> %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$cwd" "$sid" >> "$LOG" 2>/dev/null
+exit 0
+SESSHOOK_EOF
+chmod +x "$BIN_DIR/claude-panel-session-hook.sh"
+
 echo "Installing claude-panel-launch.sh ..."
 # ---------------------------------------------------------------------------
 # claude-panel-keysend: deliver the split-and-launch keystrokes to ONE process.
@@ -2686,32 +2846,53 @@ log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RUN_ID" "$1" >> "
 
 panel_pids() { pgrep -f '[b]in/ccusage-panel\.sh' 2>/dev/null | sort; }
 
-# Did the pin we typed actually ARRIVE intact? "A new panel process appeared"
-# was the whole of this launcher's success test, and it cannot tell a panel
-# that got the right session id from one that got a mangled one -- which is a
-# real outcome, not a theoretical one: keystrokes are synthetic, and a
-# dropped or interleaved character rewrites the id in place. One observed
-# pane ran with `9e435181h-888e-4f0c-811-3befb80226t3d` against a real
-# session id of `9e435181-888e-4f0c-81f1-3befb802263d`, and spent hours
-# reporting "Model: Unknown / no active session found" while every
-# account-wide figure beside it stayed correct.
+# Is the pin readable where the panel will look for it? The session id no
+# longer travels on the command line this launcher TYPES into the new split,
+# which is what this check used to inspect -- it compared the sent id against
+# the new panel's argv, because keystrokes are synthetic and a dropped or
+# interleaved character rewrites an id in place. One observed pane ran with
+# `9e435181h-888e-4f0c-811-3befb80226t3d` against a real session id of
+# `9e435181-888e-4f0c-81f1-3befb802263d`, and spent hours reporting
+# "Model: Unknown / no active session found" while every account-wide figure
+# beside it stayed correct.
 #
-# The panel now recovers on its own (it abandons a pin that names no
-# transcript and falls back to detecting the session itself), so this does
-# not kill or relaunch anything -- a second split would be a worse outcome
-# than a self-healing one. It exists so the corruption is VISIBLE in the log
-# rather than only in a symptom that looks like a panel bug.
-verify_pin() { # $1 = newline-separated pids
+# write_pin_handoff below takes the id out of the keystroke path entirely, so
+# there is no longer a transit to corrupt. What remains worth checking is
+# that the file actually landed and reads back byte-for-byte: a $HOME that is
+# read-only or full fails silently otherwise, and the symptom looks exactly
+# like the panel bug this replaced.
+verify_pin() { # $1 = newline-separated pids (unused; kept for call-site shape)
   [ -n "$PIN_SID" ] || return 0
-  local pid argv
-  for pid in $1; do
-    [ -n "$pid" ] || continue
-    argv=$(ps -o args= -p "$pid" 2>/dev/null)
-    case "$argv" in
-      *"$PIN_SID"*) ;;
-      *) log "attempt $attempt: WARNING — panel $pid did not receive the pin intact (sent '$PIN_SID', got '${argv##* }'); the panel will fall back to detecting the session itself" ;;
-    esac
-  done
+  local got
+  IFS=$'\t' read -r got _ < "$PIN_HANDOFF_FILE" 2>/dev/null || got=""
+  if [ "$got" = "$PIN_SID" ]; then
+    log "attempt $attempt: pin handoff verified at $PIN_HANDOFF_FILE"
+  else
+    log "attempt $attempt: WARNING — pin handoff did not land (sent '$PIN_SID', read back '${got:-nothing}' from $PIN_HANDOFF_FILE); the panel will fall back to the SessionStart hook or to detecting the session itself"
+  fi
+}
+
+# Hand the session id to the panel through the filesystem rather than
+# through the keyboard. Written BEFORE any keystroke goes out, so the panel
+# can read it on its very first tick. Same-directory write + rename, so a
+# panel reading mid-write never sees half a UUID.
+#
+# This duplicates what claude-panel-session-hook.sh does from inside Claude
+# Code, and is not redundant with it: the hook is authoritative but needs
+# ~/.claude/settings.json to exist and hooks to be enabled, and it cannot
+# run at all if the user's `claude` never starts. This one covers the pin
+# the launcher itself chose.
+write_pin_handoff() {
+  [ -n "$PIN_SID" ] || return 0
+  mkdir -p "$PIN_HANDOFF_DIR" 2>/dev/null || { log "WARNING — could not create $PIN_HANDOFF_DIR; panel will fall back to detecting the session itself"; return 0; }
+  local tmp="$PIN_HANDOFF_DIR/.$(basename "$PIN_HANDOFF_FILE").$$"
+  if printf '%s\t%s\n' "$PIN_SID" "$(date +%s)" > "$tmp" 2>/dev/null &&
+     mv -f "$tmp" "$PIN_HANDOFF_FILE" 2>/dev/null; then
+    log "pin handoff written: $PIN_HANDOFF_FILE -> $PIN_SID"
+  else
+    rm -f "$tmp" 2>/dev/null
+    log "WARNING — could not write $PIN_HANDOFF_FILE; panel will fall back to detecting the session itself"
+  fi
 }
 
 # Swallow real keyboard input for a few seconds while synthetic keystrokes
@@ -2727,12 +2908,20 @@ start_keyboard_guard() { # $1 = seconds
 # Passed by the autolaunch hook only for a bare `claude` invocation, which
 # it forces to run with this same ID via --session-id — lets the panel open
 # that exact transcript instead of guessing by mtime. Empty for anything
-# else, and the panel falls back to its own directory-scoped guess.
+# else, and the panel falls back to the SessionStart hook's handoff or to
+# its own directory-scoped guess.
 PIN_SID="${1:-}"
+PIN_HANDOFF_DIR="${PANEL_PIN_DIR:-$HOME/.cache/claude-panel-pin}"
+PIN_HANDOFF_FILE="$PIN_HANDOFF_DIR/$(printf '%s' "$PWD" | tr '/' '-')"
+# The command TYPED into the new split carries no session id any more, so
+# there is nothing in it a stray keystroke can corrupt into a transcript name
+# that will never exist. 10 and 12 are the panel's own defaults for refresh
+# and turn-table rows, so an argument-free launch is identical to the old
+# pinned one minus the pin.
 PANEL_CMD="~/.local/bin/ccusage-panel.sh"
-[ -n "$PIN_SID" ] && PANEL_CMD="~/.local/bin/ccusage-panel.sh 10 12 $PIN_SID"
 
 log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} TMUX=${TMUX:-unset} PWD=$PWD PIN_SID=${PIN_SID:-none}"
+write_pin_handoff
 
 # Inside tmux, TERM_PROGRAM gets overridden (often to "tmux") regardless of
 # the outer terminal, so the Ghostty check below never sees "ghostty" even
@@ -3476,6 +3665,30 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
   fi
 else
   echo "No ~/.claude/settings.json found — skipping the cost-alert hook."
+fi
+
+SESSION_HOOK_CMD="~/.local/bin/claude-panel-session-hook.sh"
+if [ -f "$CLAUDE_SETTINGS" ]; then
+  if jq -e --arg cmd "$SESSION_HOOK_CMD" '
+      (.hooks.SessionStart // []) | any(.hooks[]?.command == $cmd)
+    ' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+    echo "~/.claude/settings.json already has the session-pin hook — leaving as-is."
+  else
+    tmp=$(mktemp)
+    # No matcher: every SessionStart source (startup, resume, clear, compact)
+    # is equally "the session in this pane is now X", which is the whole
+    # question the panel is trying to answer.
+    jq --arg cmd "$SESSION_HOOK_CMD" '
+      .hooks //= {} |
+      .hooks.SessionStart //= [] |
+      .hooks.SessionStart += [{"hooks": [{"type": "command", "command": $cmd, "timeout": 5}]}]
+    ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
+    echo "Added the session-pin hook to ~/.claude/settings.json (SessionStart)."
+  fi
+else
+  echo "No ~/.claude/settings.json found — skipping the session-pin hook."
+  echo "  (the panel will still get its pin from claude-panel-launch.sh, but"
+  echo "   --resume/--continue and GUI launches will fall back to guessing)"
 fi
 
 echo
