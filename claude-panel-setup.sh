@@ -241,8 +241,28 @@ fmt_num() {
     print (neg?"-":"") out;
   }'
 }
-fmt_money() { printf '$%.2f' "${1:-0}"; }
-fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.2fM", n/1000000 }'; }
+# Whole dollars, because cents are three characters of noise on figures that
+# are read to compare, not to reconcile. The exception is a nonzero amount
+# below $1: "$0" and "$0.00" are the panel's way of saying "nothing here", so
+# rounding a real 35-cent burn rate or a quiet week's spend down into that is
+# the one case where dropping the cents changes the meaning rather than the
+# width. Those keep two decimals.
+# LC_NUMERIC=C on every awk here: this account's locale is en_ZA, whose
+# decimal separator is a comma, and awk's printf honours it -- "$0,35" and
+# "0,45M". The panel has been showing dots only because it happens to be
+# launched without the locale exported; nothing was pinning it.
+fmt_money() {
+  LC_NUMERIC=C awk -v n="${1:-0}" 'BEGIN{ a = (n<0?-n:n); printf (a>0 && a<1) ? "$%.2f" : "$%.0f", n }'
+}
+fmt_m() { LC_NUMERIC=C awk -v n="${1:-0}" 'BEGIN{ printf "%.2fM", n/1000000 }'; }
+# Token totals to the nearest million. Same carve-out and same reason as
+# fmt_money: under a million, "0M" reads as no data, so those keep one
+# decimal. Distinct from fmt_m(), which stays at two decimals for the context
+# gauge -- that one is a fraction of a single window ("0.45M / 1.00M"), where
+# rounding to whole millions would print "0M / 1M" and gauge nothing.
+fmt_mt() {
+  LC_NUMERIC=C awk -v n="${1:-0}" 'BEGIN{ m = n/1000000; a = (m<0?-m:m); printf (a>0 && a<1) ? "%.1fM" : "%.0fM", m }'
+}
 fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 
 # Claude Burst (https://github.com/andrewbakercloudscale/claude-burst) is a
@@ -2327,7 +2347,7 @@ build_trailing() {
     IFS=$'\t' read -r tCost tTok tIn tOut tCacheC tCacheR <<<"$(jq -r '
       .totals | [.totalCost, .totalTokens, .inputTokens, .outputTokens, .cacheCreationTokens, .cacheReadTokens] | @tsv
     ' <<<"$daily_json")"
-    printf '  %stoday:%s %s | %s tokens\n' "$C_CYAN" "$C_RESET" "$(fmt_money "$tCost")" "$(fmt_m "$tTok")"
+    printf '  %stoday:%s %s | %s tokens\n' "$C_CYAN" "$C_RESET" "$(fmt_money "$tCost")" "$(fmt_mt "$tTok")"
     models_line=""
     while IFS=$'\t' read -r mname mcost; do
       [ -z "$mname" ] && continue
@@ -2345,8 +2365,12 @@ build_trailing() {
     trend_line=""
     while IFS=$'\t' read -r day dcost dtok; do
       [ -z "$day" ] && continue
-      seg="${C_CYAN}${day:5}:${C_RESET} $(fmt_money "$dcost")"
-      trend_line="${trend_line:+$trend_line | }$seg"
+      # Day-of-month only, and two spaces instead of " | ", because the
+      # month is the same for all three cells in a 3-day window and this
+      # line was running past the pane's right edge -- the third day's cost,
+      # i.e. TODAY's, was the number being truncated away.
+      seg="${C_CYAN}${day:8}${C_RESET} $(fmt_money "$dcost")"
+      trend_line="${trend_line:+$trend_line  }$seg"
     done < <(jq -r '.daily[] | [.period, .totalCost, .totalTokens] | @tsv' <<<"$trend_json")
     printf '  %s3d:%s %s\n' "$C_CYAN" "$C_RESET" "$trend_line"
   fi
@@ -2416,7 +2440,16 @@ build_trailing() {
       # localtime before strftime — see the same fix on the active-block
       # start/end times above; without it this reads ~2h behind on UTC+2.
       lasthm=$(jq -rn --arg t "$slast" '($t[0:19]+"Z") | fromdateiso8601 | localtime | strftime("%H:%M")' 2>/dev/null)
-      row=$(printf '%-10s %8s  %s tokens  last %s' "${sid:0:10}" "$(fmt_money "$scost")" "$(fmt_m "$stok")" "$lasthm")
+      # Last 4 chars of the sid, not the first 10. The point of the column is
+      # to tell today's handful of sessions apart, and any 4 characters do
+      # that as well as any other -- the tail is just the cheapest 4. (The
+      # space in "${sid: -4}" is required: "${sid:-4}" is the unset-default
+      # expansion and would print the whole id.) The "tokens" and "last"
+      # words go too: every row in this block is <cost> <tokens> <time>, so
+      # the labels were repeated on each row to say what the column already
+      # says, and they cost enough width that the time itself was being cut
+      # off mid-value ("last 08:").
+      row=$(printf '%-4s %6s %5s %s' "${sid: -4}" "$(fmt_money "$scost")" "$(fmt_mt "$stok")" "$lasthm")
       if [ "$sid" = "${sess_id:-}" ]; then
         printf '  %s%s *this%s\n' "$C_BOLD" "$row" "$C_RESET"
       else
