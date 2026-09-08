@@ -2936,8 +2936,8 @@ chmod +x "$KEYSEND_SRC"
 cat > "$BIN_DIR/claude-panel-launch.sh" <<'LAUNCH_EOF'
 #!/usr/bin/env bash
 # Opens a right-hand Ghostty split running the live ccusage panel, shrinks
-# it to ~1/3 of the window width (splits are created 50/50 by default),
-# then returns keyboard focus to the left (original) pane. Invoked once
+# it to $PANEL_WIDTH_PCT of the window width (splits are created 50/50 by
+# default), then returns keyboard focus to the left (original) pane. Invoked once
 # per terminal window by the ccusage split-panel autolaunch hook in
 # ~/.zshrc, or directly by ~/.local/bin/ghostty-claude-launcher. Needs the
 # ctrl+shift+h/l resize_split keybinds in ~/.config/ghostty/config
@@ -3035,6 +3035,25 @@ PIN_HANDOFF_FILE="$PIN_HANDOFF_DIR/$(printf '%s' "$PWD" | tr '/' '-')"
 # and turn-table rows, so an argument-free launch is identical to the old
 # pinned one minus the pin.
 PANEL_CMD="~/.local/bin/ccusage-panel.sh"
+
+# How much of the window the panel gets, as a whole percent. Ghostty makes
+# splits 50/50, so the launcher shrinks the new pane with N presses of
+# ctrl+shift+l (resize_split:right,40 -- 40px each):
+#
+#   presses = (50% - target%) of the window width, in 40px steps
+#           = width * (50 - PCT) / 100 / 40
+#           = width * (50 - PCT) / 4000
+#
+# A number rather than the old open-coded `(width / 6) / 40`, which was the
+# same expression with 1/3 already substituted in and no way to see that
+# that was what it meant, let alone change it. 40 because a third was too
+# narrow for the widest rows the panel draws -- the Top Sessions block and
+# the 3-day trend were wrapping mid-value.
+#
+# Both send paths below compute this, and they must agree: a launch that
+# lands on the AppleScript fallback should produce the same pane as one
+# that does not.
+PANEL_WIDTH_PCT="${PANEL_WIDTH_PCT:-40}"
 
 log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} TMUX=${TMUX:-unset} PWD=$PWD PIN_SID=${PIN_SID:-none}"
 write_pin_handoff
@@ -3206,7 +3225,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
         log "attempt $attempt: targeted path unavailable (window geometry: $geom) — falling through to the AppleScript path"
         ;;
       *)
-        presses=$(( (geom / 6) / 40 ))
+        presses=$(( geom * (50 - PANEL_WIDTH_PCT) / 4000 ))
         log "attempt $attempt: targeted send to pid $ghostty_pid (width=$geom presses=$presses) via $panel_python"
         # The guard belongs on THIS path too. It used to be started only
         # further down, on the AppleScript path, so the targeted path -- the
@@ -3360,7 +3379,7 @@ tell application "System Events"
   tell frontApp
     set winSize to size of front window
     set winWidth to item 1 of winSize
-    set numPresses to round ((winWidth / 6) / 40)
+    set numPresses to round ((winWidth * (50 - $PANEL_WIDTH_PCT)) / 4000)
     delay 0.3
     keystroke "d" using command down
     delay 0.6
