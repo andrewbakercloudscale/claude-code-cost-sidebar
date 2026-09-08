@@ -225,7 +225,12 @@ panel_date() {
 
 PANEL_START_EPOCH=$(panel_now)
 
-C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+# No dim/faint attribute anywhere in this panel: \033[2m renders as a
+# low-contrast grey, which is unreadable at a glance on a dark pane and is
+# not a colour this panel uses. Everything it used to mark is now either a
+# state (C_YELLOW, for unknown/degraded) or a note about the panel rather
+# than a reading from it (C_ELECTRIC, the same rule as the refresh tags).
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
 C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
 # Electric blue (#7DF9FF), for the per-section "(refresh Ns)" tags and the
@@ -236,7 +241,7 @@ C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
 # so neither should collide with them. The two basic-code blues were both
 # tried on the id first and both failed on legibility: \033[34m renders dark
 # on this near-black background, \033[94m renders as a grey barely different
-# from the C_DIM it replaced. clear_eol()'s ANSI stripper matches
+# from the dim attribute it replaced. clear_eol()'s ANSI stripper matches
 # \033[<digits and semicolons>m, which covers this form too, so width
 # accounting is unaffected.
 C_ELECTRIC=$'\033[38;2;125;249;255m'
@@ -349,7 +354,7 @@ proxy_state_line() {
   # all, so this outranks PRIMARY/SECONDARY rather than sitting beside it.
   if ! why=$(proxy_in_path "$cfg"); then
     printf '  🔀 Proxy State: %sNOT IN USE%s %s(%s)%s\n' \
-      "$C_RED" "$C_RESET" "$C_DIM" "$why" "$C_RESET"
+      "$C_RED" "$C_RESET" "$C_YELLOW" "$why" "$C_RESET"
     return
   fi
 
@@ -1028,6 +1033,40 @@ recent_sections_fetch() {
 RECENT_JSON=""
 recent_sections() { printf '%s' "$RECENT_JSON"; }
 
+# This week's spend out of the weekly report, without knowing which day the
+# tool calls the start of a week.
+#
+# The previous version computed the Monday and asked for that key exactly,
+# on the strength of a comment claiming Mondays were "verified against five
+# consecutive `ccusage weekly` periods". They are Sundays. On a Tuesday the
+# panel therefore asked for a key no row carried, the `// 0` fallback caught
+# the miss, and the line rendered a confident `week: $0` on a week that had
+# several days of usage in it -- next to a `3d:` line listing that usage.
+# The same silent shape as the `.period` rename in check Q, and it survived
+# for the same reason: the only weekly fixture in the suite was keyed to a
+# Monday, so the test agreed with the bug.
+#
+# Selecting by the tool's own convention instead of ours: a 7-day window
+# ending today contains exactly ONE week-start under any convention, so the
+# latest row inside it is the current week whether the tool starts on Sunday,
+# Monday, or anything else -- and a week with no usage still has no row in
+# that window, so it still reads $0 rather than silently reporting the
+# previous week the way `[-1]` would.
+current_week_cost() { # $1 = recent_sections payload
+  local floor today cost
+  today=$(panel_date +%Y-%m-%d)
+  floor=$(panel_date -v-6d +%Y-%m-%d 2>/dev/null || panel_date -d '6 days ago' +%Y-%m-%d)
+  # ISO dates sort correctly as strings, so no date parsing is needed in jq.
+  cost=$(jq -r --arg f "$floor" --arg t "$today" '
+    [ .weekly[]? | select(.period >= $f and .period <= $t) ]
+    | sort_by(.period) | last | .totalCost // 0
+  ' <<<"$1" 2>/dev/null)
+  # `A || B && C` would return 1 on the happy path here, which is a landmine
+  # for any caller that ever runs under `set -e`. Spelled out instead.
+  if [ -z "$cost" ] || [ "$cost" = "null" ]; then cost=0; fi
+  printf '%s' "$cost"
+}
+
 # The full session report, fetched once and sliced locally. Every windowed
 # `session --since/--until` variant the panel used to ask for (7-day
 # baseline, previous 7-day baseline, today's sessions) is the SAME report
@@ -1271,7 +1310,7 @@ ctx_yellow_t, ctx_red_t, ctx_purple_t = (float(x) for x in sys.argv[12:15])
 delta_yellow_mult, delta_red_mult, delta_floor = (float(x) for x in sys.argv[15:18])
 # Appended last so every index above keeps its meaning. Used for the cells a
 # secondary-served turn genuinely cannot fill in.
-c_dim = sys.argv[18]
+c_na = sys.argv[18]
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-sonnet-5":   (2.00, 10.00),
@@ -1553,7 +1592,7 @@ if shown:
             #   - context %: the window size is unknown, so ctx_pct is noise
             print(f"  {col_purple}{turn_no:<5}{label:<10}{c_reset}"
                   f"{pad}{total_str} (+{delta_str})"
-                  f"{c_dim}{'--':>6}{'?':>8}{c_reset}")
+                  f"{c_na}{'--':>6}{'?':>8}{c_reset}")
             continue
         win = context_window_size(model)
         # 0 means the model is not in PRICES, so its window is unknown --
@@ -1589,10 +1628,10 @@ if shown:
         # DEFAULT_PRICE, and that figure is a stand-in rather than a rate.
         # Add the id above and this line goes away.
         unpriced = sorted({t[5] for t in turns if t[7]})
-        print(f"  {c_dim}* estimated at default rates, model not in price "
+        print(f"  {c_na}* estimated at default rates, model not in price "
               f"table: {', '.join(unpriced)}{c_reset}")
     if saw_secondary:
-        print(f"  {c_dim}* served by claude-burst secondary; not Anthropic spend{c_reset}")
+        print(f"  {c_na}* served by claude-burst secondary; not Anthropic spend{c_reset}")
 PYEOF
   } > "$cache_file.$$.tmp"
   if [ $? -eq 0 ] && [ -s "$cache_file.$$.tmp" ]; then
@@ -1625,7 +1664,7 @@ session_stats_refresh() {
   out=$(turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
     "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
     "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
-    "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_DIM")
+    "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_ELECTRIC")
   meta=$(printf '%s\n' "$out" | head -1)
   case "$meta" in
     '#META'*)
@@ -2210,7 +2249,7 @@ build_summary() {
       printf '  💰 Session: --, Burn --\n'
     fi
   else
-    printf '  🤖 Model: %sUnknown%s\n' "$C_DIM" "$C_RESET"
+    printf '  🤖 Model: %sUnknown%s\n' "$C_YELLOW" "$C_RESET"
     printf '  💰 Session: $-0.00, Burn $0.00/hr\n'
   fi
 
@@ -2449,15 +2488,8 @@ build_trailing() {
     done < <(jq -r '.daily[] | [.period, .totalCost, .totalTokens] | @tsv' <<<"$trend_json")
     printf '  %s3d:%s %s\n' "$C_CYAN" "$C_RESET" "$trend_line"
   fi
-  # Current period selected by computed key, not by taking the last row:
-  # a week or month with no usage yet has no row at all, and [-1] would then
-  # silently report the PREVIOUS one. Absent means $0, which is the truth.
-  # Week keys are Mondays -- verified against five consecutive `ccusage
-  # weekly` periods and against `weekly --last 1` for the current week.
-  week_start=$(panel_date -v-$(( $(panel_date +%u) - 1 ))d +%Y-%m-%d 2>/dev/null || panel_date -d "$(( $(panel_date +%u) - 1 )) days ago" +%Y-%m-%d)
   recent_json=$(recent_sections)
-  week_cost=$(jq -r --arg w "$week_start" '[.weekly[]? | select(.period == $w) | .totalCost][0] // 0' <<<"$recent_json" 2>/dev/null)
-  [ -z "$week_cost" ] && week_cost=0
+  week_cost=$(current_week_cost "$recent_json")
   month_cost=$(jq -r --arg m "$(panel_date +%Y-%m)" '[.monthly[]? | select(.period == $m) | .totalCost][0] // 0' <<<"$recent_json" 2>/dev/null)
   [ -z "$month_cost" ] && month_cost=0
   printf '  %sweek:%s %s | %smonth:%s %s\n' \

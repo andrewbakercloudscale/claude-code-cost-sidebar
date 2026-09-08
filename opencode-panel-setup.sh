@@ -49,7 +49,10 @@ export LC_ALL=C LC_NUMERIC=C
 REFRESH="${1:-5}"
 TURN_ROWS="${2:-12}"
 
-C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+# No dim attribute: \033[2m renders as low-contrast grey, which this panel
+# does not use. The refresh tag and the 7-day average are notes about the
+# panel rather than live readings, so both take cyan.
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
 
 # A short colored title, not a full-width divider bar — a bar drawn at
@@ -309,7 +312,7 @@ while true; do
 
   {
   printf '%s%s OpenCode usage — %s %s(refresh %ss)%s\n' \
-    "$C_BOLD" "──" "$(date '+%a %H:%M:%S')" "$C_DIM" "$REFRESH" "$C_RESET"
+    "$C_BOLD" "──" "$(date '+%a %H:%M:%S')" "$C_CYAN" "$REFRESH" "$C_RESET"
 
   if ! command -v opencode >/dev/null 2>&1; then
     echo "opencode CLI not found on PATH."
@@ -360,7 +363,7 @@ while true; do
     fi
     echo "session: $sess_disp"
     if awk -v a="$avg_session_cost" 'BEGIN{exit !(a>0)}'; then
-      printf '%s  7-day avg session: $%.2f%s\n' "$C_DIM" "$avg_session_cost" "$C_RESET"
+      printf '%s  7-day avg session: $%.2f%s\n' "$C_CYAN" "$avg_session_cost" "$C_RESET"
     fi
     echo
 

@@ -18,7 +18,7 @@ check_Q_report_shape_adapter() {
 {"daily":[{"date":"2026-09-01","totalCost":3.5,"totalTokens":100}],"totals":{"totalCost":3.5}}
 JSON
   cat > "$CCUSAGE_FIXTURE_DIR/weekly.json" <<'JSON'
-{"weekly":[{"week":"2026-08-31","totalCost":9.5,"totalTokens":300}],"totals":{"totalCost":9.5}}
+{"weekly":[{"week":"2026-08-30","totalCost":9.5,"totalTokens":300}],"totals":{"totalCost":9.5}}
 JSON
   cat > "$CCUSAGE_FIXTURE_DIR/monthly.json" <<'JSON'
 {"monthly":[{"month":"2026-09","totalCost":21.0,"totalTokens":900}],"totals":{"totalCost":21.0}}
@@ -31,7 +31,7 @@ JSON
 
   local r; r=$(recent_sections)
   assert_eq "daily rows carry .period"   "2026-09-01" "$(jq -r '.daily[0].period' <<<"$r")"
-  assert_eq "weekly rows carry .period"  "2026-08-31" "$(jq -r '.weekly[0].period' <<<"$r")"
+  assert_eq "weekly rows carry .period"  "2026-08-30" "$(jq -r '.weekly[0].period' <<<"$r")"
   assert_eq "monthly rows carry .period" "2026-09"    "$(jq -r '.monthly[0].period' <<<"$r")"
   assert_eq "and the values survive the rename" "3.5" "$(jq -r '.daily[0].totalCost' <<<"$r")"
 
