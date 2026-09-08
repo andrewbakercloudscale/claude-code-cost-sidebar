@@ -2114,7 +2114,15 @@ build_summary() {
     # used to be sent to ccusage inside the statusline payload and read back
     # out of the rendered string it came home in.
     mtc=$(model_tier_color "${model_id:-}")
-    printf '  🤖 Model: %s%s%s\n' "$mtc" "${model_label:-Unknown}" "$C_RESET"
+    # The session's own id, in the same last-5-characters form the Top
+    # Sessions rows use, so the two can be read against each other -- that
+    # matching is the whole reason it is on screen twice. Dim, and after the
+    # model, because it is an identifier you look up rather than a number you
+    # watch. Printed with the * prefix only in Top Sessions, where it marks
+    # one row out of several; here there is nothing to distinguish it from.
+    printf '  🤖 Model: %s%s%s  %s%s%s\n' \
+      "$mtc" "${model_label:-Unknown}" "$C_RESET" \
+      "$C_DIM" "${sess_id: -5}" "$C_RESET"
 
     if [ -n "$SESS_COST" ]; then
       sess_amt=$(awk -v c="$SESS_COST" 'BEGIN{ printf "%.2f", c }')
@@ -2440,18 +2448,20 @@ build_trailing() {
       # localtime before strftime — see the same fix on the active-block
       # start/end times above; without it this reads ~2h behind on UTC+2.
       lasthm=$(jq -rn --arg t "$slast" '($t[0:19]+"Z") | fromdateiso8601 | localtime | strftime("%H:%M")' 2>/dev/null)
-      # Last 4 chars of the sid, not the first 10. The point of the column is
-      # to tell today's handful of sessions apart, and any 4 characters do
-      # that as well as any other -- the tail is just the cheapest 4. (The
-      # space in "${sid: -4}" is required: "${sid:-4}" is the unset-default
-      # expansion and would print the whole id.) The "tokens" and "last"
-      # words go too: every row in this block is <cost> <tokens> <time>, so
-      # the labels were repeated on each row to say what the column already
-      # says, and they cost enough width that the time itself was being cut
-      # off mid-value ("last 08:").
-      row=$(printf '%-4s %6s %5s %s' "${sid: -4}" "$(fmt_money "$scost")" "$(fmt_mt "$stok")" "$lasthm")
+      # "*" then the last 5 characters of the sid -- 5, not the previous 4,
+      # so this cell and the id on the Model line are the same string. That
+      # matching is the only reason the id is on screen twice: it is how you
+      # find the row you are currently sitting in.
+      #
+      # Which is also why the "*this" suffix is gone. It used to mark that
+      # row, but it marked it three columns off the right edge of a block
+      # that has spent this whole session being pulled back inside the pane,
+      # and the row is already bold. (The space in "${sid: -5}" is required:
+      # "${sid:-5}" is the unset-default expansion and would print the whole
+      # id.)
+      row=$(printf '%-6s %6s %5s %s' "*${sid: -5}" "$(fmt_money "$scost")" "$(fmt_mt "$stok")" "$lasthm")
       if [ "$sid" = "${sess_id:-}" ]; then
-        printf '  %s%s *this%s\n' "$C_BOLD" "$row" "$C_RESET"
+        printf '  %s%s%s\n' "$C_BOLD" "$row" "$C_RESET"
       else
         printf '  %s\n' "$row"
       fi
