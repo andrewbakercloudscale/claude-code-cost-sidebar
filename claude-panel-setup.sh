@@ -228,20 +228,18 @@ PANEL_START_EPOCH=$(panel_now)
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
 C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
 C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
-# Electric blue (#7DF9FF), used only for the per-section "(refresh Ns)"
-# tags. 24-bit rather than one of the 8 basic codes because every one of
-# those is already carrying meaning in this panel — cyan is section
-# headings, blue/green/yellow/red/magenta are all traffic-light states — and
-# a rate tag is metadata about the panel, not a reading from it, so it
-# should not collide with any of them. clear_eol()'s ANSI stripper matches
+# Electric blue (#7DF9FF), for the per-section "(refresh Ns)" tags and the
+# session id on the Model line. 24-bit rather than one of the 8 basic codes
+# because every one of those is already carrying meaning in this panel —
+# cyan is section headings, blue/green/yellow/red/magenta are all
+# traffic-light states — and neither of these is a reading from the panel,
+# so neither should collide with them. The two basic-code blues were both
+# tried on the id first and both failed on legibility: \033[34m renders dark
+# on this near-black background, \033[94m renders as a grey barely different
+# from the C_DIM it replaced. clear_eol()'s ANSI stripper matches
 # \033[<digits and semicolons>m, which covers this form too, so width
 # accounting is unaffected.
 C_ELECTRIC=$'\033[38;2;125;249;255m'
-# Bright blue, for the session id. Plain C_BLUE (\033[34m) is rendered dark
-# by most terminal palettes -- against this pane's near-black background it
-# is barely more legible than the C_DIM grey it replaced, which defeats the
-# point of colouring the one string on the line you go looking for.
-C_BLUE_BRIGHT=$'\033[94m'
 
 fmt_num() {
   awk -v n="$1" 'BEGIN{
@@ -2176,14 +2174,16 @@ build_summary() {
     # Sessions rows use, so the two can be read against each other -- that
     # matching is the whole reason it is on screen twice. After the model,
     # because it is an identifier you look up rather than a number you watch.
-    # Bright blue rather than dim: dim renders as low-contrast grey against
+    # Electric blue rather than dim: dim renders as low-contrast grey against
     # this pane's background, which is the wrong signal for the one string
-    # you go looking for. Printed with the * prefix only in Top Sessions, where it
+    # you go looking for. Shared with the refresh tags rather than given its
+    # own colour, because it is the same kind of thing they are -- a label
+    # about the panel, not one of the numbers it reports. Printed with the * prefix only in Top Sessions, where it
     # marks one row out of several; here there is nothing to distinguish it
     # from.
     printf '  🤖 Model: %s%s%s  %s%s%s\n' \
       "$mtc" "${model_label:-Unknown}" "$C_RESET" \
-      "$C_BLUE_BRIGHT" "${sess_id: -5}" "$C_RESET"
+      "$C_ELECTRIC" "${sess_id: -5}" "$C_RESET"
 
     if [ -n "$SESS_COST" ]; then
       sess_amt=$(awk -v c="$SESS_COST" 'BEGIN{ printf "%.2f", c }')
