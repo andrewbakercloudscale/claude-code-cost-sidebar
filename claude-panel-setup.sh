@@ -237,6 +237,11 @@ C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
 # \033[<digits and semicolons>m, which covers this form too, so width
 # accounting is unaffected.
 C_ELECTRIC=$'\033[38;2;125;249;255m'
+# Bright blue, for the session id. Plain C_BLUE (\033[34m) is rendered dark
+# by most terminal palettes -- against this pane's near-black background it
+# is barely more legible than the C_DIM grey it replaced, which defeats the
+# point of colouring the one string on the line you go looking for.
+C_BLUE_BRIGHT=$'\033[94m'
 
 fmt_num() {
   awk -v n="$1" 'BEGIN{
@@ -2171,14 +2176,14 @@ build_summary() {
     # Sessions rows use, so the two can be read against each other -- that
     # matching is the whole reason it is on screen twice. After the model,
     # because it is an identifier you look up rather than a number you watch.
-    # Blue rather than dim: dim renders as low-contrast grey against this
-    # pane's background, which is the wrong signal for the one string you go
-    # looking for. Printed with the * prefix only in Top Sessions, where it
+    # Bright blue rather than dim: dim renders as low-contrast grey against
+    # this pane's background, which is the wrong signal for the one string
+    # you go looking for. Printed with the * prefix only in Top Sessions, where it
     # marks one row out of several; here there is nothing to distinguish it
     # from.
     printf '  🤖 Model: %s%s%s  %s%s%s\n' \
       "$mtc" "${model_label:-Unknown}" "$C_RESET" \
-      "$C_BLUE" "${sess_id: -5}" "$C_RESET"
+      "$C_BLUE_BRIGHT" "${sess_id: -5}" "$C_RESET"
 
     if [ -n "$SESS_COST" ]; then
       sess_amt=$(awk -v c="$SESS_COST" 'BEGIN{ printf "%.2f", c }')
