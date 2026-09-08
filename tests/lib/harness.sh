@@ -43,6 +43,13 @@ assert_not_contains() {
 # That stump silently satisfies any assert_not_contains, which is how a
 # check ends up proving nothing while reporting ok. Drive the real order.
 panel_tick_slow() {
+  # The frame geometry the render loop publishes before it calls either
+  # builder. Defaulted rather than assigned, so a check that has set its own
+  # width (V, S) keeps it. Without this, build_summary aborts on "cols:
+  # unbound variable" after printing its first line -- and a check that then
+  # asserts on what the summary CONTAINS fails naming the content, not the
+  # crash, which is how check I spent months failing for the wrong reason.
+  : "${cols:=100}"; : "${rows:=40}"; export COLS="$cols"
   resolve_session
   refresh_active_block
   block_clock_tick

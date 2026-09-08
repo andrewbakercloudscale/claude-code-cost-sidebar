@@ -41,7 +41,41 @@ check_I_unknown_model() {
   assert_contains "under an explicit caveat" "estimated at default rates" "$SESS_TABLE"
 
   # The rendered line must say N/A, not 0%.
-  local summary; summary=$(build_summary 2>/dev/null)
+  #
+  # Driven the way the render loop drives it, because build_summary reads
+  # globals that resolve_session and the frame setup publish -- `sess_id`
+  # and `cols` among them -- and this check used to call it bare with
+  # `2>/dev/null`. Under `set -u` that produced "sess_id: unbound variable",
+  # a one-line stump on stdout, and a failure that read as "the panel prints
+  # a percentage against an unknown window" when the truth was that no
+  # summary had been built at all. It is the exact trap panel_tick_slow's
+  # comment describes, and it sat failing for long enough to be treated as
+  # background noise -- which is the real cost of a check that fails for a
+  # reason other than the one it names.
+  #
+  # resolve_session only looks in the transcript directory Claude Code would
+  # use for THIS cwd (its path is $PWD with "/" replaced by "-"), so the
+  # transcript is placed there and found by the panel's own resolution
+  # rather than assigned to $latest by hand -- same reasoning as check V.
+  local proj_dir="$HOME/.claude/projects/$(printf '%s' "$PWD" | tr '/' '-')"
+  mkdir -p "$proj_dir"
+  cp "$tp" "$proj_dir/sess-i.jsonl"
+  load_panel 10 12 "sess-i"
+  cols=100; rows=40; export COLS=100
+  seed_recent
+  panel_tick_slow
+  session_stats_refresh
+  assert_eq "the panel's own resolution finds the unknown-model transcript" \
+    "$proj_dir/sess-i.jsonl" "$latest"
+  assert_eq "and still reports no window for it" "0" "$SESS_WIN"
+
+  # stderr is asserted, not discarded. A builder that dies half way still
+  # prints its first line, so any assertion about what the summary CONTAINS
+  # can only be trusted once the summary is known to have been built at all.
+  local summary err
+  err="$TEST_TMP/I-build-summary.err"
+  summary=$(build_summary 2>"$err")
+  assert_eq "the summary builds with no stderr at all" "" "$(cat "$err")"
   assert_contains "the summary shows N/A for context" "Context Usage: N/A" "$summary"
   assert_not_contains "and never a percentage against an unknown window" "(0%)" "$summary"
 }
