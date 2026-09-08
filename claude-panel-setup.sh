@@ -2223,9 +2223,9 @@ build_summary() {
     # name say nothing about what they are -- and not "Session", which is
     # already the label on the money line directly below. Two rows reading
     # "Session:" and meaning different things (an identifier, a spend) is
-    # worse than either being unlabelled. Printed with the * prefix only in Top Sessions, where it
-    # marks one row out of several; here there is nothing to distinguish it
-    # from.
+    # worse than either being unlabelled. Printed with the * prefix only in
+    # Top Sessions, where it marks one row out of several; here there is
+    # nothing to distinguish it from.
     printf '  🤖 Model: %s%s%s  SID: %s%s%s\n' \
       "$mtc" "${model_label:-Unknown}" "$C_RESET" \
       "$C_ELECTRIC" "${sess_id: -5}" "$C_RESET"
@@ -2552,15 +2552,22 @@ build_trailing() {
       # matching is the only reason the id is on screen twice: it is how you
       # find the row you are currently sitting in.
       #
-      # Which is also why the "*this" suffix is gone. It used to mark that
-      # row, but it marked it three columns off the right edge of a block
-      # that has spent this whole session being pulled back inside the pane,
-      # and the row is already bold. (The space in "${sid: -5}" is required:
-      # "${sid:-5}" is the unset-default expansion and would print the whole
-      # id.)
+      # The current session's row gets a green "<<" pointing back at it. It
+      # is a suffix, where the old "*this" suffix was -- but three characters
+      # shorter, and that is the whole difference: "*this" sat off the right
+      # edge of a block that has spent this session being pulled back inside
+      # the pane, so it was the part that got truncated away. " <<" ends the
+      # row at 30 columns, inside this block's own 32-column header, so it
+      # cannot be the first thing to go. A prefix would have cost no width at
+      # all but "<<" is two characters and the id cell is a fixed six, so it
+      # would have shifted this row's columns out of line with the other four.
+      # The bold stays; the marker is for a monochrome screenshot or a
+      # terminal that renders bold as plain. (The space in "${sid: -5}" is
+      # required: "${sid:-5}" is the unset-default expansion and would print
+      # the whole id.)
       row=$(printf '%-6s %6s %5s %s' "*${sid: -5}" "$(fmt_money "$scost")" "$(fmt_mt "$stok")" "$lasthm")
       if [ "$sid" = "${sess_id:-}" ]; then
-        printf '  %s%s%s\n' "$C_BOLD" "$row" "$C_RESET"
+        printf '  %s%s%s %s<<%s\n' "$C_BOLD" "$row" "$C_RESET" "$C_GREEN" "$C_RESET"
       else
         printf '  %s\n' "$row"
       fi
