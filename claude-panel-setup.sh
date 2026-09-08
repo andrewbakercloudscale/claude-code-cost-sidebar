@@ -2178,10 +2178,16 @@ build_summary() {
     # this pane's background, which is the wrong signal for the one string
     # you go looking for. Shared with the refresh tags rather than given its
     # own colour, because it is the same kind of thing they are -- a label
-    # about the panel, not one of the numbers it reports. Printed with the * prefix only in Top Sessions, where it
+    # about the panel, not one of the numbers it reports.
+    #
+    # Labelled "SID", because five hex characters floating after the model
+    # name say nothing about what they are -- and not "Session", which is
+    # already the label on the money line directly below. Two rows reading
+    # "Session:" and meaning different things (an identifier, a spend) is
+    # worse than either being unlabelled. Printed with the * prefix only in Top Sessions, where it
     # marks one row out of several; here there is nothing to distinguish it
     # from.
-    printf '  🤖 Model: %s%s%s  %s%s%s\n' \
+    printf '  🤖 Model: %s%s%s  SID: %s%s%s\n' \
       "$mtc" "${model_label:-Unknown}" "$C_RESET" \
       "$C_ELECTRIC" "${sess_id: -5}" "$C_RESET"
 
