@@ -60,7 +60,12 @@ BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
 
 echo "Installing ccusage-panel.sh ..."
-cat > "$BIN_DIR/ccusage-panel.sh" <<'PANEL_EOF'
+# Written to a temp name and renamed into place, never redirected straight
+# onto the live path. Two reasons, both now that the panel watches this file:
+# a plain `cat >` truncates first, so any running panel can stat a changed
+# mtime and read a half-written script; and rename(2) within one directory is
+# atomic, so every panel sees either the old file or the new one.
+cat > "$BIN_DIR/.ccusage-panel.sh.new" <<'PANEL_EOF'
 #!/usr/bin/env bash
 # Live Claude Code usage panel — everything ccusage knows: context %, live
 # block burn rate + projection, today's breakdown, 3-day trend, week/month
@@ -247,21 +252,21 @@ fmt_num() {
 # rounding a real 35-cent burn rate or a quiet week's spend down into that is
 # the one case where dropping the cents changes the meaning rather than the
 # width. Those keep two decimals.
-# LC_NUMERIC=C on every awk here: this account's locale is en_ZA, whose
-# decimal separator is a comma, and awk's printf honours it -- "$0,35" and
-# "0,45M". The panel has been showing dots only because it happens to be
-# launched without the locale exported; nothing was pinning it.
+#
+# (These print a "." decimal separator under this account's en_ZA locale,
+# which uses a comma, because the top of this script exports LC_ALL=C --
+# it has since the first commit. Nothing here needs to re-pin it.)
 fmt_money() {
-  LC_NUMERIC=C awk -v n="${1:-0}" 'BEGIN{ a = (n<0?-n:n); printf (a>0 && a<1) ? "$%.2f" : "$%.0f", n }'
+  awk -v n="${1:-0}" 'BEGIN{ a = (n<0?-n:n); printf (a>0 && a<1) ? "$%.2f" : "$%.0f", n }'
 }
-fmt_m() { LC_NUMERIC=C awk -v n="${1:-0}" 'BEGIN{ printf "%.2fM", n/1000000 }'; }
+fmt_m() { awk -v n="${1:-0}" 'BEGIN{ printf "%.2fM", n/1000000 }'; }
 # Token totals to the nearest million. Same carve-out and same reason as
 # fmt_money: under a million, "0M" reads as no data, so those keep one
 # decimal. Distinct from fmt_m(), which stays at two decimals for the context
 # gauge -- that one is a fraction of a single window ("0.45M / 1.00M"), where
 # rounding to whole millions would print "0M / 1M" and gauge nothing.
 fmt_mt() {
-  LC_NUMERIC=C awk -v n="${1:-0}" 'BEGIN{ m = n/1000000; a = (m<0?-m:m); printf (a>0 && a<1) ? "%.1fM" : "%.0fM", m }'
+  awk -v n="${1:-0}" 'BEGIN{ m = n/1000000; a = (m<0?-m:m); printf (a>0 && a<1) ? "%.1fM" : "%.0fM", m }'
 }
 fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 
@@ -1705,6 +1710,54 @@ if [ -t 0 ]; then
   fi
 fi
 
+# ---- restart this panel when its own script changes ----
+# A deploy rewrites ~/.local/bin/ccusage-panel.sh, but a running panel is
+# already-parsed bash: it keeps drawing the old frame until someone notices
+# and restarts it by hand. Since the panel is a foreground child of its
+# pane's interactive shell, "by hand" means finding the pane and pressing
+# up-enter -- and until that happens the panel is quietly lying about what
+# the code does.
+#
+# So it re-execs itself. exec keeps the same pid and the same fds, so the
+# pane, the tty, fd3 and PANEL_ERR_FILE (named after $$) all carry over --
+# the panel does not blink, it just comes back as the new version.
+#
+# The two guards are both about the file being read while it is written:
+#
+#   - stty is restored FIRST. exec does not run EXIT traps, so without this
+#     the terminal stays in -echo -icanon and the new process saves THAT as
+#     its ORIG_STTY -- after which quitting the panel restores the pane to a
+#     no-echo terminal. The bug outlives the panel, which is why it is worth
+#     more care than the restart itself.
+#   - `bash -n` before exec'ing. The installer writes this file with a plain
+#     redirect, so between truncate and last byte there is a window where the
+#     script on disk is a syntactically incomplete prefix of itself. Reading
+#     it then would exec a script that dies immediately and takes the pane's
+#     panel with it. On a parse failure we simply return and try again next
+#     tick, by which time the write has finished. (The installer now renames
+#     the file into place instead, which closes that window properly -- this
+#     stays for hand-edits and for panels installed before that change.)
+#
+# Deliberately NOT compared by content hash: mtime is one stat() per tick,
+# and the only cost of a false positive here is one re-exec.
+PANEL_SELF="${BASH_SOURCE[0]}"
+case "$PANEL_SELF" in /*) ;; *) PANEL_SELF="$PWD/$PANEL_SELF" ;; esac
+panel_self_mtime() {
+  stat -f %m "$PANEL_SELF" 2>/dev/null || stat -c %Y "$PANEL_SELF" 2>/dev/null
+}
+PANEL_SELF_MTIME=$(panel_self_mtime)
+restart_if_changed() {
+  local now_mtime
+  now_mtime=$(panel_self_mtime)
+  # Empty means the file is gone or unreadable -- mid-rename, or uninstalled.
+  # Either way there is nothing to exec into; keep drawing.
+  [ -z "$now_mtime" ] && return 0
+  [ "$now_mtime" = "$PANEL_SELF_MTIME" ] && return 0
+  bash -n "$PANEL_SELF" 2>/dev/null || return 0
+  [ -n "${ORIG_STTY:-}" ] && stty "$ORIG_STTY" 2>/dev/null
+  exec bash "$PANEL_SELF" "$@"
+}
+
 # ---- slow-tier fetch: the active 5h block ----
 # One `ccusage blocks --active` call, on the slow tier. Everything about a
 # block that moves with the clock rather than with the corpus is derived
@@ -2116,13 +2169,16 @@ build_summary() {
     mtc=$(model_tier_color "${model_id:-}")
     # The session's own id, in the same last-5-characters form the Top
     # Sessions rows use, so the two can be read against each other -- that
-    # matching is the whole reason it is on screen twice. Dim, and after the
-    # model, because it is an identifier you look up rather than a number you
-    # watch. Printed with the * prefix only in Top Sessions, where it marks
-    # one row out of several; here there is nothing to distinguish it from.
+    # matching is the whole reason it is on screen twice. After the model,
+    # because it is an identifier you look up rather than a number you watch.
+    # Blue rather than dim: dim renders as low-contrast grey against this
+    # pane's background, which is the wrong signal for the one string you go
+    # looking for. Printed with the * prefix only in Top Sessions, where it
+    # marks one row out of several; here there is nothing to distinguish it
+    # from.
     printf '  🤖 Model: %s%s%s  %s%s%s\n' \
       "$mtc" "${model_label:-Unknown}" "$C_RESET" \
-      "$C_DIM" "${sess_id: -5}" "$C_RESET"
+      "$C_BLUE" "${sess_id: -5}" "$C_RESET"
 
     if [ -n "$SESS_COST" ]; then
       sess_amt=$(awk -v c="$SESS_COST" 'BEGIN{ printf "%.2f", c }')
@@ -2491,6 +2547,8 @@ fi
 last_frame=""
 
 while true; do
+  restart_if_changed
+
   # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
   # whole pane for one frame before the redraw lands, which reads as a
   # visible flicker every refresh. Staying purely additive-overwrite only
@@ -2613,7 +2671,11 @@ while true; do
   wait $! 2>/dev/null
 done
 PANEL_EOF
-chmod +x "$BIN_DIR/ccusage-panel.sh"
+# Mode before rename: the file must already be executable at the instant it
+# becomes ccusage-panel.sh, or a panel re-exec'ing in that window finds one
+# it cannot run.
+chmod +x "$BIN_DIR/.ccusage-panel.sh.new"
+mv -f "$BIN_DIR/.ccusage-panel.sh.new" "$BIN_DIR/ccusage-panel.sh"
 
 echo "Installing claude-panel-keyblock (keyboard guard for the auto-split) ..."
 # Swallows real keyboard input system-wide for a few seconds while
