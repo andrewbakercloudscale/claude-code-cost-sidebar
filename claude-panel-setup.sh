@@ -171,6 +171,48 @@ pin_log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$1" >> "$
 # the same answer it would have had at launch.
 PIN_HANDOFF_DIR="${PANEL_PIN_DIR:-$HOME/.cache/claude-panel-pin}"
 PIN_HANDOFF_FILE="$PIN_HANDOFF_DIR/$(printf '%s' "$PWD" | tr '/' '-')"
+# ---- the pane-scoped pin: one file per CLAUDE PANE, not per directory ----
+# The file above is keyed on the project directory, and that key is wrong
+# whenever the same repo has more than one Claude Code session open — which
+# is the normal way this machine is used. Every new launch in a directory
+# overwrites the one pin all of that directory's panels read, so all of them
+# follow the newest session. Two observed consequences, both from the same
+# key:
+#   * 2026-09-08 21:55 — a panel whose pane was running fcdc479e adopted
+#     5f46b180 the moment a second session opened in the same repo, and spent
+#     the night showing another pane's turns and cost as its own. Silent, and
+#     exactly the "confidently wrong" outcome resolve_session refuses to risk
+#     with its own guessing.
+#   * 2026-09-09 09:03 — a third window opened in that repo and was never
+#     typed into, so Claude Code wrote no transcript for it. All three panels
+#     adopted its id and showed "no active session found" against a session
+#     that was live in front of them. A handoff pin is not timed out (see
+#     adopt_handoff_pin), so that state was permanent.
+# Keying on the pane fixes both, because a pane hosts exactly one session at
+# a time. The pane's identity is its controlling terminal: this panel is in
+# its own split (ttys004) and its claude is in another (ttys003), so the
+# launcher — which runs in the claude pane's own shell, and later learns this
+# panel's pid — is the one process that sees both and writes the pairing.
+#   pane/<panel-tty>  = "<claude-tty>\t<panel-pid>\t<epoch>"   (launcher)
+#   tty/<claude-tty>  = "<session-id>\t<epoch>"                 (hook, launcher)
+PIN_PANE_DIR="$PIN_HANDOFF_DIR/pane"
+PIN_TTY_DIR="$PIN_HANDOFF_DIR/tty"
+# `ps -o tty=`, not `tty`: this panel's stdin is not reliably the terminal,
+# but its CONTROLLING terminal is the pane either way. "??" is what a process
+# without one prints, and is not a key.
+# Overridable so the test suite can name a pane without owning a terminal --
+# a checkout running under CI has no tty at all, and a check that silently
+# stops exercising this path is the failure mode this repo's build gates
+# exist to catch.
+PANEL_TTY="${PANEL_PANE_TTY:-$(ps -o tty= -p $$ 2>/dev/null | tr -d '[:space:]')}"
+case "$PANEL_TTY" in ''|'??') PANEL_TTY="" ;; esac
+PIN_PANE_FILE=""
+[ -n "$PANEL_TTY" ] && PIN_PANE_FILE="$PIN_PANE_DIR/$PANEL_TTY"
+# Learned lazily by learn_pane_pairing(); empty until the launcher has
+# written the pairing, and empty forever for a panel started by hand or
+# through a path with no launcher, which keeps the directory-keyed fallback.
+PANE_CLAUDE_TTY=""
+PIN_PANE_PIN_FILE=""
 # A handoff written within this many seconds of the panel starting was
 # written FOR this launch, and is adopted unconditionally. An older one is
 # adopted only on positive evidence that the session it names is still live
@@ -1903,24 +1945,80 @@ block_clock_tick() {
 # happily hand a blank pane a different pane's live conversation. This one
 # starts from an id that some launcher or hook explicitly recorded for THIS
 # directory and only asks whether it is still current.
+# Which claude pane is this panel's? Read from the launcher's pairing file,
+# lazily: the launcher can only write it AFTER it has spotted this process in
+# `pgrep`, several seconds after this panel started drawing, so the first few
+# ticks legitimately find nothing. Once learned it never changes.
+learn_pane_pairing() {
+  local ctty pid rest
+  [ -n "$PANE_CLAUDE_TTY" ] && return 0
+  [ -n "$PIN_PANE_FILE" ] && [ -r "$PIN_PANE_FILE" ] || return 0
+  IFS=$'\t' read -r ctty pid rest < "$PIN_PANE_FILE" 2>/dev/null || return 0
+  [ -n "$ctty" ] || return 0
+  # The pid is what makes a tty safe to key on. Terminal device names are
+  # recycled: close this split and the next one opened in this window may be
+  # ttys004 again and inherit a pairing written for a different claude —
+  # the same cross-pane misattribution this whole change exists to end, just
+  # displaced in time. Matching our own pid means a pairing can only ever be
+  # read by the process it was written for. `restart_if_changed` re-execs in
+  # place, which keeps the pid, so the one restart path this file has does
+  # not lose its pairing.
+  [ "$pid" = "$$" ] || return 0
+  PANE_CLAUDE_TTY="$ctty"
+  PIN_PANE_PIN_FILE="$PIN_TTY_DIR/$ctty"
+  pin_log "paired: panel tty ${PANEL_TTY:-none} -> claude tty $ctty (reading $PIN_PANE_PIN_FILE)"
+}
+
 adopt_handoff_pin() {
   local sid written age tsc now
   # An argv pin is the caller being explicit; do not second-guess it until
   # resolve_session has given up on it and cleared PIN_SOURCE.
   [ "$PIN_SOURCE" = "argv" ] && return 0
+  learn_pane_pairing
+  # A pane-scoped pin needs none of the freshness reasoning below. That
+  # reasoning exists only to guess whether a directory-keyed pin was written
+  # for THIS pane; here the key IS the pane, so whatever is in the file is
+  # this pane's session by construction — including a /clear or a --resume
+  # that hands the same pane a new id hours in, which the directory-keyed
+  # path can only accept by also accepting every other pane's new id.
+  if [ -n "$PIN_PANE_PIN_FILE" ] && [ -r "$PIN_PANE_PIN_FILE" ]; then
+    IFS=$'\t' read -r sid written < "$PIN_PANE_PIN_FILE" 2>/dev/null || return 0
+    is_uuid "${sid:-}" || return 0
+    [ "$sid" = "$PIN_SESSION_ID" ] && return 0
+    pin_log "adopting pane pin '$sid' for claude tty $PANE_CLAUDE_TTY"
+    PIN_SESSION_ID="$sid"
+    PIN_SOURCE="pane"
+    return 0
+  fi
+  # Paired, but the pin file is not there yet (claude has not reached its
+  # SessionStart hook) or has gone. Hold what we have rather than fall back
+  # to the directory file: we know for a fact that file is not addressed to
+  # this pane.
+  [ -n "$PANE_CLAUDE_TTY" ] && return 0
   [ -r "$PIN_HANDOFF_FILE" ] || return 0
   IFS=$'\t' read -r sid written < "$PIN_HANDOFF_FILE" 2>/dev/null || return 0
   is_uuid "${sid:-}" || return 0
   [ "$sid" = "$PIN_SESSION_ID" ] && return 0
   case "${written:-}" in ''|*[!0-9]*) written=0 ;; esac
   now=$(panel_now)
-  if (( written < PANEL_START_EPOCH - PIN_HANDOFF_FRESH_SECS )); then
-    # Stale handoff: only believe it while its transcript is still live.
+  # Two-sided, and the second side is the one that was missing. A handoff
+  # written LONG AFTER this panel started was not written for this launch —
+  # it is another pane opening in the same directory — so it belongs on the
+  # stale path, where it has to prove the session it names is live before
+  # anything believes it. The one-sided test read "written 18 hours after I
+  # started" as fresh and adopted it unconditionally; that is how a pane
+  # ended up pinned to a window that had never been typed into.
+  if (( written < PANEL_START_EPOCH - PIN_HANDOFF_FRESH_SECS \
+     || written > PANEL_START_EPOCH + PIN_HANDOFF_FRESH_SECS )); then
+    # Not written for this launch — either before it (a panel restarted
+    # mid-conversation) or well after it (another pane opening in this same
+    # directory). Believe it only while its transcript is still live, which
+    # the never-typed-into window that broke this had no way to satisfy.
     tsc="$project_dir/$sid.jsonl"
     [ -f "$tsc" ] || return 0
     age=$(( now - $(stat -f %m "$tsc" 2>/dev/null || echo 0) ))
     (( age >= 0 && age <= PIN_HANDOFF_LIVE_SECS )) || return 0
-    pin_log "adopting stale handoff pin '$sid' (written $(( now - written ))s ago, transcript touched ${age}s ago) — panel restarted mid-session"
+    pin_log "adopting unaligned handoff pin '$sid' (written $(( now - written ))s ago, panel started $(( now - PANEL_START_EPOCH ))s ago, transcript touched ${age}s ago)"
   else
     pin_log "adopting handoff pin '$sid' for $PWD"
   fi
@@ -2856,15 +2954,54 @@ case "$sid" in
 esac
 
 mkdir -p "$PIN_DIR" 2>/dev/null || exit 0
+
+# Both writes below are same-directory write + rename, so a panel reading a
+# pin mid-write never sees half a UUID — the exact class of half-written id
+# this whole mechanism exists to stop happening.
+#
+# Which pane is this claude running in? Its controlling terminal, which is
+# what makes a per-pane pin possible at all — the directory-keyed file below
+# cannot tell two sessions in one repo apart, and every panel in that repo
+# follows whichever started last.
+#
+# The hook process itself has NO controlling terminal: Claude Code gives it
+# pipes, so `ps -o tty= -p $$` prints "??". Its parent — claude — has one,
+# inherited from the pane. Walk up rather than trust $PPID to be claude
+# itself, so a wrapper shell between the two costs nothing.
+owner_tty() {
+  local p="$$" t i
+  for i in 1 2 3 4 5; do
+    [ -n "$p" ] && [ "$p" != "0" ] && [ "$p" != "1" ] || return 1
+    t=$(ps -o tty= -p "$p" 2>/dev/null | tr -d '[:space:]')
+    case "$t" in
+      ''|'??') ;;
+      *) printf '%s' "$t"; return 0 ;;
+    esac
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d '[:space:]')
+  done
+  return 1
+}
+
 key=$(printf '%s' "$cwd" | tr '/' '-')
-# Same-directory write + rename, so a panel reading the file mid-write never
-# sees half a UUID — the exact class of half-written id this whole mechanism
-# exists to stop happening.
 tmp="$PIN_DIR/.$key.$$"
 printf '%s\t%s\n' "$sid" "$(date +%s)" > "$tmp" 2>/dev/null &&
   mv -f "$tmp" "$PIN_DIR/$key" 2>/dev/null
 rm -f "$tmp" 2>/dev/null
-printf '%s [%s] SessionStart: %s -> %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$cwd" "$sid" >> "$LOG" 2>/dev/null
+
+# The pane-scoped pin. Written in ADDITION to the directory one, never
+# instead of it: a panel that has no pairing (started by hand, or through a
+# path with no launcher) still needs the directory file, and a panel that
+# does have one ignores it.
+ctty=$(owner_tty) || ctty=""
+if [ -n "$ctty" ]; then
+  mkdir -p "$PIN_DIR/tty" 2>/dev/null
+  tmp="$PIN_DIR/tty/.$ctty.$$"
+  printf '%s\t%s\n' "$sid" "$(date +%s)" > "$tmp" 2>/dev/null &&
+    mv -f "$tmp" "$PIN_DIR/tty/$ctty" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null
+fi
+
+printf '%s [%s] SessionStart: %s (tty %s) -> %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$cwd" "${ctty:-none}" "$sid" >> "$LOG" 2>/dev/null
 exit 0
 SESSHOOK_EOF
 chmod +x "$BIN_DIR/claude-panel-session-hook.sh"
@@ -3048,6 +3185,62 @@ write_pin_handoff() {
     rm -f "$tmp" 2>/dev/null
     log "WARNING — could not write $PIN_HANDOFF_FILE; panel will fall back to detecting the session itself"
   fi
+  # ...and again under this pane's own terminal, which is the key the panel
+  # prefers. Same id, different question: the file above answers "what is the
+  # newest session in this directory", which stops being this pane's answer
+  # the moment a second session opens in the same repo. This one answers
+  # "what is the session in THIS pane", and nothing another pane does can
+  # overwrite it. claude-panel-session-hook.sh writes the same file from
+  # inside Claude Code with the id it actually chose; this covers the case
+  # where hooks are not installed at all.
+  [ -n "$CLAUDE_TTY" ] || return 0
+  mkdir -p "$PIN_TTY_DIR" 2>/dev/null || return 0
+  tmp="$PIN_TTY_DIR/.$CLAUDE_TTY.$$"
+  if printf '%s\t%s\n' "$PIN_SID" "$(date +%s)" > "$tmp" 2>/dev/null &&
+     mv -f "$tmp" "$PIN_TTY_DIR/$CLAUDE_TTY" 2>/dev/null; then
+    log "pane pin written: $PIN_TTY_DIR/$CLAUDE_TTY -> $PIN_SID"
+  else
+    rm -f "$tmp" 2>/dev/null
+    log "WARNING — could not write $PIN_TTY_DIR/$CLAUDE_TTY; the panel falls back to the directory-keyed pin"
+  fi
+}
+
+# Pair the panel we just started with the claude pane we were launched from.
+# This is the one moment either fact is knowable together: this script runs
+# in the claude pane's own shell (so $CLAUDE_TTY is that pane), and it has
+# just watched a new ccusage-panel.sh appear (so the panel's tty is a `ps`
+# away). Neither process can work the other out on its own — they sit in
+# different splits with different terminals and share nothing else.
+#
+# Nothing is written when more than one panel appeared in the window between
+# the two `pgrep`s: which of them is ours is then a guess, and a guess here
+# writes a pairing that makes a panel confidently show the wrong session for
+# as long as it runs. The directory-keyed fallback is the honest answer.
+write_pane_pairing() { # $1 = newline-separated new panel pids
+  local pids pid ptty tmp
+  [ -n "$CLAUDE_TTY" ] || return 0
+  pids=$(printf '%s\n' "$1" | tr -s '[:space:]' '\n' | grep -c '^[0-9][0-9]*$') || pids=0
+  if [ "$pids" != "1" ]; then
+    log "attempt $attempt: not writing a pane pairing — $pids new panel process(es), cannot tell which is ours"
+    return 0
+  fi
+  pid=$(printf '%s' "$1" | tr -dc '0-9')
+  ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  case "$ptty" in
+    ''|'??') log "attempt $attempt: not writing a pane pairing — panel pid $pid has no controlling terminal"; return 0 ;;
+  esac
+  mkdir -p "$PIN_PANE_DIR" 2>/dev/null || return 0
+  tmp="$PIN_PANE_DIR/.$ptty.$$"
+  # The pid goes in the file because terminal names are recycled: the panel
+  # refuses a pairing that names a different process, so a later split
+  # reusing this tty cannot inherit this one.
+  if printf '%s\t%s\t%s\n' "$CLAUDE_TTY" "$pid" "$(date +%s)" > "$tmp" 2>/dev/null &&
+     mv -f "$tmp" "$PIN_PANE_DIR/$ptty" 2>/dev/null; then
+    log "attempt $attempt: pane pairing written: panel $ptty (pid $pid) -> claude $CLAUDE_TTY"
+  else
+    rm -f "$tmp" 2>/dev/null
+    log "attempt $attempt: WARNING — could not write $PIN_PANE_DIR/$ptty; the panel falls back to the directory-keyed pin"
+  fi
 }
 
 # Swallow real keyboard input for a few seconds while synthetic keystrokes
@@ -3068,6 +3261,14 @@ start_keyboard_guard() { # $1 = seconds
 PIN_SID="${1:-}"
 PIN_HANDOFF_DIR="${PANEL_PIN_DIR:-$HOME/.cache/claude-panel-pin}"
 PIN_HANDOFF_FILE="$PIN_HANDOFF_DIR/$(printf '%s' "$PWD" | tr '/' '-')"
+PIN_PANE_DIR="$PIN_HANDOFF_DIR/pane"
+PIN_TTY_DIR="$PIN_HANDOFF_DIR/tty"
+# The pane `claude` is about to run in — this script is backgrounded from the
+# zsh preexec hook (or from ghostty-claude-launcher), both of which run in
+# that pane's own shell, so our controlling terminal IS its controlling
+# terminal. `ps -o tty=`, not `tty`: backgrounded, stdin is not the terminal.
+CLAUDE_TTY="$(ps -o tty= -p $$ 2>/dev/null | tr -d '[:space:]')"
+case "$CLAUDE_TTY" in ''|'??') CLAUDE_TTY="" ;; esac
 # The command TYPED into the new split carries no session id any more, so
 # there is nothing in it a stray keystroke can corrupt into a transcript name
 # that will never exist. 10 and 12 are the panel's own defaults for refresh
@@ -3283,6 +3484,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
           if [ -n "$new_pids" ]; then
             log "attempt $attempt: VERIFIED — new panel process(es): $(echo "$new_pids" | tr '\n' ' ')"
             verify_pin "$new_pids"
+            write_pane_pairing "$new_pids"
             success=1
             continue
           fi
@@ -3447,6 +3649,7 @@ APPLESCRIPT
   if [ -n "$new_pids" ]; then
     log "attempt $attempt: VERIFIED — new panel process(es): $(echo "$new_pids" | tr '\n' ' ')"
     verify_pin "$new_pids"
+    write_pane_pairing "$new_pids"
     success=1
   else
     log "attempt $attempt: FAILED — no new panel process appeared (before=[$(echo "$before_pids" | tr '\n' ' ')] after=[$(echo "$after_pids" | tr '\n' ' ')])"
