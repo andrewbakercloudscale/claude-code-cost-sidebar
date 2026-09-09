@@ -3882,6 +3882,7 @@ MIN_SESSION_ALERT=5.00  # never alert below this, no matter the multiple
 hook_input=$(cat)
 session_id=$(jq -r '.session_id // empty' <<<"$hook_input" 2>/dev/null)
 [ -z "$session_id" ] && exit 0
+hook_cwd=$(jq -r '.cwd // empty' <<<"$hook_input" 2>/dev/null)
 state_file="$STATE_DIR/$session_id.json"
 
 # This hook runs on EVERY prompt submit, and each `ccusage` invocation
@@ -4033,10 +4034,46 @@ fi
 # The context stays purely descriptive.
 term_program="${TERM_PROGRAM:-}"
 
-python3 - "$alert_cost" "$alert_launch" "$tier" "$session_cost" "$avg_session_cost" "$term_program" <<'PYEOF'
-import json, sys
+# ---- the phone channel ----------------------------------------------------
+#
+# Neither of the two channels above buzzes a phone. The in-chat line reaches
+# the web app and Remote Control but is passive -- you see it when you next
+# look, which for the one alert whose entire value is arriving while you are
+# AWAY from the machine is precisely too late. terminalSequence is explicitly
+# discarded in the web app and in cloud sessions. So overspend is pushed over
+# Telegram as well.
+#
+# Credentials come from the same central store every other alerting script on
+# this machine already uses (~/Desktop/github/.creds, TELEGRAM_BOT_TOKEN /
+# TELEGRAM_CHAT_ID, the @andrew_ninja_alerts_bot bot) rather than a second
+# copy of the same secret that can drift out of sync with it.
+#
+# When the store is absent the alert says so IN THE CHAT LINE. A notifier
+# that has quietly lost its credentials is the same failure shape as a gate
+# that reports OK while measuring nothing -- it reads as covered and stops
+# you looking -- and the chat line is the channel still working, so it is
+# where the breakage belongs.
+CREDS_FILE="$HOME/Desktop/github/.creds"
+TG_LOG="$HOME/.cache/claude-cost-alert-telegram.log"
+tg_state="unconfigured"
+if [ "${CLAUDE_COST_ALERT_TELEGRAM:-1}" = "0" ]; then
+  tg_state="disabled"
+elif [ -f "$CREDS_FILE" ]; then
+  # shellcheck source=/dev/null
+  . "$CREDS_FILE" 2>/dev/null
+  if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+    tg_state="ready"
+  fi
+fi
 
-alert_cost, alert_launch, tier, session_cost, avg_session_cost, term_program = sys.argv[1:7]
+tg_body_file=$(mktemp "${TMPDIR:-/tmp}/claude-cost-alert.XXXXXX")
+
+python3 - "$alert_cost" "$alert_launch" "$tier" "$session_cost" "$avg_session_cost" \
+         "$term_program" "$tg_state" "$tg_body_file" "$session_id" "${hook_cwd:-}" <<'PYEOF'
+import json, os, sys
+
+(alert_cost, alert_launch, tier, session_cost, avg_session_cost,
+ term_program, tg_state, tg_body_file, session_id, hook_cwd) = sys.argv[1:11]
 
 lines = []
 context = []
@@ -4060,8 +4097,31 @@ if alert_launch == "1":
     )
     context.append("The ccusage split-panel failed to launch for this window.")
 
+# Only the chat line carries this. It is a note to the operator about a
+# broken channel, not part of the alert, so it must not reach the model's
+# context or the desktop popup -- and it obviously cannot reach the phone,
+# the phone being the thing that is broken.
+chat_lines = list(lines)
+if tg_state == "unconfigured":
+    chat_lines.append(
+        "ℹ️  no phone push sent: TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID missing from ~/Desktop/github/.creds"
+    )
+
+# The phone message. No per-line prefix to repeat here, so the alert lines go
+# through unchanged -- the first one is what a lock screen shows -- followed
+# by which of several open sessions this actually was, the question you ask
+# before you can act on it.
+if tg_state == "ready":
+    project = os.path.basename(hook_cwd.rstrip("/")) if hook_cwd else ""
+    tg = list(lines)
+    tg.append("")
+    tg.append(f"project: {project or 'unknown'}")
+    tg.append(f"session: {session_id[:8]}")
+    with open(tg_body_file, "w") as f:
+        f.write("\n".join(tg) + "\n")
+
 out = {
-    "systemMessage": "\n".join(lines),
+    "systemMessage": "\n".join(chat_lines),
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": " ".join(context),
@@ -4083,6 +4143,32 @@ out["hookSpecificOutput"]["terminalSequence"] = seq
 
 print(json.dumps(out))
 PYEOF
+
+# Detached and backgrounded on purpose. This hook sits on the interactive
+# path under a 5s timeout, and a slow or unreachable api.telegram.org must
+# add exactly zero seconds to a prompt submission -- the hook's JSON has
+# already been printed by the time this runs, and nothing downstream reads
+# the send's result.
+#
+# The message goes over `--data-urlencode text@file` rather than on the
+# command line, so it never appears in `ps`. curl's own stderr is discarded
+# rather than logged: it can echo the request URL, and that URL contains the
+# bot token.
+if [ "$tg_state" = "ready" ] && [ -s "$tg_body_file" ]; then
+  (
+    if ! curl -s --max-time 20 \
+        -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+        --data-urlencode "text@${tg_body_file}" \
+        -o /dev/null 2>/dev/null; then
+      printf '%s send failed (session %s)\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$session_id" >> "$TG_LOG"
+    fi
+    rm -f "$tg_body_file"
+  ) >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+else
+  rm -f "$tg_body_file"
+fi
 ALERT_EOF
 chmod +x "$BIN_DIR/claude-cost-alert-check.sh"
 

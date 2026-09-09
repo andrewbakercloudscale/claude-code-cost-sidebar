@@ -13,6 +13,8 @@ GHOSTTY_CONF="$HOME/.config/ghostty/config"
 SETTINGS="$HOME/.claude/settings.json"
 ZSHRC_MARKER="# --- ccusage split-panel autolaunch"
 ALERT_CMD="~/.local/bin/claude-cost-alert-check.sh"
+CREDS_FILE="$HOME/Desktop/github/.creds"
+TG_LOG="$HOME/.cache/claude-cost-alert-telegram.log"
 
 main() {
   echo "== generated files (~/.local/bin) =="
@@ -43,6 +45,27 @@ main() {
     echo "present"
   else
     echo "absent"
+  fi
+
+  echo
+  echo "== cost-alert phone push (Telegram) =="
+  # The one channel whose breakage is silent: a missing token means no push,
+  # and no push is indistinguishable from no overspend. Report it here so it
+  # is visible without waiting for an alert that never comes.
+  if [[ "${CLAUDE_COST_ALERT_TELEGRAM:-1}" == "0" ]]; then
+    echo "disabled (CLAUDE_COST_ALERT_TELEGRAM=0)"
+  elif [[ -f "$CREDS_FILE" ]] && grep -q "TELEGRAM_BOT_TOKEN" "$CREDS_FILE" \
+       && grep -q "TELEGRAM_CHAT_ID" "$CREDS_FILE"; then
+    echo "configured (credentials in ~/Desktop/github/.creds)"
+    if [[ -s "$TG_LOG" ]]; then
+      echo "  WARNING: $(wc -l < "$TG_LOG" | tr -d ' ') failed send(s) logged:"
+      tail -3 "$TG_LOG" | sed 's/^/    /'
+    else
+      echo "  no send failures logged"
+    fi
+  else
+    echo "NOT configured -- overspend will not reach your phone"
+    echo "  (needs TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in ~/Desktop/github/.creds)"
   fi
 
   echo

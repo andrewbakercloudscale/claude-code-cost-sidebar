@@ -28,8 +28,11 @@ check_AB_alert_message_shape() {
   printf '%s\n' '{"sessions":[{"period":"S1","totalCost":8.0},{"period":"S2","totalCost":8.0},{"period":"S3","totalCost":8.6},{"period":"SID-AB","totalCost":42.13}]}' \
     > "$CCUSAGE_FIXTURE_DIR/session.json"
 
+  # The phone push is check AC's subject. Opted out here (silently, by
+  # design) so this check reads the alert lines and not the operator notice
+  # an unconfigured push would legitimately add.
   local out
-  out=$(TERM_PROGRAM=ghostty bash "$hook" <<< '{"session_id":"SID-AB"}')
+  out=$(TERM_PROGRAM=ghostty CLAUDE_COST_ALERT_TELEGRAM=0 bash "$hook" <<< '{"session_id":"SID-AB"}')
   assert_ne "the hook fires on a red session" "" "$out"
 
   local msg
@@ -62,7 +65,7 @@ check_AB_alert_message_shape() {
     "$(awk -v s="$seq" 'BEGIN{n=split(s,a,";"); print n}')"
 
   local seq_other
-  seq_other=$(TERM_PROGRAM=Apple_Terminal bash "$hook" <<< '{"session_id":"SID-AB2"}' \
+  seq_other=$(TERM_PROGRAM=Apple_Terminal CLAUDE_COST_ALERT_TELEGRAM=0 bash "$hook" <<< '{"session_id":"SID-AB2"}' \
     | jq -r '.hookSpecificOutput.terminalSequence')
   assert_not_contains "other terminals get no OSC 777 to print as text" "777" "$seq_other"
 
