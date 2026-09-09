@@ -3854,6 +3854,11 @@ cat > "$BIN_DIR/claude-cost-alert-check.sh" <<'ALERT_EOF'
 #     failed (see ~/.local/bin/claude-panel-launch.sh)
 # Silent (no output) otherwise, in particular NOT on yellow, per request.
 #
+# It also emits a terminalSequence, so the Mac gets a desktop notification
+# when it is the screen in use. That is additive, not a substitute: the
+# sequence is discarded in the web app and in cloud sessions, so the
+# systemMessage line remains the only thing that reaches a phone.
+#
 # Throttled per session so it fires once per tier increase and once per
 # distinct launch failure, not on every single prompt: state is kept in
 # ~/.cache/claude-cost-alert-state/<session_id>.json.
@@ -4001,25 +4006,82 @@ if [ "$alert_cost" -eq 0 ] && [ "$alert_launch" -eq 0 ]; then
   exit 0
 fi
 
-python3 - "$alert_cost" "$alert_launch" "$tier" "$session_cost" "$avg_session_cost" <<'PYEOF'
+# How the message is shaped is dictated by how Claude Code actually renders
+# it, which was measured rather than assumed (`claude -p` + --output-format
+# stream-json against a stub hook, v2.1.266):
+#
+#   - `systemMessage` surfaces as a `{"type":"system","subtype":
+#     "informational","level":"notice"}` event -- so it IS shown to the user,
+#     on every client, which is the whole reason this hook exists rather than
+#     a desktop notification.
+#   - Every LINE of it is rendered with a literal "UserPromptSubmit says: "
+#     prefix. A three-line message therefore reads as that same boilerplate
+#     three times, and pushes the actual figures to the right where a phone
+#     truncates them. One line per DISTINCT alert, never one alert wrapped
+#     over several lines.
+#   - Emoji survive intact; markdown does not render (`**bold**` arrives as
+#     four literal asterisks). So the only weight available is emoji, caps
+#     and punctuation -- which is exactly what the front of the line uses.
+#   - The severity word and the money are put before the explanation for the
+#     same reason: on a phone the first ~40 characters after the prefix are
+#     all that is reliably visible.
+#
+# `additionalContext` is delivered to the model (also verified). It is
+# deliberately NOT used to ask the model to fire a PushNotification: a model
+# correctly treats an instruction arriving from hook output as untrusted and
+# refuses it, so that route reports success here and silently does nothing.
+# The context stays purely descriptive.
+term_program="${TERM_PROGRAM:-}"
+
+python3 - "$alert_cost" "$alert_launch" "$tier" "$session_cost" "$avg_session_cost" "$term_program" <<'PYEOF'
 import json, sys
 
-alert_cost, alert_launch, tier, session_cost, avg_session_cost = sys.argv[1:6]
-parts = []
-if alert_launch == "1":
-    parts.append("the usage panel failed to launch for this window (see ~/.cache/claude-panel-launch.log)")
+alert_cost, alert_launch, tier, session_cost, avg_session_cost, term_program = sys.argv[1:7]
+
+lines = []
+context = []
 if alert_cost == "1":
-    parts.append(
-        f"session cost is {tier.upper()} (${float(session_cost):.2f} vs a 7-day average of ${float(avg_session_cost):.2f})"
+    cost = float(session_cost)
+    avg = float(avg_session_cost)
+    mult = (cost / avg) if avg > 0 else 0
+    if tier == "purple":
+        head, tail = "\U0001f7e3 RUNAWAY COST", " — consider wrapping up or starting a fresh session"
+    else:
+        head, tail = "\U0001f534 COST ALERT", ""
+    lines.append(
+        f"{head} — ${cost:.2f} this session, {mult:.1f}x your ${avg:.2f} average{tail}"
     )
-msg = "warning: " + "; ".join(parts)
-print(json.dumps({
-    "systemMessage": msg,
+    context.append(
+        f"This session has cost ${cost:.2f}, {mult:.1f}x the 7-day average session cost of ${avg:.2f}."
+    )
+if alert_launch == "1":
+    lines.append(
+        "⚠️ PANEL DIDN'T LAUNCH — no usage panel for this window (see ~/.cache/claude-panel-launch.log)"
+    )
+    context.append("The ccusage split-panel failed to launch for this window.")
+
+out = {
+    "systemMessage": "\n".join(lines),
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
-        "additionalContext": msg,
+        "additionalContext": " ".join(context),
     },
-}))
+}
+
+# A desktop notification on top of the in-chat line, for when the Mac is the
+# screen being looked at. BEL is universal; OSC 777 is gated on Ghostty
+# because a terminal that does not implement it prints the payload as text.
+# Neither reaches a phone -- the docs are explicit that terminalSequence is
+# discarded in the web app and in cloud sessions.
+seq = "\a"
+if term_program == "ghostty":
+    # OSC 777 delimits on ';', so any semicolon in the body would truncate
+    # the notification at that point.
+    body = lines[0].replace(";", ",")
+    seq = f"\033]777;notify;Claude Code;{body}\a"
+out["hookSpecificOutput"]["terminalSequence"] = seq
+
+print(json.dumps(out))
 PYEOF
 ALERT_EOF
 chmod +x "$BIN_DIR/claude-cost-alert-check.sh"

@@ -26,7 +26,14 @@ Everything through the per-turn table is always shown in full; sections below it
 
 Also installs a **session-pin hook** (`claude-panel-session-hook.sh`, wired into Claude Code's `SessionStart` hook) that records which session is running in which directory, so the panel opens the right transcript instead of guessing — see "How it works" below.
 
-Also installs a **cost-alert hook** (`claude-cost-alert-check.sh`, wired into Claude Code's `UserPromptSubmit` hook) that posts a warning *into the chat itself* — so it works over Remote Control too, not just locally — when the current session's cost crosses 2x (red) or 3x (purple) your 7-day average session cost, or when the panel failed to auto-launch for this window.
+Also installs a **cost-alert hook** (`claude-cost-alert-check.sh`, wired into Claude Code's `UserPromptSubmit` hook) that posts a warning *into the chat itself* — so it works over Remote Control too, not just locally — when the current session's cost crosses 2x (red) or 3x (purple) your 7-day average session cost, or when the panel failed to auto-launch for this window. It reads:
+
+```
+UserPromptSubmit says: 🔴 COST ALERT — $42.13 this session, 5.1x your $8.20 average
+UserPromptSubmit says: 🟣 RUNAWAY COST — $61.00 this session, 7.4x your $8.20 average — consider wrapping up or starting a fresh session
+```
+
+On Ghostty it also fires a real macOS desktop notification (OSC 777) alongside the chat line; every other terminal gets a bell.
 
 ### `opencode-panel-setup.sh`
 
@@ -62,6 +69,10 @@ Both installers follow the same shape: a **panel script** (the thing that render
   This replaced passing the session id on the panel's command line, which meant the *launcher typed it* into the new split as synthetic keystrokes. That is not a lossless channel. An observed pane ran with `9e435181h-888e-4f0c-811-3befb80226t3d` against a real id of `9e435181-888e-4f0c-81f1-3befb802263d` — an `h` and a `t` woven in from the real keyboard, an `f` lost — which names a transcript that will never exist, so it showed `Model: Unknown` and `no active Claude Code session found` for five hours while every account-wide figure beside it stayed correct. A file cannot be corrupted that way, and because it persists, a panel restarted mid-conversation reads the same answer it would have had at launch — the case the old "newest transcript born after the panel started" fallback structurally could not see.
 
 - **The cost-alert hook is a second, independent instrumentation path.** `claude-cost-alert-check.sh` hooks into Claude Code's own `UserPromptSubmit` event and posts straight into the chat transcript via `systemMessage` — which is what makes it work over Remote Control, where a local desktop notification wouldn't reach you. It's throttled per session (state kept in `~/.cache/claude-cost-alert-state/<session_id>.json`) so it fires once per tier escalation rather than on every prompt, and it also surfaces launcher failures, so a broken panel doesn't fail silently either.
+
+- **The message's shape is dictated by the renderer, which was measured rather than guessed.** Against Claude Code 2.1.266, `systemMessage` arrives as a `{"type":"system","subtype":"informational"}` event and *every line of it* is rendered with a literal `UserPromptSubmit says: ` prefix; markdown is not interpreted, but emoji are. So the alert is **one line per distinct alert**, never one alert wrapped over several — a three-line message repeats that 23-column prefix three times and pushes the figures off the right of a phone screen — and its emphasis is emoji and caps, with the severity word and the money first, because the front of the line is the part that reliably survives truncation. `tests/checks/AB_alert_message_shape.sh` holds that shape.
+
+- **A hook cannot raise a push notification, and the near-miss is worth naming.** `terminalSequence` reaches the terminal (a Ghostty desktop notification here) but is explicitly discarded in the web app and in cloud sessions, so it never reaches a phone. The tempting alternative — put "call the PushNotification tool" in `additionalContext`, which *is* delivered to the model — was tried and does not work: a model correctly treats an instruction arriving from hook output as untrusted and declines it, so that route looks wired up and silently does nothing. `additionalContext` is therefore kept purely descriptive. A genuine phone push has to leave the machine by some other route (ntfy, Pushover, a Telegram bot) that the hook calls itself.
 - **Everything is idempotent by construction.** Each installer checks for its own marker (a comment string in `~/.zshrc`, a `jq` query against `~/.claude/settings.json`, a grep against `~/.config/ghostty/config`) before appending anything, so re-running an installer after a script update never double-installs a hook or duplicates a keybind.
 
 ## Requirements
