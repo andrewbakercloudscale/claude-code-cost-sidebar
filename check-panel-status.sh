@@ -69,7 +69,7 @@ main() {
   fi
 
   echo
-  echo "== daily spend control limit (3-sigma) =="
+  echo "== daily spend control limits =="
   # Printed rather than left implicit because of what this threshold is made
   # of: sd here is about the size of the mean, so the limit moves with the
   # window's composition as much as with behaviour, and a limit that has

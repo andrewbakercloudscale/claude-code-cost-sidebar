@@ -124,6 +124,18 @@ sandbox_new() { # $1 = name
   printf '{"monthly":[]}\n' > "$CCUSAGE_FIXTURE_DIR/monthly.json"
   printf '{"sessions":[]}\n' > "$CCUSAGE_FIXTURE_DIR/session.json"
   printf '{"blocks":[]}\n'  > "$CCUSAGE_FIXTURE_DIR/blocks.json"
+
+  # The panel and the cost-alert hook both SOURCE claude-day-projection.sh
+  # and both refuse to run without it -- deliberately, because a panel that
+  # silently lost its projection would draw today's actual spend as the
+  # end-of-day forecast, a plausible-looking number and so the worst kind of
+  # wrong. A sandbox that omits it is not modelling an installed machine, so
+  # it is linked in rather than the requirement being softened to suit the
+  # tests.
+  mkdir -p "$HOME/.local/bin"
+  if [ -r "$HOME_REAL_BIN/claude-day-projection.sh" ]; then
+    ln -sf "$HOME_REAL_BIN/claude-day-projection.sh" "$HOME/.local/bin/claude-day-projection.sh"
+  fi
 }
 
 # Number of times the stub was invoked for a given ccusage subcommand,

@@ -591,6 +591,20 @@ clear_eol() { awk -v w="${COLS:-999}" '{ line = $0; plain = line; gsub(/\033\[[0
 # $2.21/hr across three refreshes with nothing unusual happening). A full
 # 30-day JSONL scan is too slow to redo every 5s refresh, so this only
 # rebuilds when the cache is stale; every other refresh just reads the file.
+# Shared with claude-cost-alert-check.sh -- see that file's header. Sourced,
+# not reimplemented, and a hard failure when absent: a panel that silently
+# lost its projection would draw "Today's Predicted Value" as today's actual
+# spend, which is a plausible-looking number and therefore the worst kind of
+# wrong. Every other gate in this repo learned the same lesson the same way.
+DAY_PROJECTION_LIB="$HOME/.local/bin/claude-day-projection.sh"
+if [ -r "$DAY_PROJECTION_LIB" ]; then
+  . "$DAY_PROJECTION_LIB"
+else
+  printf 'ccusage-panel: missing %s -- reinstall with claude-panel-setup.sh\n' \
+    "$DAY_PROJECTION_LIB" >&2
+  exit 3
+fi
+
 HOURLY_BUCKET_CACHE="$HOME/.cache/claude-hourly-buckets.json"
 HOURLY_BUCKET_TTL=900
 HOURLY_BUCKET_WINDOW_DAYS=30
@@ -2283,18 +2297,13 @@ build_summary() {
   # = today_amt ÷ the same buckets' historical average for hours 0..now;
   # ratio 1 (no scaling) when there's no historical baseline yet (cold
   # cache).
+  # The arithmetic moved to claude-day-projection.sh, which the cost-alert
+  # hook also sources: it now ALERTS on this projection, and a panel drawing
+  # one number while an alert fires on another is drift with consequences.
   current_hour=$(( 10#$(panel_date +%H) ))
-  IFS=$'\t' read -r typical_so_far remaining_avg <<<"$(jq -r --argjson ch "$current_hour" '
-    ( [.buckets[]? | select(.hour <= $ch) | .avgCost] | add // 0 ) as $ts |
-    ( [.buckets[]? | select(.hour >  $ch) | .avgCost] | add // 0 ) as $ra |
-    [$ts, $ra] | @tsv
-  ' "$HOURLY_BUCKET_CACHE" 2>/dev/null)"
-  [ -z "$typical_so_far" ] && typical_so_far=0
-  [ -z "$remaining_avg" ] && remaining_avg=0
-  today_pred=$(awk -v b="$today_amt" -v ts="$typical_so_far" -v ra="$remaining_avg" 'BEGIN{
-    ratio = (ts > 0) ? b/ts : 1
-    printf "%.2f", b + ratio*ra
-  }')
+  read -r today_pred typical_so_far remaining_avg _pred_frac <<<"$(
+    project_today "$today_amt" "$HOURLY_BUCKET_CACHE" "$current_hour")"
+  today_pred=$(LC_ALL=C awk -v v="$today_pred" 'BEGIN{printf "%.2f", v}')
 
   # ---- live status line (current session) ----
   # sess_id/model_id/model_label/folder_name/sess_start_epoch were already
@@ -3851,6 +3860,66 @@ else
   echo "No ~/.config/ghostty/config found — skipping resize keybinds (the split will stay 50/50)."
 fi
 
+echo "Installing claude-day-projection.sh ..."
+cat > "$BIN_DIR/claude-day-projection.sh" <<'PROJ_EOF'
+#!/usr/bin/env bash
+# Today's end-of-day spend, projected from this machine's own hour-of-day
+# pattern. Sourced by BOTH ccusage-panel.sh (which draws it as "Today's
+# Predicted Value") and claude-cost-alert-check.sh (which alerts on it).
+#
+# It lives in one file because those two must agree. The panel showing one
+# projection while the alert fires on another is the drift that made five
+# copies of the help-doc generator diverge, and the number here is one an
+# alert acts on, so the disagreement would be worse than cosmetic.
+#
+# Deliberately NOT a flat current-rate extrapolation: ccusage's live
+# burnRate.costPerHour is a seconds-scale figure that spikes 10x+ right after
+# a single pricey turn and decays within minutes ($350 -> $46 -> $22 across
+# three 5s refreshes with nothing unusual happening).
+#
+# The forecast for the remaining hours is the persisted bucket cache's
+# historical average per hour-of-day, SCALED by how today's pace compares
+# with a typical day's pace so far. Unscaled it ignores today entirely: on a
+# quiet day ($17.93 spent by 14:48 against a ~$274 historical average for
+# hours 0-14) it forecast $215, back near the 30-day average, however light
+# today had actually been.
+
+# project_today <today_amt> <buckets_file> <current_hour>
+#   -> "<projected> <typical_so_far> <remaining_avg> <elapsed_fraction>"
+#
+# elapsed_fraction is how much of a TYPICAL day's spend normally falls in the
+# hours already gone. It is the honest measure of how far into the day we
+# are for this purpose -- wall-clock is not, because these hours are not
+# equally productive -- and it is returned rather than kept private so a
+# caller can refuse to act on a projection built from a sliver of the day.
+project_today() {
+  local today_amt="$1" buckets="$2" hour="$3"
+  local typical_so_far remaining_avg
+
+  IFS=$'\t' read -r typical_so_far remaining_avg <<<"$(jq -r --argjson ch "$hour" '
+    ( [.buckets[]? | select(.hour <= $ch) | .avgCost] | add // 0 ) as $ts |
+    ( [.buckets[]? | select(.hour >  $ch) | .avgCost] | add // 0 ) as $ra |
+    [$ts, $ra] | @tsv
+  ' "$buckets" 2>/dev/null)"
+  [ -z "${typical_so_far:-}" ] && typical_so_far=0
+  [ -z "${remaining_avg:-}" ] && remaining_avg=0
+
+  # LC_ALL=C: awk's -v assignments parse in the C locale but its printf obeys
+  # LC_NUMERIC, and on an en_ZA machine that emits a comma -- which the
+  # caller then feeds back into another awk as a truncated number.
+  LC_ALL=C awk -v b="$today_amt" -v ts="$typical_so_far" -v ra="$remaining_avg" 'BEGIN{
+    # ratio 1 (no scaling) when there is no historical baseline yet, so a
+    # cold cache degrades to "today plus a typical remainder" rather than
+    # dividing by zero.
+    ratio = (ts > 0) ? b/ts : 1
+    total = ts + ra
+    frac  = (total > 0) ? ts/total : 0
+    printf "%.4f %.4f %.4f %.4f", b + ratio*ra, ts, ra, frac
+  }'
+}
+PROJ_EOF
+chmod +x "$BIN_DIR/claude-day-projection.sh"
+
 echo "Installing claude-cost-alert-check.sh ..."
 cat > "$BIN_DIR/claude-cost-alert-check.sh" <<'ALERT_EOF'
 #!/usr/bin/env bash
@@ -3887,35 +3956,58 @@ CCUSAGE_CACHE_DIR="$HOME/.cache/ccusage-panel-cache"
 HOOK_CACHE_TTL=120
 mkdir -p "$CCUSAGE_CACHE_DIR" 2>/dev/null
 
-# ---- today's spend, against a 3-sigma control limit -----------------------
+# ---- today's spend, against two control limits ----------------------------
 #
 # The session rule above cannot see this case at all. It compares ONE session
 # against the average session, so a day made of twenty ordinary sessions
-# never trips it however much it costs in total -- you can spend $150 across
-# a day without a single alert, which is the gap this closes.
+# never trips it however much it costs in total -- $150 can cross a day in
+# silence, which is the gap this closes.
 #
-# The limit is mean + 3*sd over the preceding days, sample sd (n-1).
+# TWO limits, because they answer different questions and only one of them
+# is actionable:
 #
-# Two properties of the real data are worth knowing before trusting a number
-# this produces, because both are invisible from the alert itself:
+#   - PROJECTED end-of-day over mean + 2*sd. This is the "bad day" alert.
+#     It fires around the time the day's shape is clear but while there is
+#     still a day left to change, and it is the only one of the two you can
+#     act on. Backtested over 24 days of real history on a 14-day window it
+#     fires about once or twice a month.
+#   - ACTUAL spend over mean + 3*sd. Louder, later, and unarguable. A day
+#     total can only be judged once it has been spent, so on its own this is
+#     a postmortem -- worth having, not worth having alone.
 #
-#   - Daily spend here is heavily right-skewed and its sd is about the size
-#     of its mean (30 days to 2026-09-09: mean $190.78, sd $194.93). 3-sigma
-#     on a distribution like that is a genuine extreme-outlier alarm, not a
-#     "busy day" one -- that window contains exactly one day above the limit.
-#   - The limit therefore moves with the WINDOW's composition, not only with
-#     behaviour. The same 30 days minus their first fortnight give mean
-#     $104.52, sd $86.44 -- a limit of $364 rather than $776. As a heavy
-#     stretch rolls out of the window the alert silently gets twice as
-#     sensitive, having been told nothing new.
+# The window is 14 days, not 30. That choice does more work than the sigma
+# multiplier does: on 30 days to 2026-09-09 mean+3sd was $787 and exactly
+# one day in the window cleared it, because the window still carried a
+# heavy fortnight from August. The same rule on a rolling 14 days sits near
+# $190-370 and caught 2026-09-07 ($361.61). A limit set mostly by which
+# fortnight happens to be in view is a limit that changes sensitivity while
+# being told nothing new -- shortening the window is what stops the old
+# regime dominating it.
 #
-# So the computed limit is reported by check-panel-status.sh rather than
-# left implicit. A threshold nobody can see is a threshold nobody can tell
-# has stopped being reachable, which is this repo's recurring failure shape.
-DAILY_SIGMA=3
-MIN_DAILY_ALERT=15.00   # never alert below this, whatever the sigma says
-MIN_DAILY_SAMPLE=7      # fewer prior days than this and sd is not a number
-                        # worth acting on, so no daily alert is raised
+# Both limits are reported by check-panel-status.sh rather than left
+# implicit, because sd here is about the size of the mean and a threshold
+# nobody can see is one nobody can tell has stopped being reachable.
+DAILY_WINDOW_DAYS=14
+DAILY_SIGMA_ACTUAL=3     # on spend already incurred
+DAILY_SIGMA_PROJECTED=2  # on the end-of-day projection
+MIN_DAILY_ALERT=15.00    # never alert below this, whatever the sigma says
+MIN_DAILY_SAMPLE=7       # fewer prior days than this and sd is not a number
+                         # worth acting on, so no daily alert is raised
+
+# Refuse to project from a sliver of the day. Measured in TYPICAL SPEND
+# elapsed rather than wall-clock, because these hours are not equally
+# productive: at 09:00 a normal day has barely started spending, so a $40
+# morning scales to a preposterous total and would alert on a day that then
+# goes quiet. Below this fraction the projected rule stands down and only
+# the actual one applies.
+MIN_PROJECTION_ELAPSED=0.25
+
+# Sourced, never reimplemented -- the panel draws this same projection as
+# "Today's Predicted Value" and the two must not disagree, now that one of
+# them is something an alert acts on.
+DAY_PROJECTION_LIB="$HOME/.local/bin/claude-day-projection.sh"
+[ -r "$DAY_PROJECTION_LIB" ] && . "$DAY_PROJECTION_LIB"
+
 today_key=$(date +%Y-%m-%d)
 
 # Throttled per DAY and shared across every session, not per session: the
@@ -3923,23 +4015,34 @@ today_key=$(date +%Y-%m-%d)
 # otherwise each push the same day's alert. The claim is a `mkdir`, which is
 # atomic on POSIX -- the loser of the race gets EEXIST and stays silent --
 # where a test-then-write would let two concurrent prompts both pass the
-# test. Its presence also skips the query below entirely for the rest of the
-# day, which is what bounds the cost of adding a second corpus scan here.
-daily_claim="$STATE_DIR/daily-$today_key"
+# test.
+#
+# One claim EACH, so the early projected warning does not consume the later
+# actual one: a day that is flagged at 14:00 and then genuinely blows past
+# the 3-sigma line at 19:00 is two different pieces of news.
+daily_claim_projected="$STATE_DIR/daily-$today_key-projected"
+daily_claim_actual="$STATE_DIR/daily-$today_key-actual"
 
 today_cost=0
-daily_limit=0
+today_proj=0
+daily_limit_actual=0
+daily_limit_projected=0
 daily_mean=0
+daily_sd=0
 daily_n=0
+proj_elapsed=0
+proj_available=0
 
-# Sets today_cost / daily_limit / daily_mean / daily_n. A function rather
-# than a stretch of inline script because `--report` below has to show the
-# operator the very number the alert is gated on -- two implementations of
-# one statistic is how the number on screen stops being the number in force.
+# Sets every daily_* / today_* / proj_* above. A function rather than a
+# stretch of inline script because `--report` below has to show the operator
+# the very numbers the alerts are gated on -- two implementations of one
+# statistic is how the number on screen stops being the number in force.
 compute_daily_stats() {
-  local since30 daily_args daily_key daily_file daily_json daily_mtime daily_stats
-  since30=$(date -v-29d +%Y%m%d 2>/dev/null || date -d '29 days ago' +%Y%m%d)
-  daily_args="claude daily --json --since $since30 --offline"
+  local since_day daily_args daily_key daily_file daily_json daily_mtime daily_stats
+  local hour proj_out
+  since_day=$(date -v-"$(( DAILY_WINDOW_DAYS - 1 ))"d +%Y%m%d 2>/dev/null \
+    || date -d "$(( DAILY_WINDOW_DAYS - 1 )) days ago" +%Y%m%d)
+  daily_args="claude daily --json --since $since_day --offline"
   daily_key=$(printf '%s' "$daily_args" | shasum -a 256 | cut -c1-16)
   daily_file="$CCUSAGE_CACHE_DIR/$daily_key.json"
 
@@ -3951,7 +4054,7 @@ compute_daily_stats() {
     fi
   fi
   if [ -z "$daily_json" ]; then
-    daily_json=$(ccusage claude daily --json --since "$since30" --offline 2>/dev/null \
+    daily_json=$(ccusage claude daily --json --since "$since_day" --offline 2>/dev/null \
       | jq -c '{daily: (.daily // .dailies // [])}' 2>/dev/null)
     if [ -n "$daily_json" ] && jq -e '.daily' >/dev/null 2>&1 <<<"$daily_json"; then
       printf '%s' "$daily_json" > "$daily_file.$$.tmp" 2>/dev/null &&
@@ -3962,16 +4065,22 @@ compute_daily_stats() {
   # Today is excluded from the statistics it is being judged against, for
   # the same reason the session baseline now excludes the current session --
   # and doubly so here, because today is a PARTIAL day being compared with
-  # complete ones. Days with no activity are simply absent from ccusage's
-  # rows, so a fortnight off does not drag the mean toward zero.
+  # complete ones.
+  #
+  # Days with no activity are simply absent from ccusage's rows, so a
+  # fortnight off does not drag the mean toward zero. That also means
+  # daily_n counts DAYS WORKED, not days elapsed, which is why the report
+  # prints it.
+  #
   # The payload arrives in the environment, not on stdin: stdin is already
   # carrying the script itself via the heredoc, and a `<<<` on top of that
   # silently loses the data rather than erroring -- json.load then reads the
   # consumed script, returns nothing, and the alert simply never fires.
   daily_stats=$(DAILY_JSON="$daily_json" \
-    python3 - "$today_key" "$DAILY_SIGMA" "$MIN_DAILY_SAMPLE" <<'PYEOF' 2>/dev/null
+    python3 - "$today_key" "$DAILY_SIGMA_ACTUAL" "$DAILY_SIGMA_PROJECTED" "$MIN_DAILY_SAMPLE" <<'PYEOF' 2>/dev/null
 import json, os, statistics as st, sys
-today_key, sigma, min_n = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+today_key = sys.argv[1]
+sig_a, sig_p, min_n = float(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
 try:
     rows = json.loads(os.environ.get("DAILY_JSON") or "{}").get("daily", [])
 except Exception:
@@ -3984,48 +4093,103 @@ for r in rows:
 today = by_day.get(today_key, 0.0)
 prior = [v for d, v in by_day.items() if d != today_key]
 if len(prior) >= min_n:
-    mean = st.mean(prior)
-    sd = st.stdev(prior)
-    limit = mean + sigma * sd
+    mean, sd = st.mean(prior), st.stdev(prior)
+    lim_a, lim_p = mean + sig_a * sd, mean + sig_p * sd
 else:
     mean = st.mean(prior) if prior else 0.0
-    limit = 0.0
-print(f"{today:.4f} {limit:.4f} {mean:.4f} {len(prior)}")
+    sd = lim_a = lim_p = 0.0
+print(f"{today:.4f} {lim_a:.4f} {lim_p:.4f} {mean:.4f} {sd:.4f} {len(prior)}")
 PYEOF
 )
-  read -r today_cost daily_limit daily_mean daily_n <<<"${daily_stats:-0 0 0 0}"
-  : "${today_cost:=0}" "${daily_limit:=0}" "${daily_mean:=0}" "${daily_n:=0}"
+  read -r today_cost daily_limit_actual daily_limit_projected daily_mean daily_sd daily_n \
+    <<<"${daily_stats:-0 0 0 0 0 0}"
+  : "${today_cost:=0}" "${daily_limit_actual:=0}" "${daily_limit_projected:=0}"
+  : "${daily_mean:=0}" "${daily_sd:=0}" "${daily_n:=0}"
+
+  # The projection comes from the panel's hourly buckets, which only the
+  # PANEL refreshes -- a 30-day JSONL scan this hook must not be doing on
+  # the interactive path. With no buckets (no panel has ever run) the
+  # projection collapses to today's actual spend and proj_available stays 0,
+  # so the projected rule stands down rather than quietly alerting on the
+  # wrong quantity. --report says which of those is the case.
+  hour=$(( 10#$(date +%H) ))
+  if declare -f project_today >/dev/null 2>&1 && [ -r "$HOME/.cache/claude-hourly-buckets.json" ]; then
+    proj_out=$(project_today "$today_cost" "$HOME/.cache/claude-hourly-buckets.json" "$hour" 2>/dev/null)
+    read -r today_proj _ts _ra proj_elapsed <<<"${proj_out:-0 0 0 0}"
+    : "${today_proj:=0}" "${proj_elapsed:=0}"
+    if awk -v f="$proj_elapsed" -v m="$MIN_PROJECTION_ELAPSED" 'BEGIN{exit !(f >= m)}'; then
+      proj_available=1
+    fi
+  else
+    today_proj="$today_cost"
+    proj_elapsed=0
+    proj_available=0
+  fi
 }
 
-# True when today's spend is over the control limit and the sample behind
-# that limit is big enough to mean anything.
+# The sample behind either limit has to be big enough to mean anything.
+daily_sample_ok() {
+  [ "${daily_n:-0}" -ge "$MIN_DAILY_SAMPLE" ] 2>/dev/null
+}
+
+# True when spend already incurred is over the 3-sigma line.
 daily_over_limit() {
-  awk -v v="$today_cost" -v l="$daily_limit" -v f="$MIN_DAILY_ALERT" \
-      -v n="$daily_n" -v m="$MIN_DAILY_SAMPLE" \
-      'BEGIN{exit !(n >= m && l > 0 && v > l && v >= f)}'
+  daily_sample_ok || return 1
+  awk -v v="$today_cost" -v l="$daily_limit_actual" -v f="$MIN_DAILY_ALERT" \
+      'BEGIN{exit !(l > 0 && v > l && v >= f)}'
 }
 
-# `--report`: print the control limit rather than act on it, for
-# check-panel-status.sh. It runs the same compute_daily_stats() the alert is
-# gated on, so what the operator is shown cannot drift from what is enforced
-# -- and a 3-sigma limit on a distribution whose sd is the size of its mean
-# is exactly the kind of threshold that quietly stops being reachable, which
-# is the whole reason it is worth printing at all.
+# True when the day is PROJECTED to end over the 2-sigma line -- the "bad
+# day" rule. Requires a usable projection and enough of a typical day's
+# spend already elapsed to be extrapolating from something.
+daily_projected_over_limit() {
+  daily_sample_ok || return 1
+  [ "${proj_available:-0}" -eq 1 ] || return 1
+  awk -v v="$today_proj" -v l="$daily_limit_projected" -v f="$MIN_DAILY_ALERT" \
+      'BEGIN{exit !(l > 0 && v > l && v >= f)}'
+}
+
+# `--report`: print the control limits rather than act on them, for
+# check-panel-status.sh. It runs the same compute_daily_stats() the alerts
+# are gated on, so what the operator is shown cannot drift from what is
+# enforced -- and a sigma limit on a distribution whose sd is the size of
+# its mean is exactly the kind of threshold that quietly stops being
+# reachable, which is the whole reason it is worth printing at all.
 if [ "${1:-}" = "--report" ]; then
   compute_daily_stats
-  printf 'window:      %s prior day(s), minimum %s\n' "$daily_n" "$MIN_DAILY_SAMPLE"
-  LC_ALL=C awk -v m="$daily_mean" -v l="$daily_limit" -v t="$today_cost" \
-      -v f="$MIN_DAILY_ALERT" -v s="$DAILY_SIGMA" 'BEGIN {
-    printf "mean:        $%.2f\n", m
-    printf "limit:       $%.2f  (mean + %s sd, floor $%.2f)\n", l, s, f
-    printf "today:       $%.2f\n", t
-  }' 
-  if [ "$daily_n" -lt "$MIN_DAILY_SAMPLE" ] 2>/dev/null; then
+  printf 'window:      %s day(s) worked in the last %s, minimum %s\n' \
+    "$daily_n" "$DAILY_WINDOW_DAYS" "$MIN_DAILY_SAMPLE"
+  LC_ALL=C awk -v m="$daily_mean" -v sd="$daily_sd" -v la="$daily_limit_actual" \
+      -v lp="$daily_limit_projected" -v t="$today_cost" -v tp="$today_proj" \
+      -v f="$MIN_DAILY_ALERT" -v sa="$DAILY_SIGMA_ACTUAL" -v sp="$DAILY_SIGMA_PROJECTED" 'BEGIN {
+    printf "mean:        $%.2f   sd $%.2f\n", m, sd
+    printf "bad day:     $%.2f  (mean + %s sd, on the projection)\n", lp, sp
+    printf "runaway:     $%.2f  (mean + %s sd, on actual spend; floor $%.2f)\n", la, sa, f
+    printf "today:       $%.2f spent, $%.2f projected\n", t, tp
+  }'
+  if ! daily_sample_ok; then
     printf 'status:      NO DAILY ALERT POSSIBLE -- too few days to estimate sd\n'
-  elif daily_over_limit; then
-    printf 'status:      OVER LIMIT\n'
   else
-    printf 'status:      under limit\n'
+    if [ "${proj_available:-0}" -eq 1 ]; then
+      printf 'projection:  usable (%s%% of a typical day elapsed)\n' \
+        "$(LC_ALL=C awk -v f="$proj_elapsed" 'BEGIN{printf "%.0f", f*100}')"
+    elif [ ! -r "$HOME/.cache/claude-hourly-buckets.json" ]; then
+      # Said plainly: with no buckets the bad-day rule is not merely quiet,
+      # it is switched off, and nothing else would ever tell you.
+      printf 'projection:  UNAVAILABLE -- no hourly buckets yet (run the panel once)\n'
+      printf '             the bad-day alert cannot fire until then\n'
+    else
+      printf 'projection:  standing down -- only %s%% of a typical day elapsed (needs %s%%)\n' \
+        "$(LC_ALL=C awk -v f="$proj_elapsed" 'BEGIN{printf "%.0f", f*100}')" \
+        "$(LC_ALL=C awk -v f="$MIN_PROJECTION_ELAPSED" 'BEGIN{printf "%.0f", f*100}')"
+    fi
+    if daily_over_limit; then
+      printf 'status:      OVER THE RUNAWAY LIMIT\n'
+    elif daily_projected_over_limit; then
+      printf 'status:      PROJECTED OVER THE BAD-DAY LIMIT\n'
+    else
+      printf 'status:      under both limits\n'
+    fi
   fi
   exit 0
 fi
@@ -4131,14 +4295,25 @@ if awk -v v="$session_cost" -v f="$MIN_SESSION_ALERT" 'BEGIN{exit !(v>=f)}'; the
 fi
 
 alert_daily=0
-if [ ! -d "$daily_claim" ]; then
+alert_badday=0
+# Skip the query entirely once BOTH of today's alerts are spent -- that is
+# what bounds the cost of a second corpus scan on the interactive path.
+if [ ! -d "$daily_claim_actual" ] || [ ! -d "$daily_claim_projected" ]; then
   compute_daily_stats
-  if daily_over_limit; then
-    # Claim the day before saying anything. If another window got there
-    # first, mkdir fails and this one stays quiet.
-    if mkdir "$daily_claim" 2>/dev/null; then
-      alert_daily=1
-    fi
+  # Claim before saying anything: if another window got there first, mkdir
+  # fails and this one stays quiet.
+  if [ ! -d "$daily_claim_actual" ] && daily_over_limit; then
+    mkdir "$daily_claim_actual" 2>/dev/null && alert_daily=1
+  fi
+  if [ ! -d "$daily_claim_projected" ] && daily_projected_over_limit; then
+    mkdir "$daily_claim_projected" 2>/dev/null && alert_badday=1
+  fi
+  # The actual limit is strictly above the projected one, so crossing it
+  # implies the day was always going to be flagged. Saying both at once is
+  # two lines making one point, and the louder one is the true one.
+  if [ "$alert_daily" -eq 1 ] && [ "$alert_badday" -eq 1 ]; then
+    alert_badday=0
+    mkdir "$daily_claim_projected" 2>/dev/null || true
   fi
 fi
 
@@ -4177,7 +4352,8 @@ with open(path, "w") as f:
     json.dump({"tier": tier, "launch_line": launch_line}, f)
 PYEOF
 
-if [ "$alert_cost" -eq 0 ] && [ "$alert_launch" -eq 0 ] && [ "$alert_daily" -eq 0 ]; then
+if [ "$alert_cost" -eq 0 ] && [ "$alert_launch" -eq 0 ] && [ "$alert_daily" -eq 0 ] \
+   && [ "$alert_badday" -eq 0 ]; then
   exit 0
 fi
 
@@ -4244,18 +4420,23 @@ tg_body_file=$(mktemp "${TMPDIR:-/tmp}/claude-cost-alert.XXXXXX")
 
 python3 - "$alert_cost" "$alert_launch" "$tier" "$session_cost" "$avg_session_cost" \
          "$term_program" "$tg_state" "$tg_body_file" "$session_id" "${hook_cwd:-}" \
-         "$alert_daily" "$today_cost" "$daily_limit" "$daily_mean" "$daily_n" "$DAILY_SIGMA" <<'PYEOF'
+         "$alert_daily" "$today_cost" "$daily_limit_actual" "$daily_mean" "$daily_n" \
+         "$DAILY_SIGMA_ACTUAL" "$alert_badday" "$today_proj" "$daily_limit_projected" \
+         "$DAILY_SIGMA_PROJECTED" "$DAILY_WINDOW_DAYS" <<'PYEOF'
 import json, os, sys
 
 (alert_cost, alert_launch, tier, session_cost, avg_session_cost,
  term_program, tg_state, tg_body_file, session_id, hook_cwd,
- alert_daily, today_cost, daily_limit, daily_mean, daily_n, daily_sigma) = sys.argv[1:17]
+ alert_daily, today_cost, daily_limit, daily_mean, daily_n, daily_sigma,
+ alert_badday, today_proj, daily_limit_proj, daily_sigma_proj,
+ daily_window) = sys.argv[1:22]
 
 lines = []
 context = []
+# Both day-level lines go ahead of the session line deliberately: when they
+# coincide, the day is the larger fact, and only the first line survives a
+# lock-screen preview.
 if alert_daily == "1":
-    # Ahead of the session line deliberately: when both fire, the day is the
-    # larger fact, and only the first line survives a lock-screen preview.
     lines.append(
         f"\U0001f7e5 DAILY SPEND — ${float(today_cost):.2f} today, over your "
         f"${float(daily_limit):.2f} {daily_sigma}\u03c3 limit "
@@ -4264,7 +4445,22 @@ if alert_daily == "1":
     context.append(
         f"Today's spend across all sessions is ${float(today_cost):.2f}, above the "
         f"{daily_sigma}-sigma control limit of ${float(daily_limit):.2f} "
-        f"(mean ${float(daily_mean):.2f} over the preceding {daily_n} days)."
+        f"(mean ${float(daily_mean):.2f} over the preceding {daily_n} days worked)."
+    )
+if alert_badday == "1":
+    # Deliberately phrased as a forecast, not a fact. This fires while the
+    # day can still be changed, which is the entire reason it exists -- and
+    # a projection stated as though it had already happened is the kind of
+    # alert people learn to stop believing.
+    lines.append(
+        f"\U0001f7e0 BAD DAY AHEAD — heading for ${float(today_proj):.2f} today, over your "
+        f"${float(daily_limit_proj):.2f} {daily_sigma_proj}\u03c3 line "
+        f"(${float(today_cost):.2f} spent so far)"
+    )
+    context.append(
+        f"Today is projected to end at ${float(today_proj):.2f} (${float(today_cost):.2f} spent "
+        f"so far), above the {daily_sigma_proj}-sigma line of ${float(daily_limit_proj):.2f} "
+        f"drawn from the last {daily_window} days."
     )
 if alert_cost == "1":
     cost = float(session_cost)
