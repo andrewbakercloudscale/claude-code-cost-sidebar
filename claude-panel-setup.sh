@@ -55,6 +55,16 @@
 # Safe to re-run: overwrites the two scripts with the latest version and
 # skips the .zshrc block if it's already present.
 set -uo pipefail
+# Money is formatted by `LC_ALL=C awk`, never by bash's printf. Two separate
+# reasons, both found here rather than reasoned about:
+#   - bash's `printf %.2f` obeys LC_NUMERIC, and this machine is en_ZA, whose
+#     decimal separator is a comma -- so it REJECTS the dot-decimal values
+#     computed above outright ("invalid number") and prints 0.
+#   - awk accepts them (its -v assignments parse in the C locale, which is
+#     also why every threshold comparison in this file has always been
+#     correct) but would still PRINT them with a comma. The alert lines are
+#     built in Python and always use a dot, so the report is pinned to C to
+#     match rather than emitting both conventions.
 
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
@@ -3873,6 +3883,153 @@ RED_MULT=2.0
 PURPLE_MULT=3.0
 MIN_SESSION_ALERT=5.00  # never alert below this, no matter the multiple
 
+CCUSAGE_CACHE_DIR="$HOME/.cache/ccusage-panel-cache"
+HOOK_CACHE_TTL=120
+mkdir -p "$CCUSAGE_CACHE_DIR" 2>/dev/null
+
+# ---- today's spend, against a 3-sigma control limit -----------------------
+#
+# The session rule above cannot see this case at all. It compares ONE session
+# against the average session, so a day made of twenty ordinary sessions
+# never trips it however much it costs in total -- you can spend $150 across
+# a day without a single alert, which is the gap this closes.
+#
+# The limit is mean + 3*sd over the preceding days, sample sd (n-1).
+#
+# Two properties of the real data are worth knowing before trusting a number
+# this produces, because both are invisible from the alert itself:
+#
+#   - Daily spend here is heavily right-skewed and its sd is about the size
+#     of its mean (30 days to 2026-09-09: mean $190.78, sd $194.93). 3-sigma
+#     on a distribution like that is a genuine extreme-outlier alarm, not a
+#     "busy day" one -- that window contains exactly one day above the limit.
+#   - The limit therefore moves with the WINDOW's composition, not only with
+#     behaviour. The same 30 days minus their first fortnight give mean
+#     $104.52, sd $86.44 -- a limit of $364 rather than $776. As a heavy
+#     stretch rolls out of the window the alert silently gets twice as
+#     sensitive, having been told nothing new.
+#
+# So the computed limit is reported by check-panel-status.sh rather than
+# left implicit. A threshold nobody can see is a threshold nobody can tell
+# has stopped being reachable, which is this repo's recurring failure shape.
+DAILY_SIGMA=3
+MIN_DAILY_ALERT=15.00   # never alert below this, whatever the sigma says
+MIN_DAILY_SAMPLE=7      # fewer prior days than this and sd is not a number
+                        # worth acting on, so no daily alert is raised
+today_key=$(date +%Y-%m-%d)
+
+# Throttled per DAY and shared across every session, not per session: the
+# hook runs once per prompt in each open window, and N windows would
+# otherwise each push the same day's alert. The claim is a `mkdir`, which is
+# atomic on POSIX -- the loser of the race gets EEXIST and stays silent --
+# where a test-then-write would let two concurrent prompts both pass the
+# test. Its presence also skips the query below entirely for the rest of the
+# day, which is what bounds the cost of adding a second corpus scan here.
+daily_claim="$STATE_DIR/daily-$today_key"
+
+today_cost=0
+daily_limit=0
+daily_mean=0
+daily_n=0
+
+# Sets today_cost / daily_limit / daily_mean / daily_n. A function rather
+# than a stretch of inline script because `--report` below has to show the
+# operator the very number the alert is gated on -- two implementations of
+# one statistic is how the number on screen stops being the number in force.
+compute_daily_stats() {
+  local since30 daily_args daily_key daily_file daily_json daily_mtime daily_stats
+  since30=$(date -v-29d +%Y%m%d 2>/dev/null || date -d '29 days ago' +%Y%m%d)
+  daily_args="claude daily --json --since $since30 --offline"
+  daily_key=$(printf '%s' "$daily_args" | shasum -a 256 | cut -c1-16)
+  daily_file="$CCUSAGE_CACHE_DIR/$daily_key.json"
+
+  daily_json=""
+  if [ -f "$daily_file" ]; then
+    daily_mtime=$(stat -f %m "$daily_file" 2>/dev/null || stat -c %Y "$daily_file" 2>/dev/null || echo 0)
+    if (( $(date +%s) - daily_mtime < HOOK_CACHE_TTL )); then
+      daily_json=$(cat "$daily_file" 2>/dev/null)
+    fi
+  fi
+  if [ -z "$daily_json" ]; then
+    daily_json=$(ccusage claude daily --json --since "$since30" --offline 2>/dev/null \
+      | jq -c '{daily: (.daily // .dailies // [])}' 2>/dev/null)
+    if [ -n "$daily_json" ] && jq -e '.daily' >/dev/null 2>&1 <<<"$daily_json"; then
+      printf '%s' "$daily_json" > "$daily_file.$$.tmp" 2>/dev/null &&
+        mv "$daily_file.$$.tmp" "$daily_file" 2>/dev/null
+    fi
+  fi
+
+  # Today is excluded from the statistics it is being judged against, for
+  # the same reason the session baseline now excludes the current session --
+  # and doubly so here, because today is a PARTIAL day being compared with
+  # complete ones. Days with no activity are simply absent from ccusage's
+  # rows, so a fortnight off does not drag the mean toward zero.
+  # The payload arrives in the environment, not on stdin: stdin is already
+  # carrying the script itself via the heredoc, and a `<<<` on top of that
+  # silently loses the data rather than erroring -- json.load then reads the
+  # consumed script, returns nothing, and the alert simply never fires.
+  daily_stats=$(DAILY_JSON="$daily_json" \
+    python3 - "$today_key" "$DAILY_SIGMA" "$MIN_DAILY_SAMPLE" <<'PYEOF' 2>/dev/null
+import json, os, statistics as st, sys
+today_key, sigma, min_n = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+try:
+    rows = json.loads(os.environ.get("DAILY_JSON") or "{}").get("daily", [])
+except Exception:
+    rows = []
+by_day = {}
+for r in rows:
+    day = r.get("date") or r.get("period")
+    if day:
+        by_day[day] = float(r.get("totalCost") or 0)
+today = by_day.get(today_key, 0.0)
+prior = [v for d, v in by_day.items() if d != today_key]
+if len(prior) >= min_n:
+    mean = st.mean(prior)
+    sd = st.stdev(prior)
+    limit = mean + sigma * sd
+else:
+    mean = st.mean(prior) if prior else 0.0
+    limit = 0.0
+print(f"{today:.4f} {limit:.4f} {mean:.4f} {len(prior)}")
+PYEOF
+)
+  read -r today_cost daily_limit daily_mean daily_n <<<"${daily_stats:-0 0 0 0}"
+  : "${today_cost:=0}" "${daily_limit:=0}" "${daily_mean:=0}" "${daily_n:=0}"
+}
+
+# True when today's spend is over the control limit and the sample behind
+# that limit is big enough to mean anything.
+daily_over_limit() {
+  awk -v v="$today_cost" -v l="$daily_limit" -v f="$MIN_DAILY_ALERT" \
+      -v n="$daily_n" -v m="$MIN_DAILY_SAMPLE" \
+      'BEGIN{exit !(n >= m && l > 0 && v > l && v >= f)}'
+}
+
+# `--report`: print the control limit rather than act on it, for
+# check-panel-status.sh. It runs the same compute_daily_stats() the alert is
+# gated on, so what the operator is shown cannot drift from what is enforced
+# -- and a 3-sigma limit on a distribution whose sd is the size of its mean
+# is exactly the kind of threshold that quietly stops being reachable, which
+# is the whole reason it is worth printing at all.
+if [ "${1:-}" = "--report" ]; then
+  compute_daily_stats
+  printf 'window:      %s prior day(s), minimum %s\n' "$daily_n" "$MIN_DAILY_SAMPLE"
+  LC_ALL=C awk -v m="$daily_mean" -v l="$daily_limit" -v t="$today_cost" \
+      -v f="$MIN_DAILY_ALERT" -v s="$DAILY_SIGMA" 'BEGIN {
+    printf "mean:        $%.2f\n", m
+    printf "limit:       $%.2f  (mean + %s sd, floor $%.2f)\n", l, s, f
+    printf "today:       $%.2f\n", t
+  }' 
+  if [ "$daily_n" -lt "$MIN_DAILY_SAMPLE" ] 2>/dev/null; then
+    printf 'status:      NO DAILY ALERT POSSIBLE -- too few days to estimate sd\n'
+  elif daily_over_limit; then
+    printf 'status:      OVER LIMIT\n'
+  else
+    printf 'status:      under limit\n'
+  fi
+  exit 0
+fi
+
 # Claude Code passes this hook's own session_id on stdin as JSON (the
 # UserPromptSubmit payload) — read that instead of guessing "most recently
 # modified transcript file" via `ls -t ~/.claude/projects/*/*.jsonl`, which
@@ -3908,9 +4065,6 @@ state_file="$STATE_DIR/$session_id.json"
 # average moves imperceptibly minute to minute, and it only ever gates a
 # >2x escalation alert above a $5 floor. Staleness here cannot change an
 # alert decision that a fresh read would not also have made.
-CCUSAGE_CACHE_DIR="$HOME/.cache/ccusage-panel-cache"
-HOOK_CACHE_TTL=120
-mkdir -p "$CCUSAGE_CACHE_DIR" 2>/dev/null
 
 since7=$(date -v-7d +%Y%m%d 2>/dev/null || date -d '7 days ago' +%Y%m%d)
 
@@ -3944,8 +4098,16 @@ if [ -z "$sessions_json" ]; then
   fi
 fi
 
-avg_session_cost=$(jq -r '
-  [.session[].totalCost] | map(select(. > 0.05)) |
+# The current session is excluded from its own baseline. It was not, and
+# that is self-defeating in exactly the case the alert exists for: a runaway
+# session is a member of the set whose average it is measured against, so
+# the further it runs the higher it drags the bar it has to clear. Measured
+# on a $42.13 session against three ~$8 ones, including it reported "2.5x a
+# $16.68 average" where the honest answer is 5.1x an $8.20 average -- the
+# alert fires late, and with a per-tier throttle a late fire can mean the
+# real crossing is never reported at all.
+avg_session_cost=$(jq -r --arg s "$session_id" '
+  [.session[] | select(.period != $s) | .totalCost] | map(select(. > 0.05)) |
   if length >= 3 then (add/length) else 0 end
 ' <<<"$sessions_json" 2>/dev/null)
 [ -z "$avg_session_cost" ] && avg_session_cost="0"
@@ -3965,6 +4127,18 @@ if awk -v v="$session_cost" -v f="$MIN_SESSION_ALERT" 'BEGIN{exit !(v>=f)}'; the
     tier="red"
   elif awk -v a="$avg_session_cost" -v v="$session_cost" -v m="$YELLOW_MULT" 'BEGIN{exit !(a>0 && v>a*m)}'; then
     tier="yellow"
+  fi
+fi
+
+alert_daily=0
+if [ ! -d "$daily_claim" ]; then
+  compute_daily_stats
+  if daily_over_limit; then
+    # Claim the day before saying anything. If another window got there
+    # first, mkdir fails and this one stays quiet.
+    if mkdir "$daily_claim" 2>/dev/null; then
+      alert_daily=1
+    fi
   fi
 fi
 
@@ -4003,7 +4177,7 @@ with open(path, "w") as f:
     json.dump({"tier": tier, "launch_line": launch_line}, f)
 PYEOF
 
-if [ "$alert_cost" -eq 0 ] && [ "$alert_launch" -eq 0 ]; then
+if [ "$alert_cost" -eq 0 ] && [ "$alert_launch" -eq 0 ] && [ "$alert_daily" -eq 0 ]; then
   exit 0
 fi
 
@@ -4069,14 +4243,29 @@ fi
 tg_body_file=$(mktemp "${TMPDIR:-/tmp}/claude-cost-alert.XXXXXX")
 
 python3 - "$alert_cost" "$alert_launch" "$tier" "$session_cost" "$avg_session_cost" \
-         "$term_program" "$tg_state" "$tg_body_file" "$session_id" "${hook_cwd:-}" <<'PYEOF'
+         "$term_program" "$tg_state" "$tg_body_file" "$session_id" "${hook_cwd:-}" \
+         "$alert_daily" "$today_cost" "$daily_limit" "$daily_mean" "$daily_n" "$DAILY_SIGMA" <<'PYEOF'
 import json, os, sys
 
 (alert_cost, alert_launch, tier, session_cost, avg_session_cost,
- term_program, tg_state, tg_body_file, session_id, hook_cwd) = sys.argv[1:11]
+ term_program, tg_state, tg_body_file, session_id, hook_cwd,
+ alert_daily, today_cost, daily_limit, daily_mean, daily_n, daily_sigma) = sys.argv[1:17]
 
 lines = []
 context = []
+if alert_daily == "1":
+    # Ahead of the session line deliberately: when both fire, the day is the
+    # larger fact, and only the first line survives a lock-screen preview.
+    lines.append(
+        f"\U0001f7e5 DAILY SPEND — ${float(today_cost):.2f} today, over your "
+        f"${float(daily_limit):.2f} {daily_sigma}\u03c3 limit "
+        f"(mean ${float(daily_mean):.2f} over {daily_n} days)"
+    )
+    context.append(
+        f"Today's spend across all sessions is ${float(today_cost):.2f}, above the "
+        f"{daily_sigma}-sigma control limit of ${float(daily_limit):.2f} "
+        f"(mean ${float(daily_mean):.2f} over the preceding {daily_n} days)."
+    )
 if alert_cost == "1":
     cost = float(session_cost)
     avg = float(avg_session_cost)

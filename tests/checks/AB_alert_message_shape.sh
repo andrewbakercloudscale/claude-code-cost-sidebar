@@ -24,8 +24,15 @@ check_AB_alert_message_shape() {
     return
   fi
 
-  # 2.5x the average of the other three, and well above MIN_SESSION_ALERT.
-  printf '%s\n' '{"sessions":[{"period":"S1","totalCost":8.0},{"period":"S2","totalCost":8.0},{"period":"S3","totalCost":8.6},{"period":"SID-AB","totalCost":42.13}]}' \
+  # $20.00 against three sessions averaging $8.20 -> 2.4x, which is RED
+  # (>2x, <3x) and well above MIN_SESSION_ALERT.
+  #
+  # These figures also pin the baseline fix, which is why they are not round:
+  # the current session is excluded from the average it is judged against, so
+  # the divisor is $8.20. Included, it would be $11.15 and this session would
+  # come out at 1.8x -- yellow, and the hook is deliberately silent on yellow.
+  # Getting that wrong does not misreport the alert, it deletes it.
+  printf '%s\n' '{"sessions":[{"period":"S1","totalCost":8.0},{"period":"S2","totalCost":8.0},{"period":"S3","totalCost":8.6},{"period":"SID-AB","totalCost":20.00}]}' \
     > "$CCUSAGE_FIXTURE_DIR/session.json"
 
   # The phone push is check AC's subject. Opted out here (silently, by
@@ -41,8 +48,9 @@ check_AB_alert_message_shape() {
   assert_eq "one line per alert, and only one alert is active" "1" \
     "$(printf '%s\n' "$msg" | wc -l | tr -d ' ')"
   assert_contains "the severity word survives" "COST ALERT" "$msg"
-  assert_contains "the session's own figure is in it" '$42.13' "$msg"
-  assert_contains "so is the multiple, which is the actionable number" "2.5x" "$msg"
+  assert_contains "the session's own figure is in it" '$20.00' "$msg"
+  assert_contains "so is the multiple, which is the actionable number" "2.4x" "$msg"
+  assert_contains "the baseline excludes this session" '$8.20 average' "$msg"
 
   # Markdown is inert in this renderer, so any of it in the message is a
   # literal artefact rather than emphasis.
@@ -75,6 +83,6 @@ check_AB_alert_message_shape() {
   # an imperative there is a channel that reports success and does nothing.
   local ctx
   ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out")
-  assert_contains "the model is told the figures" '$42.13' "$ctx"
+  assert_contains "the model is told the figures" '$20.00' "$ctx"
   assert_not_contains "but is not instructed to notify" "PushNotification" "$ctx"
 }

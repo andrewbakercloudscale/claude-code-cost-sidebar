@@ -69,6 +69,18 @@ main() {
   fi
 
   echo
+  echo "== daily spend control limit (3-sigma) =="
+  # Printed rather than left implicit because of what this threshold is made
+  # of: sd here is about the size of the mean, so the limit moves with the
+  # window's composition as much as with behaviour, and a limit that has
+  # drifted out of reach looks exactly like a quiet month.
+  if [[ -x "$HOME/.local/bin/claude-cost-alert-check.sh" ]]; then
+    "$HOME/.local/bin/claude-cost-alert-check.sh" --report 2>&1 | sed 's/^/  /'
+  else
+    echo "  hook not installed"
+  fi
+
+  echo
   echo "== running processes =="
   check_process "ccusage-panel.sh"
   check_process "claude-panel-launch.sh"

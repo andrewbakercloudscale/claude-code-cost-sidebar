@@ -65,7 +65,9 @@ STUB
   assert_contains "a message is sent to Telegram" "api.telegram.org" "$sent"
   assert_not_contains "no missing-creds notice when they are present" \
     "no phone push sent" "$(jq -r '.systemMessage' <<<"$out_creds")"
-  assert_contains "the phone gets the headline" "COST ALERT" "$sent"
+  # $42.13 against an $8.20 baseline is 5.1x -- purple, not red. It reads as
+  # red only if the current session is wrongly left in its own baseline.
+  assert_contains "the phone gets the headline" "RUNAWAY COST" "$sent"
   assert_contains "with the figure" '$42.13' "$sent"
   # Several sessions run at once here; a push that does not say which one it
   # is about cannot be acted on from a phone.
