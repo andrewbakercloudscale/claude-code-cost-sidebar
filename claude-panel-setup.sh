@@ -1837,6 +1837,51 @@ def load_secondary_events():
 
 SECONDARY_EVENTS = load_secondary_events()
 
+# --- claude-burst proxy-side compaction markers ----------------------------
+#
+# When the gateway compacts a session it summarises the history in a
+# background call the transcript never sees, then swaps the summary in at the
+# next prompt. From the transcript alone that reads as context falling off a
+# cliff for no reason. metrics.jsonl records both halves under the session id
+# (the transcript's own file name): the summary call (note "compaction
+# summary") and every request that carried the swap (compacted_messages).
+# Both are stamped at the END of their request, so the start is time minus
+# duration: that places "Started" at the prompt it ran beside, and
+# "Finished" just before the first turn that was actually sent compacted.
+SESSION_ID = os.path.basename(path).removesuffix(".jsonl")
+
+def load_compaction_markers():
+    """[(epoch, kind, summary_usd)] in time order; kind is started/finished."""
+    out, last_summary = [], None
+    try:
+        with open(BURST_METRICS) as f:
+            for line in f:
+                if SESSION_ID not in line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("session_id") != SESSION_ID:
+                    continue
+                ts = parse_iso(e.get("time"))
+                if ts is None:
+                    continue
+                began = ts - (e.get("duration_ms") or 0) / 1000
+                if e.get("note") == "compaction summary":
+                    last_summary = e.get("api_equivalent_usd")
+                    out.append((began, "started", None))
+                elif e.get("compacted_messages") and last_summary is not None:
+                    # Only the first compacted request after a summary: every
+                    # later one carries the same swap and is not news.
+                    out.append((began, "finished", last_summary))
+                    last_summary = None
+    except OSError:
+        return []
+    return out
+
+COMPACTION_MARKERS = load_compaction_markers()
+
 def secondary_event_for(turn_ts, out_tok):
     """(model, input_tokens, usd, route) for the secondary hop that served
     this turn, or None if it went to primary."""
@@ -1939,7 +1984,7 @@ for line in lines:
     else:
         cost = None
 
-    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model, is_secondary, is_unpriced, sec_route))
+    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model, is_secondary, is_unpriced, sec_route, turn_ts))
 
 total_n = len(turns)
 shown = turns[-max_rows:]
@@ -1959,8 +2004,11 @@ avg_delta = (sum(t[2] for t in primary_turns) / len(primary_turns)) if primary_t
 # that silently drops those turns is a wrong number, and the panel renders
 # an empty figure as "--". Secondary turns were never Anthropic spend, so
 # they do not blank it.
+# The gateway's compaction summary calls are Anthropic spend too, billed to
+# this session, and appear nowhere in the transcript; add them.
+summary_usd = sum(m[2] or 0 for m in COMPACTION_MARKERS if m[1] == "finished")
 sess_total = ("" if any(t[7] for t in turns)
-              else f"{sum(t[4] for t in turns if t[4] is not None and not t[6]):.6f}")
+              else f"{sum(t[4] for t in turns if t[4] is not None and not t[6]) + summary_usd:.6f}")
 print(f"#META\t{sess_total}\t{turns[-1][1] if turns else 0}"
       f"\t{context_window_size(turns[-1][5]) if turns else 0}")
 turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
@@ -1975,11 +2023,43 @@ if shown:
     # sections below it, so the most recent activity would otherwise be the
     # one row that scrolls out of view first as the session grows.
     saw_secondary, secondary_routes = False, set()
+    # Each compaction marker is drawn above the first turn that began after
+    # it, i.e. between the two turns it happened between. Markers older than
+    # the oldest shown turn are off the table and dropped; ones newer than
+    # the newest turn (a summary running right now) go on top.
+    first_shown_ts = shown[0][9]
+    markers_before = {}
+    for m in COMPACTION_MARKERS:
+        if first_shown_ts is not None and m[0] < first_shown_ts:
+            continue
+        j = next((k for k in range(len(shown)) if shown[k][9] is not None and shown[k][9] > m[0]), len(shown))
+        markers_before.setdefault(j, []).append(m)
+
+    def print_markers(j):
+        for _, kind, usd in reversed(markers_before.get(j, [])):
+            if kind == "started":
+                print(f"  {col_mid_tier}*** Started Auto Compaction ***{c_reset}")
+            else:
+                cost_note = "" if usd is None else f" (${usd:.2f})"
+                print(f"  {col_input}*** Finished Auto Compaction{cost_note} ***{c_reset}")
+
+    print_markers(len(shown))
     for i in reversed(range(len(shown))):
-        label, total_ctx, delta, cache_pct, cost, model, is_secondary, is_unpriced, route = shown[i]
+        label, total_ctx, delta, cache_pct, cost, model, is_secondary, is_unpriced, route, _ = shown[i]
         turn_no = start_idx + i
+        # The Δ is normally what this turn added (its cache write). When the
+        # context SHRANK, a compaction happened (Claude Code's or the
+        # gateway's) and the useful number is how much went: shown negative,
+        # in green, and never allowed to colour the row as a spike, since the
+        # cache write that follows a compaction is the expected cost of it.
+        idx = start_idx - 1 + i
+        prev_ctx = turns[idx - 1][1] if idx > 0 else 0
+        shrank = prev_ctx and total_ctx < prev_ctx * 0.8 and not is_secondary
         total_str, delta_str = fmt_k(total_ctx), fmt_k(delta)
-        plain_cell = f"{total_str} (+{delta_str})"
+        sign = "+"
+        if shrank:
+            sign, delta_str = "-", fmt_k(prev_ctx - total_ctx)
+        plain_cell = f"{total_str} ({sign}{delta_str})"
         pad = " " * max(0, 12 - len(plain_cell))
         if is_secondary:
             # Marked in the one column that has room, and explained in a
@@ -2003,6 +2083,7 @@ if shown:
             print(f"  {col_purple}{turn_no:<5}{label:<10}{c_reset}"
                   f"{pad}{total_str} (+{delta_str})"
                   f"{c_na}{'--':>6}{sec_cost:>8}{c_reset}")
+            print_markers(i)
             continue
         win = context_window_size(model)
         # 0 means the model is not in PRICES, so its window is unknown --
@@ -2014,6 +2095,8 @@ if shown:
         # below 95% red, below 90% purple, 95%+ reads as normal.
         cache_c = col_purple if cache_pct < 90 else (col_cost if cache_pct < 95 else col_input)
         ctx_c, delta_c = ctx_pct_color(ctx_pct), delta_color(delta, avg_delta)
+        if shrank:
+            delta_c = col_input
         # Whole-row coloring takes the worse of the two signals, with one
         # asymmetry: a delta spike colors the row at any band it reaches,
         # context % only from RED up (CTX_RED, 50%) -- yellow stays a
@@ -2038,13 +2121,14 @@ if shown:
         cost_cell = "?" if cost is None else "$" + format(cost, ".2f")
         if rank > 0:
             row_c = (col_input, col_mid_tier, col_cost, col_purple)[rank]
-            print(f"  {row_c}{turn_no:<5}{label:<10}{pad}{total_str} (+{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
+            print(f"  {row_c}{turn_no:<5}{label:<10}{pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
         else:
             total_colored = f"{ctx_c}{total_str}{c_reset}"
-            delta_colored = f"{delta_c}{delta_str}{c_reset}"
-            input_cell = f"{pad}{total_colored} (+{delta_colored})"
+            delta_colored = f"{delta_c}{sign}{delta_str}{c_reset}" if shrank else f"{delta_c}{delta_str}{c_reset}"
+            input_cell = f"{pad}{total_colored} (+{delta_colored})" if not shrank else f"{pad}{total_colored} ({delta_colored})"
             cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
             print(f"  {turn_no:<5}{label:<10}{input_cell}{cache_cell}{cost_cell:>8}")
+        print_markers(i)
     if any(t[7] for t in turns):
         # Named, not hidden: a model absent from PRICES shows "?" and the
         # session total is withheld. Add the id above and this line goes away.
