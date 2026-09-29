@@ -18,7 +18,7 @@ turned out to live, and therefore what is worth doing.
 |---|---|---|---|
 | **1** | Split one global cache TTL into two coherence buckets | ~7 min/day | Low |
 | **2** | Drop the `ccusage statusline` fetch; compose that line from data already on hand | ~25 min/day | Medium |
-| **3** | Incremental rollup replacing ccusage in the hot path | most of the rest | High — deferred, not scheduled |
+| **3** | Incremental rollup replacing ccusage in the hot path | most of the rest | High, deferred, not scheduled |
 
 Phase 1 alone is **not** worth shipping on its own merits (~7 min of ~47). It
 is worth shipping first anyway, because it builds the test harness and the
@@ -34,7 +34,7 @@ thing in the panel anyone actually watches move.
 
 ### 2.1 Method, and one trap to avoid repeating
 
-`ps -o time` reports a process's **own** CPU only — it excludes reaped
+`ps -o time` reports a process's **own** CPU only, it excludes reaped
 children. The panel's work is almost entirely in forked `node`/`python3`/`jq`
 children, so `ps` under-reports it by ~30x: the live panel process shows
 ~0.09 CPU-s over 87s (≈1 min/day) while the true figure is ~49 min/day.
@@ -79,7 +79,7 @@ Caveat on 0.036: measured with stdout redirected, so `stty size` failed and
 `drain_stdin` short-circuited on an unset `ORIG_STTY`. In a real tty pane the
 fast tick is somewhat more expensive. It does not change the ordering.
 
-### 2.4 Per-query cost — the number that decides the plan
+### 2.4 Per-query cost, the number that decides the plan
 
 Each query, run cold, CPU-s (user+sys):
 
@@ -94,21 +94,21 @@ Full-miss slow tick = **4.58 CPU-s**. Observed average is ~2.3, i.e. roughly
 half the queries are served from cache in practice (shared with the second
 panel, or held by the corpus gate).
 
-**`statusline` alone is 46% of a full-miss slow tick** — more than any other
+**`statusline` alone is 46% of a full-miss slow tick**: more than any other
 query, and more than the entire fast tier costs in a day.
 
 ---
 
-## 3. Dead ends — measured, do not retry
+## 3. Dead ends, measured, do not retry
 
 Recorded so the next person doesn't spend the afternoon I spent.
 
 | Idea | Result | Why |
 |---|---|---|
-| `--since` to bound the scan window | 1.02 CPU-s vs 1.02 full — **0%** | Filters after loading. Also moot: 630MB of the 653MB corpus is inside 30 days. |
-| Fold `session` into `--sections` (3 scans → 2) | 1.70 vs 1.74 — **2%** | Output byte-identical (verified with `jq -S`), so it is *correct* — just not faster. The corpus load is shared; per-section aggregation is not, and that is the cost. |
+| `--since` to bound the scan window | 1.02 CPU-s vs 1.02 full, **0%** | Filters after loading. Also moot: 630MB of the 653MB corpus is inside 30 days. |
+| Fold `session` into `--sections` (3 scans → 2) | 1.70 vs 1.74, **2%** | Output byte-identical (verified with `jq -S`), so it is *correct*, just not faster. The corpus load is shared; per-section aggregation is not, and that is the cost. |
 | `--by-agent` to get Claude-only figures from one scan | `byAgent: null` in every row | Non-functional on ccusage 20.0.20, with and without `--sections`. |
-| `ccusage claude ...` for scoping | Same 1.01 CPU-s | No perf change. Has a **correctness** implication — see §9. |
+| `ccusage claude ...` for scoping | Same 1.01 CPU-s | No perf change. Has a **correctness** implication, see §9. |
 
 The lesson that generalises: on this corpus the scan is ~0.7 CPU-s and the
 aggregation is the rest. Anything that shares a load without sharing the
@@ -126,7 +126,7 @@ CCUSAGE_CACHE_TTL=$(( SLOW_REFRESH * 3 / 4 ))   # 90s
 
 and its comment (line 465) is explicit that this is deliberate: the TTL's
 only job is to stop N panels stampeding the same query, while
-`corpus_changed_since()` is the real arbiter — *refetch iff the answer can
+`corpus_changed_since()` is the real arbiter, *refetch iff the answer can
 actually have changed*.
 
 **Per-query TTLs break that principle on purpose,** and it must be stated
@@ -136,7 +136,7 @@ new behaviour for this panel. Everything in §6 exists because of it.
 
 The organising rule is not "how fast does this change" but:
 
-> **Coherence rule — numbers that are compared, summed, or read against each
+> **Coherence rule, numbers that are compared, summed, or read against each
 > other on screen must be computed from the same snapshot.**
 >
 > A TTL boundary is therefore a boundary between groups of figures that never
@@ -154,7 +154,7 @@ The organising rule is not "how fast does this change" but:
 
 **`daily` was moved back to the live bucket during implementation, and the
 reason is worth recording.** The same payload that carries the 7/30-day
-baselines also carries **today's total** — one of the two or three numbers
+baselines also carries **today's total**: one of the two or three numbers
 this panel exists to watch climb. Deferring it 15 minutes would make Today
 *step* rather than move, and only while turns are landing, which is exactly
 when someone is looking at it. The baselines would happily be deferred; they
@@ -166,7 +166,7 @@ Phases 2 and 3 are the levers on it. Phase 1 is not, and its saving is
 correspondingly smaller than this plan first claimed.
 
 That leaves `session` and `daily` in *different* buckets, which the coherence
-rule warns about — and it is safe here **only because of the direction of the
+rule warns about, and it is safe here **only because of the direction of the
 skew**. The sessions side is the stale one, so "Top Sessions Today" lags the
 day total and can never sum to more than it. Reverse the assignment and the
 panel would show a set of sessions adding up to more than the day they belong
@@ -193,14 +193,14 @@ staleness discipline that make Phase 2 safe to attempt.
 ### 4.1 Concurrent sessions
 
 One panel is launched per Claude Code session, so everything above multiplies
-by the session count — except what the shared cache absorbs. Measured, and
+by the session count, except what the shared cache absorbs. Measured, and
 asserted in check M:
 
 | Cost | Shared across sessions? |
 |---|---|
-| `daily`, `session`, `blocks` | **Yes** — one filesystem cache keyed by the query string, with an mkdir lock. Three panels cost one scan. |
-| Hourly buckets (30-day scan) | **Yes** — its own lock, same pattern. |
-| Cost-alert baseline | **Yes** — the hook's key carries no session id. |
+| `daily`, `session`, `blocks` | **Yes**: one filesystem cache keyed by the query string, with an mkdir lock. Three panels cost one scan. |
+| Hourly buckets (30-day scan) | **Yes**: its own lock, same pattern. |
+| Cost-alert baseline | **Yes**: the hook's key carries no session id. |
 | `statusline` | **No.** Its key includes the session id and transcript path, because the answer genuinely is per-session. |
 
 So **each additional concurrent session costs ~25 CPU-min/day on its own**
@@ -221,7 +221,7 @@ Two consequences:
 
 ---
 
-## 5. Phase 1 — per-query TTL buckets
+## 5. Phase 1, per-query TTL buckets
 
 ### 5.1 Changes
 
@@ -256,7 +256,7 @@ Two consequences:
    refresh on a header advertising 120s".
 
 3. **Jitter.** Every cache entry is seeded when the panel starts, so without
-   jitter all history entries expire on the same tick, forever — one lurch
+   jitter all history entries expire on the same tick, forever, one lurch
    and one CPU spike rather than several small ones, synchronised across
    panels. Apply a deterministic per-key offset, not `$RANDOM`, so the value
    is stable across ticks for a given key:
@@ -272,7 +272,7 @@ Two consequences:
    that actually governs that section's data, not from `RATE_SLOW`. Sections
    fed by the history bucket say `15m`; the block section says `2m`. The
    panel has shipped a lying rate label before (header said 5s while figures
-   moved every 10) and the fix was to derive the label from the variable —
+   moved every 10) and the fix was to derive the label from the variable,
    the same fix applies here, per bucket.
 
 ### 5.2 Explicitly out of scope for Phase 1
@@ -282,7 +282,7 @@ Two consequences:
   three are cache **hits**, but each still re-reads and re-parses a 131KB
   payload. Memoising it in a shell variable for the duration of one tick is
   worth ~0.1 CPU-s/tick and is a clean, separate change. Do it after the
-  harness exists. **Done — see §10.2**, which also corrects the estimate
+  harness exists. **Done, see §10.2**, which also corrects the estimate
   (~0.03 CPU-s/tick measured, not ~0.1) and the mechanism: a memo variable
   could not have worked at all.
 
@@ -293,7 +293,7 @@ Two consequences:
 This is the part that turns a saving into a bug, and it is the reason Phase 1
 ships with tests rather than after them.
 
-### 6.1 Drift — the panel contradicting itself within one frame
+### 6.1 Drift, the panel contradicting itself within one frame
 
 With two buckets, a frame is assembled from two snapshots up to 15 minutes
 apart. Concrete incoherences, in the order a user would notice them:
@@ -301,14 +301,14 @@ apart. Concrete incoherences, in the order a user would notice them:
 | Symptom | Mechanism | Handling |
 |---|---|---|
 | "This Session" shows $5.49 but "Today" shows less | Session table is fast-tier (10s); Today is history (15m) | **Accept, and label.** Today's tag says `15m`; the session line says `10s`. Honest, and the sum only misleads if both claim to be current. |
-| Top 5 sessions sum > Today total | Would need `session` and `daily` in different buckets | **Prevent.** Coherence rule — they share a bucket. Tested (check C). |
-| Block value > Today value | Block is live (90s), Today is history (15m) | **Prevent by ordering:** clamp the displayed Today to `max(today, block)` — never render an impossible pair. Log, don't silently clamp, if the clamp fires more than once an hour: that means a bucket is mis-assigned. |
+| Top 5 sessions sum > Today total | Would need `session` and `daily` in different buckets | **Prevent.** Coherence rule, they share a bucket. Tested (check C). |
+| Block value > Today value | Block is live (90s), Today is history (15m) | **Prevent by ordering:** clamp the displayed Today to `max(today, block)`: never render an impossible pair. Log, don't silently clamp, if the clamp fires more than once an hour: that means a bucket is mis-assigned. |
 | Burn rate normal, session cost red | Alert tiers compare a live session cost to a stale 7-day baseline | See §6.3 |
 
 The rule for anything not in that table: **if two numbers on screen can be
 subtracted or summed by eye, they belong in one bucket.**
 
-### 6.2 Flush — the step change when a long TTL lapses
+### 6.2 Flush, the step change when a long TTL lapses
 
 A 15-minute bucket does not drift gently. It sits still for 15 minutes and
 then jumps by 15 minutes' worth of accumulated spend in a single frame.
@@ -317,7 +317,7 @@ Consequences and handling:
 
 - **Step change reads as a glitch.** Acceptable given an honest `15m` label;
   a user who sees "15m" expects a 15-minute step. Do not smooth or
-  interpolate — a fabricated intermediate value is worse than a visible step.
+  interpolate, a fabricated intermediate value is worse than a visible step.
 - **Δ columns must never straddle a flush.** Any "change since last refresh"
   figure computed across a flush reports 15 minutes of change as if it were
   one tick's worth. Audit every Δ on screen; the per-turn table's Δ is
@@ -330,7 +330,7 @@ Consequences and handling:
   CPU-s. That is correct and should stay: a fresh panel showing 15-minute-old
   numbers on its first frame would be the worse bug.
 
-### 6.3 Rebaseline — derived baselines shifting under the figures they colour
+### 6.3 Rebaseline, derived baselines shifting under the figures they colour
 
 The panel's traffic lights are computed against baselines that themselves
 come out of cache: 7-day average session cost, previous-7-day average, 30-day
@@ -349,12 +349,12 @@ Three distinct hazards:
 2. **The cost-alert hook fires on a stale denominator.** `claude-cost-alert-check.sh`
    posts into the chat at 2x and 3x the 7-day average session cost. It reads
    the same shared cache. A stale-low baseline makes the tiers fire early; a
-   stale-high one makes them fire late — and the hook throttles per session,
+   stale-high one makes them fire late, and the hook throttles per session,
    so an early fire *consumes* the tier and the real crossing is never
    reported. **This is the one place where staleness causes a wrong action
    rather than a stale display.**
    *Handling:* the hook must read the baseline with `TTL_LIVE`, not
-   `TTL_HISTORY` — it runs once per prompt, not 720 times a day, so its share
+   `TTL_HISTORY`: it runs once per prompt, not 720 times a day, so its share
    of the cost is negligible and correctness wins outright. Tested (check H).
 
 3. **Clock-dependent slicing is not corpus-dependent.** `ccusage_query_is_gated()`
@@ -364,13 +364,13 @@ Three distinct hazards:
    with `$(date +%Y-%m-%d)` evaluated *at render time*, and the 7/30-day
    windows are recomputed from the clock on every tick.
 
-   Today this is correct — and correct by construction, not by accident: the
+   Today this is correct, and correct by construction, not by accident: the
    payload is cached, the slice is not. At midnight, with no activity, "Today"
    re-slices to the new date and correctly reads $0 rather than carrying
    yesterday's total forward.
 
    **It is also completely unguarded.** Any future optimisation that caches a
-   *sliced* result — an obvious next step for someone chasing the same CPU —
+   *sliced* result, an obvious next step for someone chasing the same CPU,
    silently breaks it, and the failure mode is a panel that shows yesterday's
    money as today's until someone happens to type. Longer TTLs widen that
    window from 90s to 15 minutes.
@@ -382,7 +382,7 @@ Three distinct hazards:
 ### 6.4 Block-boundary expiry
 
 `blocks --active` returns the current 5-hour billing block. When a block ends
-and no new turn has landed, the corpus has not changed — so the gate holds the
+and no new turn has landed, the corpus has not changed, so the gate holds the
 cached entry and the panel keeps rendering a countdown for a block that is
 over, at "0m left", indefinitely.
 
@@ -393,7 +393,7 @@ corpus gate. Tested (check E).
 
 ---
 
-## 7. Phase 2 — delete the `statusline` fetch
+## 7. Phase 2, delete the `statusline` fetch
 
 ### 7.1 Why it is available
 
@@ -402,10 +402,10 @@ holds, or can cheaply derive, every one:
 
 | Field | Where it already exists |
 |---|---|
-| Model name | `resolve_session()` — already parsed from the transcript |
+| Model name | `resolve_session()`: already parsed from the transcript |
 | Session $ | The per-turn table prices every turn of this session (fast tier, 0.036 CPU-s) |
-| Today $ | `recent_sections` — already fetched |
-| Block $ + time left | `blocks --active` + `block_clock_tick()` — already fetched, already computed locally |
+| Today $ | `recent_sections`: already fetched |
+| Block $ + time left | `blocks --active` + `block_clock_tick()`: already fetched, already computed locally |
 | Burn rate $/hr | Derived from the block, as `block_clock_tick()` already does |
 | Context % | Context tokens are already in the turn table; only the **window size** denominator is missing |
 
@@ -413,7 +413,7 @@ So Phase 2 is mostly a composition change, not new computation. The only new
 data is a model → context-window table, alongside the `PRICES` table the panel
 already carries and maintains for exactly the same reason.
 
-### 7.2 What it actually took — done 2026-09-05
+### 7.2 What it actually took, done 2026-09-05
 
 Smaller than this section expected, because two of the three fields were
 already in hand:
@@ -422,7 +422,7 @@ already in hand:
   transcript and *passed it into* the statusline payload, then read it back
   out of the rendered string it came home in.
 - **Session cost and context tokens** were both already computed by the
-  turn-table parser as a by-product of pricing each turn — they simply were
+  turn-table parser as a by-product of pricing each turn, they simply were
   not emitted. The parser now prints a `#META` line the shell strips before
   the table reaches the screen, and `session_stats_refresh()` splits it into
   `SESS_COST` / `SESS_CTX` / `SESS_WIN` on every fast tick, before either
@@ -432,7 +432,7 @@ already in hand:
   existed in the bash panel *and* in the python parser, "kept in sync
   manually", both computing a denominator for the same displayed percentage.
   The window now travels in the metadata line from the newest turn's own
-  model, and the bash copy is deleted. One rule, one copy — and it is the
+  model, and the bash copy is deleted. One rule, one copy, and it is the
   model that actually served that context, not whatever `resolve_session`
   last saw, which differ across a mid-session model switch.
 
@@ -441,8 +441,8 @@ lines). Dead code that still looks live is a hazard: the next person needing
 a stdin query would find a tested-looking path that had not run in months.
 
 **The unknown-model rule was open here, and closed in §9.2.** This section
-originally called for `Context —` on an unmapped model but left
-`context_window_size()` defaulting to 1M for anything it did not recognise —
+originally called for `Context,` on an unmapped model but left
+`context_window_size()` defaulting to 1M for anything it did not recognise,
 turning it into an allowlist meant asserting context windows for models this
 plan could not verify at the time. §9.2 verified the full table against the
 `claude-api` skill and closed it: the function is now an allowlist keyed on
@@ -453,7 +453,7 @@ a stale table silently).
 
 ### 7.3 Verification
 
-Check J asserts the arithmetic exactly rather than within a tolerance — the
+Check J asserts the arithmetic exactly rather than within a tolerance, the
 fixture's token counts and Anthropic's published rates are both exact:
 
 ```
@@ -464,7 +464,7 @@ m2 = (200*5 + 100*25 + 2000*5*0.1 + 400*5*1.25) / 1e6 = 0.007000
 
 plus: the context figure is the newest turn's occupancy, the window comes
 from the same parse, neither costs a ccusage query, and `#META` never reaches
-the screen. It also covers the upgrade path — a cache entry written before
+the screen. It also covers the upgrade path, a cache entry written before
 the metadata line existed stays valid (it is keyed on the transcript's
 mtime+size) and stays served, so the figures must come back **empty** and the
 summary print `--`, rather than being parsed out of a table row and rendered
@@ -475,7 +475,7 @@ as money.
 ## 8. Test plan
 
 There is **no test infrastructure in this repo today**. Phase 1 creates it.
-This is a deliberate cost: the changes in §5–§7 trade correctness for CPU in
+This is a deliberate cost: the changes in §5-§7 trade correctness for CPU in
 ways that fail silently, which is precisely the class of bug this codebase has
 been bitten by repeatedly.
 
@@ -485,11 +485,11 @@ Both are prerequisites, and both are independently worth having:
 
 1. **`panel_now()` / `panel_date()`** wrapping every `date` call used for
    windowing, honouring `PANEL_FAKE_NOW` when set. Without this, day- and
-   block-boundary behaviour cannot be tested at all — it can only be waited
+   block-boundary behaviour cannot be tested at all, it can only be waited
    for.
 2. **`$HOME` already works as the corpus seam** (`$HOME/.claude/projects`,
    `$HOME/.cache/...`), so tests point `HOME` at a fixture tree. No change
-   needed — but document it, because it is load-bearing.
+   needed, but document it, because it is load-bearing.
 
 ### 8.2 Harness
 
@@ -501,7 +501,7 @@ Both are prerequisites, and both are independently worth having:
   must be visible, not reassuring.
 - A **stub `ccusage`** placed first on `PATH`, returning fixture JSON and
   appending one line per invocation to a counter file. Invocation counts are
-  the primary assertion for everything in §5 — they are exact, fast, and
+  the primary assertion for everything in §5, they are exact, fast, and
   hermetic, where CPU seconds are none of those.
 - A **fixture corpus** of synthetic JSONL with known token counts, so expected
   costs are exact numbers rather than tolerances.
@@ -516,9 +516,9 @@ Both are prerequisites, and both are independently worth having:
 | **D** | Clock-slice invariant (§6.3) | `PANEL_FAKE_NOW` = 23:59:50 → tick → 00:00:10 → tick, with **no corpus change**. Today must read 0.00, not yesterday's total. 7d/30d windows must shift by one day. **The highest-value check here.** |
 | **E** | Block expiry (§6.4) | Fake now past `endTime`, corpus unchanged → panel must not render an active block. |
 | **F** | No Δ straddles a flush | Every rendered Δ is fast-tier/transcript-derived. Enumerate Δ call sites; fail on any reading a history-bucket value. |
-| **G** | Flush convoy | Over 1000 simulated ticks, assert no tick flushes more than one history key — i.e. jitter works and is deterministic. |
+| **G** | Flush convoy | Over 1000 simulated ticks, assert no tick flushes more than one history key, i.e. jitter works and is deterministic. |
 | **H** | Alert baseline freshness (§6.3.2) | `claude-cost-alert-check.sh` reads the 7d baseline at `TTL_LIVE`. Simulate a session crossing 2x with a 14-minute-stale baseline: the alert must still fire at the true crossing. |
-| **I** | Unknown model (§7.2) | Transcript with an unmapped model id → output contains `Context —` and **no** `%` on that line. |
+| **I** | Unknown model (§7.2) | Transcript with an unmapped model id → output contains `Context,` and **no** `%` on that line. |
 | **J** | Phase 2 parity | Locally composed statusline fields vs `ccusage statusline`, over the fixture corpus: every field within 1%. Blocks the deletion in §7.3. |
 | **K** | Label honesty (§5.1.4) | For each section, the rendered `rate_tag` equals the TTL governing that section's data. Guards the panel's oldest recurring bug. |
 | **L** | Invocation budget | A 30-tick run makes ≤ N ccusage invocations. A cheap, deterministic stand-in for a CPU regression test. |
@@ -532,7 +532,7 @@ in this file.
 
 ---
 
-## 9. Scoping to Claude Code — done 2026-09-05
+## 9. Scoping to Claude Code, done 2026-09-05
 
 `ccusage daily` means *every detected agent CLI*. Measured simultaneously,
 with the unscoped run repeated either side of the scoped one and giving the
@@ -546,7 +546,7 @@ A real **$14.16** being reported by a panel titled "Claude Code Usage".
 `ccusage claude` rejects `--sections`, so the one combined load becomes three.
 That is affordable only because of where each lands: `daily` carries Today and
 stays in the live bucket at the same ~1.01 CPU-s the combined call cost, while
-`weekly` (0.73) and `monthly` (0.72) move to the history bucket — 96 fetches a
+`weekly` (0.73) and `monthly` (0.72) move to the history bucket, 96 fetches a
 day instead of 720, about **+2.3 CPU-min/day** for the correctness.
 
 ### 9.1 The trap in it, and why the suite did not catch it
@@ -563,25 +563,25 @@ day instead of 720, about **+2.3 CPU-min/day** for the correctness.
 | `.session[].metadata.lastActivity` | `.sessions[].lastActivity` |
 
 Nothing errors on any of that. `select(.period == $t)` matches no row, and
-**Today, Folder and 30-Day Value each render a confident $0.00** — which is
+**Today, Folder and 30-Day Value each render a confident $0.00**: which is
 exactly what the panel did, while all fourteen checks reported green.
 
 They reported green because every fixture had been written in the *old*
 shape. **A fixture that does not match what the real tool emits is not a
 test; it is a second copy of the bug.** All fixtures are now the real shapes,
-verified against live output, and check Q covers the adapter directly —
+verified against live output, and check Q covers the adapter directly,
 removing the rename now fails C, D and Q.
 
 It was the **live smoke test** that caught this, not the suite. That is why
 the smoke run is a numbered step in the rollout below rather than a nicety.
 
-## 9.2 Model table — verified, and two models were missing
+## 9.2 Model table, verified, and two models were missing
 
 Checked against the `claude-api` skill's model table (cached 2026-06-24). All
 nine existing prices were correct. Two current models were **absent**:
 `claude-fable-5-1` and `claude-mythos-5-1`, both $10/$50.
 
-A turn served by either was priced at `DEFAULT_PRICE` ($3/$15) — **under-reported
+A turn served by either was priced at `DEFAULT_PRICE` ($3/$15), **under-reported
 3.3x**, and indistinguishable from any other row. Both added.
 
 The same table confirms every context window: 1M for everything except Haiku
@@ -591,7 +591,7 @@ than guesses:
 - `context_window_size()` is now an allowlist keyed on `PRICES`. An id it does
   not know returns **0**, and the panel renders `Context Usage: N/A` rather
   than dividing by a window nobody knows. (It also returned 1M for anything
-  unrecognised *before* Phase 2 — this was a pre-existing gap, not a new one.)
+  unrecognised *before* Phase 2, this was a pre-existing gap, not a new one.)
 - An unpriced model is still charged at `DEFAULT_PRICE`, because excluding it
   would silently understate the session total, which is worse. But the table
   now prints `* estimated at default rates, model not in price table: <id>`
@@ -604,14 +604,14 @@ than guesses:
 
 - **A crashed parser served a stale turn table forever.** `{ ... } > tmp && mv`
   skipped the `mv` on failure, then `tail` ran unconditionally on the previous
-  file — so a parse that died showed a correct-looking, arbitrarily old table
+  file, so a parse that died showed a correct-looking, arbitrarily old table
   with nothing to indicate either. It now prints `turn table unavailable:
   transcript parse failed` and leaves the cache untouched. Same failure shape
   as every gate in this project that reported OK while measuring the wrong
   thing.
 - **Row colouring divided by the context window without checking it.**
   Returning 0 for an unrecognised model turned that into a hard crash on the
-  first such turn — found by check I, before it could ship.
+  first such turn, found by check I, before it could ship.
 
 ## 9.4 Frame elision
 
@@ -622,7 +622,7 @@ identical to the one already on screen and wrote it anyway.
 
 The frame is now compared before it is written. The saving is mostly **not**
 the panel's: every write is a repaint in the terminal emulator, charged to
-Ghostty, **once per open panel** — so it is the part of the fast tier that
+Ghostty, **once per open panel**: so it is the part of the fast tier that
 scales with the number of concurrent sessions. No separate periodic repaint is
 needed: a slow tick rebuilds the header with a new clock string, so the frame
 differs at least once every `SLOW_REFRESH` and the pane cannot sit stale after
@@ -630,7 +630,7 @@ an external scribble.
 
 ## 10. Rollout
 
-1. **Seams + harness + checks A, B, D, E, K** — no behaviour change. D and E
+1. **Seams + harness + checks A, B, D, E, K**: no behaviour change. D and E
    should fail on the current code (E is a live bug); fix E, confirm D passes.
 
    **Done 2026-09-05.** `panel_now()`/`panel_date()` route all 47 wall-clock
@@ -638,7 +638,7 @@ an external scribble.
    without entering the render loop. `tests/run-tests.sh` runs 5 checks / 29
    assertions against the installed panel (`PANEL_SH=` to point elsewhere).
    The block-expiry bug (§6.4) is fixed in `block_clock_tick()`, and check E
-   was verified to fail against the same panel with only that fix removed —
+   was verified to fail against the same panel with only that fix removed,
    rendering `Current Block: $4.50 (0h 00m left)`, the symptom itself. D
    passes: crossing local midnight with an unchanged corpus re-slices Today
    to 0.00 and refetches nothing.
@@ -653,7 +653,7 @@ an external scribble.
    `panel_tick_slow()` (drive the loop's real order) and the positive
    control in E.
 2. **Phase 1**, with checks C, G, H, L. **Done.**
-3. **Phase 2** (§7). **Done** — check J asserts the arithmetic exactly rather
+3. **Phase 2** (§7). **Done**: check J asserts the arithmetic exactly rather
    than needing a day of parity logging.
 4. **`ccusage claude` scoping** (§9). **Done**, and it moved ahead of the
    re-measurement because Phase 2 had already paid for it.
@@ -662,7 +662,7 @@ an external scribble.
    green. Every step above ends with
    `timeout 30 bash ~/.local/bin/ccusage-panel.sh 10 12 <sid>` from the
    project directory, and with looking at what it prints.
-6. **Measure.** `/usr/bin/time -l` (never `ps` — see §2.1), same corpus, cold
+6. **Measure.** `/usr/bin/time -l` (never `ps`: see §2.1), same corpus, cold
    cache, **nothing else running**: a live panel sharing the cache directory
    silently serves the run under measurement and the numbers become
    meaningless. Record below.
@@ -678,7 +678,7 @@ an external scribble.
 | final | 10.68 user + 6.34 sys = **17.02 s** | 10 |
 | | **−30%** | **−37%** |
 
-Read that as a floor, not a ceiling, for three reasons — all of which push the
+Read that as a floor, not a ceiling, for three reasons, all of which push the
 steady-state saving higher than the window shows:
 
 - **420s is 3.5 slow ticks**, and both sides pay a full cold-cache fetch of
@@ -690,7 +690,7 @@ steady-state saving higher than the window shows:
   the worst case for the corpus gate and the case the original report came
   from.
 
-Three of the "final" run's ten scans are bare, unscoped `session` calls — the
+Three of the "final" run's ten scans are bare, unscoped `session` calls, the
 cost-alert hook, which was still unscoped when this ran and has since been
 scoped too (§9.5). The panel's own share is 7.
 
@@ -705,27 +705,27 @@ only one that deletes anything, and it is gated on a day of parity evidence.
 Found in the measurement's own scan log: three bare `session` calls the panel
 does not make. `claude-cost-alert-check.sh` computed its 7-day average from
 **all-agent** session data, so the 2x/3x thresholds it posts into the chat
-were measured against a denominator diluted by every other agent CLI — and
+were measured against a denominator diluted by every other agent CLI, and
 because it throttles per session and per tier, firing at the wrong time
 consumes the tier and the real crossing is never reported.
 
 Now scoped, with the same `.sessions` → `.session` adapter the panel uses.
 Baseline before and after the change: $12.09, against the $12.07 the hook
-itself last reported — unchanged in practice here, but no longer by luck.
+itself last reported, unchanged in practice here, but no longer by luck.
 
 ## 10.1 Errors reach the screen
 
 Every figure in this panel is a number, and a number that failed to compute is
 indistinguishable from one that computed to zero. Nearly every call ends in
-`2>/dev/null` — correctly, since a chatty stderr would shred a 1/3-width pane
-— so a dead query, an unparseable payload, and a builder that died on an
+`2>/dev/null`: correctly, since a chatty stderr would shred a 1/3-width pane,
+so a dead query, an unparseable payload, and a builder that died on an
 unbound variable all rendered as `$0.00` and nothing else.
 
 There is now one channel for that. A **file**, not a variable, because the
 section builders run inside `$(...)` and a global set in there cannot be read
 back out. `ccusage_cached` records any non-zero exit **or empty output** (an
 empty payload parses to nothing while looking like a quiet day) and keeps
-serving the last good answer rather than replacing it with the failure — but
+serving the last good answer rather than replacing it with the failure, but
 the failure is on screen next to it. The three builders have their stderr
 redirected into the same file, which is the general catch: it does not need to
 know what broke to report that something did.
@@ -745,11 +745,11 @@ renders:
   ! and 2 more failure(s)
 ```
 
-— and, because Phase 2 moved this session's own figures out of ccusage, it
+And, because Phase 2 moved this session's own figures out of ccusage, it
 still shows Session, Burn, Context Usage and the full per-turn table with the
 tool completely dead.
 
-## 10.2 The four `all_sessions` calls — done 2026-09-05
+## 10.2 The four `all_sessions` calls, done 2026-09-05
 
 §5.2 deferred this until the harness existed. It does, so it is done.
 
@@ -758,20 +758,20 @@ one report: the 7-day baseline, the previous 7 days it is compared against,
 and this project's share. Each fetched the report for itself. The fourth is
 in `build_trailing` and is the only one there, so it stays as it is.
 
-The fix is a call-site refactor — `all_sess=$(all_sessions)` once at the top
-of `build_summary` — and **not** a memo inside `all_sessions`, which is what
+The fix is a call-site refactor, `all_sess=$(all_sessions)` once at the top
+of `build_summary`: and **not** a memo inside `all_sessions`, which is what
 was tried first and is worth recording because it looked obviously right:
 
 > Every call site is `$(all_sessions)`, its own subshell. A memo variable set
 > inside one cannot be read back out, so the memo would have been invisible
-> and saved exactly nothing — while reading, in the diff, like a fix. The
+> and saved exactly nothing, while reading, in the diff, like a fix. The
 > panel already documents this trap in `PANEL_ERR_FILE`'s own comment ("A
 > FILE rather than a variable, because the section builders run inside
 > `$(...)`"), one screen above the code that repeated it.
 
 **What it is worth.** Not enough to see end to end, and saying so is the
 point. Per redundant call, measured on the real 150KB payload: 0.0097 CPU-s
-for the `cat`+`jq` re-parse, against 0.001 for a `cat` alone — so ~0.03
+for the `cat`+`jq` re-parse, against 0.001 for a `cat` alone, so ~0.03
 CPU-s of a slow tick, plus one `corpus_changed_since` walk per call on a tick
 where the TTL has lapsed. Against the 17.02 CPU-s the §10 measurement took
 over 420s that is ~0.6%, which is **below what that method can resolve**. A
@@ -783,7 +783,7 @@ became one, and fails against the pre-change panel with `expected 1, actual 3`.
 The better reason is coherence anyway. The three calls were three separate
 command substitutions, so a TTL lapsing between two of them handed one frame
 two different payloads and the trend arrow could be coloured against a
-baseline the figure beside it was not computed from — §6.1's drift, arriving
+baseline the figure beside it was not computed from, §6.1's drift, arriving
 through the cache rather than through a bucket.
 
 ### The check had to be rebuilt twice before it measured anything
@@ -794,7 +794,7 @@ Both failures produced a green check, which is this file's recurring theme:
   testing, one layer up: it reported "1 call" whatever the panel did.
 - **`build_summary` died a third of the way through.** `cols`/`rows`/`COLS`
   are set by the render loop, not by `resolve_session`, so under `set -u` the
-  function aborts at the Context Usage line — *before* the third call site,
+  function aborts at the Context Usage line, *before* the third call site,
   having already emitted a plausible eight-line frame. The count was over two
   of three sections while reading as all three. The check now asserts the
   `Folder:` line, which is the section the third call feeds and therefore the
@@ -802,7 +802,7 @@ Both failures produced a green check, which is this file's recurring theme:
 
 ## 10.3 Two panels fought over one temp filename
 
-Found by §10's step 5 — run the panel and read it — and findable no other
+Found by §10's step 5, run the panel and read it, and findable no other
 way, because it needs two panels and the suite had always run one.
 
 Every cache write here is `> "$f.tmp" && mv "$f.tmp" "$f"`, which is atomic
@@ -811,7 +811,7 @@ are keyed by session with no lock around them. Two panels on the same session
 both wrote `<file>.tmp`; whichever renamed first won; the loser's `mv` failed
 on a path that no longer existed.
 
-Not silent, either — the builders' stderr goes to `PANEL_ERR_FILE`, so §10.1
+Not silent, either, the builders' stderr goes to `PANEL_ERR_FILE`, so §10.1
 faithfully rendered it onto the panel:
 
 ```
@@ -831,7 +831,7 @@ pruned and this one was left alone as out of scope. It is in scope now.
 
 `turns-<key>.out`, `sessid-<key>.tsv` and `todaytok-<key>.tsv` are keyed by
 SESSION, not by query, so unlike the `<key>.json` query cache they never
-converge on a fixed set of files — one entry per session ever shown, kept
+converge on a fixed set of files, one entry per session ever shown, kept
 forever, against 203 transcripts already in `~/.claude/projects` here.
 `errors-<pid>.log` is the same shape with a faster clock: one per panel
 process. `restore_tty` removes it on a clean exit, but that trap is only
@@ -844,7 +844,7 @@ that fast.
 
 Two things it deliberately does **not** touch, both asserted by check T:
 
-- **The `<key>.json` query cache.** Age on disk is not staleness there — an
+- **The `<key>.json` query cache.** Age on disk is not staleness there, an
   old entry is a *correct* entry when the corpus has not moved, which is the
   entire point of the gate. A prune that swept it would be invisible, every
   figure still right, while silently forcing a full ccusage refetch of every
@@ -854,7 +854,7 @@ Two things it deliberately does **not** touch, both asserted by check T:
   else, so the check asserts the file exists afterwards.
 
 Since a cache entry is only rewritten on a MISS, being *served* does not keep
-an entry's mtime fresh — so 7 days here means "no session whose transcript
+an entry's mtime fresh, so 7 days here means "no session whose transcript
 has moved in a week", and deleting one costs exactly one refetch if that
 session is ever shown again.
 
@@ -866,27 +866,27 @@ seven turns of **Opus 5** with real costs. One frame contradicting itself.
 
 Both halves were behaving as written. Session identity is resolved by
 `resolve_session` on every **fast** tick, but it is *rendered* by the header,
-which is **slow tier** — so an identity learned at 10s did not reach the
+which is **slow tier**: so an identity learned at 10s did not reach the
 screen until the next 120s frame. The turn table is fast tier, so it was
 right immediately.
 
 Every new pane starts in exactly that state, which is why this was not an
 edge case but the common one: the panel launches with the session's first
 line already on disk and no ASSISTANT line yet, so the identity scan
-correctly reports "unknown" — and that answer then sits on screen for up to
+correctly reports "unknown", and that answer then sits on screen for up to
 two minutes after it stopped being true.
 
 The scan was never the problem. Run by hand against the reported session it
 returned `claude-opus-5 / Opus 5 / <project>` in one pass; the fix is
 in *when the header is redrawn*, not in what it computes. Identity is not on
-a cadence at all — it changes when it changes, and noticing costs nothing
+a cadence at all, it changes when it changes, and noticing costs nothing
 because `resolve_session` has already run. So the frame is now due on the
 change itself, which also fixes a mid-session model switch lagging by the
 same two minutes.
 
 ### The seam is the point
 
-The decision moved out of the loop into `slow_frame_due()`. Not tidiness —
+The decision moved out of the loop into `slow_frame_due()`. Not tidiness,
 the first version of check V asserted `build_summary`'s **output** and
 **passed against the unfixed panel**, because `build_summary` always renders
 the current identity; the bug was that the loop never called it. The only
@@ -898,7 +898,7 @@ requires running new checks against the pre-change script.
 A decision that cannot be called from a test gets asserted by grepping for
 it. So it is a function now, and check V calls it: not due when nothing
 changed, due the instant the label changes on an unmoved clock, and **not
-due again once shown** — that last one because an identity that stayed a
+due again once shown**, that last one because an identity that stayed a
 reason to redraw would make every tick a slow tick and quietly delete the
 slow tier.
 
@@ -906,10 +906,10 @@ slow tier.
 actually rendered, next to `last_slow`/`last_cols`, so a tick that decides
 "due" and then does not render cannot mark the identity as already shown.
 
-## 11. Phase 3 — incremental rollup (deferred, not scheduled)
+## 11. Phase 3, incremental rollup (deferred, not scheduled)
 
 The honest answer to "surely not much data changes": in a 10-minute window,
-**0.9MB across 1 file changed out of 653MB**. Per 120s tick that is ~0.03% —
+**0.9MB across 1 file changed out of 653MB**. Per 120s tick that is ~0.03%,
 ccusage re-reads roughly **3000x more data than has changed**, every time.
 
 A rollup keyed on (file, byte offset) with running totals would make the slow
@@ -919,23 +919,23 @@ already owns a per-model `PRICES` table and a python corpus parser
 
 It stays deferred because it means reimplementing ccusage's deduplication and
 pricing semantics, and getting those subtly wrong produces **plausible wrong
-money figures** — the failure class this codebase keeps paying for. If it is
+money figures**, the failure class this codebase keeps paying for. If it is
 ever done: keep ccusage as a periodic cross-check and fail loudly on
 divergence, rather than replacing it outright.
 
 Revisit only if the post-Phase-2 measurement (step 4) justifies it.
 
-## 12. The OpenCode panel — done separately
+## 12. The OpenCode panel, done separately
 
 `opencode-panel-setup.sh` / `opencode-panel.sh` were out of scope for this
-plan — different backing CLI (`opencode stats`/`export`, not `ccusage`),
+plan, different backing CLI (`opencode stats`/`export`, not `ccusage`),
 different storage (SQLite, not JSONL). Given its own pass, 2026-09-05: see
 [`OPENCODE-TIER-PLAN.md`](OPENCODE-TIER-PLAN.md).
 
-It turned out to have no caching at all — worse than this file's bug, not
+It turned out to have no caching at all, worse than this file's bug, not
 the same one: **28.44 → 8.57 CPU-s over a 60s window (−70%), 60 → 9
-`opencode` invocations.** Same two ideas applied — a shared on-disk cache
+`opencode` invocations.** Same two ideas applied, a shared on-disk cache
 and a corpus-change gate, the gate checked against the SQLite database's
-own mtime instead of a JSONL tree's — plus a session-keyed cache for
+own mtime instead of a JSONL tree's, plus a session-keyed cache for
 `export`, tighter than either a TTL or the whole-database gate: it refetches
 only when *that* session's own `updated` timestamp moves.

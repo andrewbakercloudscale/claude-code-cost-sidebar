@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploy the panel installer to this machine.
 #
-# There's no remote server here — the installer already writes straight to
+# There's no remote server here, the installer already writes straight to
 # ~/.local/bin, ~/.zshrc, ~/.config/ghostty/config, and ~/.claude/settings.json,
 # so "deploy" means "run the installer again to pick up the latest script
 # changes." It's idempotent (see README's "Idempotent" note), so re-running

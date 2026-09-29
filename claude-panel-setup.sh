@@ -44,9 +44,9 @@
 #                                           above into SessionStart and
 #                                           UserPromptSubmit
 #
-# Requirements: macOS + Ghostty (for the auto-split part — the panel script
+# Requirements: macOS + Ghostty (for the auto-split part, the panel script
 # itself works in any terminal), Node.js (for `ccusage`), jq, clang (Xcode
-# Command Line Tools, for the keyboard-guard helper — optional, skipped with
+# Command Line Tools, for the keyboard-guard helper, optional, skipped with
 # a warning if missing), and Accessibility permission granted to
 # Ghostty/Terminal for the System Events automation, PLUS Accessibility +
 # Input Monitoring granted to claude-panel-keyblock for the keyboard guard
@@ -77,12 +77,12 @@ echo "Installing ccusage-panel.sh ..."
 # atomic, so every panel sees either the old file or the new one.
 cat > "$BIN_DIR/.ccusage-panel.sh.new" <<'PANEL_EOF'
 #!/usr/bin/env bash
-# Live Claude Code usage panel — everything ccusage knows: context %, live
+# Live Claude Code usage panel, everything ccusage knows: context %, live
 # block burn rate + projection, today's breakdown, 3-day trend, week/month
 # totals, top sessions today, PLUS a per-turn breakdown of the current
 # session (turn/model/context size/context growth/cache hit %/est. cost).
 # Run this in a Ghostty split (super+d) to keep it visible while you work.
-# Auto-launched by the ccusage split-panel autolaunch hook in ~/.zshrc — see
+# Auto-launched by the ccusage split-panel autolaunch hook in ~/.zshrc, see
 # ~/.local/bin/claude-panel-launch.sh.
 set -uo pipefail
 export LC_ALL=C LC_NUMERIC=C
@@ -90,20 +90,20 @@ export LC_ALL=C LC_NUMERIC=C
 # ---- two refresh tiers ----
 # $REFRESH is the FAST tick: the "This Session" per-turn table only. That
 # table is the one thing that has to track the conversation as it happens,
-# and it is also the cheapest thing here — it reads one transcript file and
+# and it is also the cheapest thing here, it reads one transcript file and
 # is cached on that file's own mtime+size (turn_table_cached), so an idle
 # pane re-renders it for free and a pane mid-turn pays exactly one parse per
 # turn that lands.
 #
 # $SLOW_REFRESH is everything else: the summary block, Recent, and Top
 # Sessions Today. Each of those is built from `ccusage` reports, and EVERY
-# ccusage invocation reparses the whole (hundreds-of-MB) transcript corpus —
+# ccusage invocation reparses the whole (hundreds-of-MB) transcript corpus,
 # ~3 CPU-seconds a scan. At the old single 10s tier that was ~4 full corpus
 # scans every 10 seconds on a pane being actively typed into, because the
 # corpus-change gate below (correctly) sees the corpus changing on every
-# turn and refetches. That is the CPU heat; none of those figures — a 7/30
+# turn and refetches. That is the CPU heat; none of those figures, a 7/30
 # day baseline, today's total, a 5h block average, the day's session
-# ranking — moves meaningfully inside two minutes.
+# ranking, moves meaningfully inside two minutes.
 #
 # Both rates are printed on the section headers they govern, so what the
 # panel claims about itself stays true. (The label lying about the rate is
@@ -112,7 +112,7 @@ export LC_ALL=C LC_NUMERIC=C
 REFRESH="${1:-10}"
 TURN_ROWS="${2:-12}"
 SLOW_REFRESH="${SLOW_REFRESH:-120}"
-# "10s", "2m", "1m30s" — used to label each section with its own rate.
+# "10s", "2m", "1m30s", used to label each section with its own rate.
 fmt_interval() {
   local s="${1:-0}"
   if (( s < 60 )); then printf '%ds' "$s"
@@ -131,7 +131,7 @@ RATE_SLOW="$(fmt_interval "$SLOW_REFRESH")"
 # so anything placed after it would lose the heading's own colour.
 rate_tag() { printf '%s(refresh %s)%s' "$C_ELECTRIC" "$1" "$C_RESET"; }
 # Set by the autolaunch hook (~/.zshrc) for a bare `claude` invocation,
-# which it forces to run with a known --session-id — lets this panel open
+# which it forces to run with a known --session-id, lets this panel open
 # that EXACT transcript instead of guessing "most recently modified file in
 # this project directory", which still can't tell two concurrent sessions
 # in the same directory apart. Empty for anything else (manual runs,
@@ -147,7 +147,7 @@ PIN_SOURCE=""
 # How long an ARGV pin gets to name a transcript that exists before
 # resolve_session throws it away and falls back. Long enough to cover a slow
 # cold start and a trust prompt; short enough that a corrupted pin does not
-# cost the whole session. Only argv pins are subject to it — a handoff-file
+# cost the whole session. Only argv pins are subject to it, a handoff-file
 # pin cannot be corrupted in transit, so there is nothing to time out. See
 # resolve_session for the corruption this exists to survive.
 PIN_GRACE_SECS="${PANEL_PIN_GRACE:-90}"
@@ -155,7 +155,7 @@ PIN_LOG="$HOME/.cache/claude-panel-pin.log"
 pin_log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$1" >> "$PIN_LOG" 2>/dev/null; }
 # ---- the handoff file: how this panel learns its session id now ----
 # One file per project directory, holding "<session-id>\t<epoch-written>".
-# Two writers, both out-of-band — neither passes through a keyboard:
+# Two writers, both out-of-band, neither passes through a keyboard:
 #   * claude-panel-session-hook.sh, wired as a Claude Code SessionStart hook,
 #     writes the session id Claude Code ACTUALLY chose. Fires on every launch
 #     path there is, including `--resume`/`--continue`, a GUI window and an
@@ -163,37 +163,37 @@ pin_log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$1" >> "$
 #   * claude-panel-launch.sh writes the id it is about to launch `claude`
 #     with, so the pin still works when ~/.claude/settings.json has no hooks.
 #
-# The id used to ride in on argv — which meant the launcher TYPED it, as
+# The id used to ride in on argv, which meant the launcher TYPED it, as
 # synthetic keystrokes, into a brand-new pane. A keystroke dropped or
 # interleaved with the user's own typing silently rewrote it: an observed
 # pane ran with
 #   9e435181h-888e-4f0c-811-3befb80226t3d
 # against a real session id of
 #   9e435181-888e-4f0c-81f1-3befb802263d
-# — an 'h' and a 't' woven in from the real keyboard, an 'f' lost. That
+# An 'h' and a 't' were woven in from the real keyboard, an 'f' lost. That
 # names a transcript that will never exist. The pane showed "Model: Unknown"
 # and "no active session found" for five hours, with every other figure on
 # screen correct, because nothing downstream could recover: the unpinned
 # fallback only accepts a transcript BORN AFTER the panel started, and that
 # session's transcript was already 50 minutes old when the panel restarted.
 # A file the launcher writes and the panel reads cannot be corrupted that
-# way, and — because it persists — a panel restarted mid-conversation reads
+# way, and, because it persists, a panel restarted mid-conversation reads
 # the same answer it would have had at launch.
 PIN_HANDOFF_DIR="${PANEL_PIN_DIR:-$HOME/.cache/claude-panel-pin}"
 PIN_HANDOFF_FILE="$PIN_HANDOFF_DIR/$(printf '%s' "$PWD" | tr '/' '-')"
 # ---- the pane-scoped pin: one file per CLAUDE PANE, not per directory ----
 # The file above is keyed on the project directory, and that key is wrong
-# whenever the same repo has more than one Claude Code session open — which
+# whenever the same repo has more than one Claude Code session open, which
 # is the normal way this machine is used. Every new launch in a directory
 # overwrites the one pin all of that directory's panels read, so all of them
 # follow the newest session. Two observed consequences, both from the same
 # key:
-#   * 2026-09-08 21:55 — a panel whose pane was running fcdc479e adopted
+#   * 2026-09-08 21:55, a panel whose pane was running fcdc479e adopted
 #     5f46b180 the moment a second session opened in the same repo, and spent
 #     the night showing another pane's turns and cost as its own. Silent, and
 #     exactly the "confidently wrong" outcome resolve_session refuses to risk
 #     with its own guessing.
-#   * 2026-09-09 09:03 — a third window opened in that repo and was never
+#   * 2026-09-09 09:03, a third window opened in that repo and was never
 #     typed into, so Claude Code wrote no transcript for it. All three panels
 #     adopted its id and showed "no active session found" against a session
 #     that was live in front of them. A handoff pin is not timed out (see
@@ -201,8 +201,8 @@ PIN_HANDOFF_FILE="$PIN_HANDOFF_DIR/$(printf '%s' "$PWD" | tr '/' '-')"
 # Keying on the pane fixes both, because a pane hosts exactly one session at
 # a time. The pane's identity is its controlling terminal: this panel is in
 # its own split (ttys004) and its claude is in another (ttys003), so the
-# launcher — which runs in the claude pane's own shell, and later learns this
-# panel's pid — is the one process that sees both and writes the pairing.
+# launcher, which runs in the claude pane's own shell, and later learns this
+# panel's pid, is the one process that sees both and writes the pairing.
 #   pane/<panel-tty>  = "<claude-tty>\t<panel-pid>\t<epoch>"   (launcher)
 #   tty/<claude-tty>  = "<session-id>\t<epoch>"                 (hook, launcher)
 PIN_PANE_DIR="$PIN_HANDOFF_DIR/pane"
@@ -242,7 +242,7 @@ PANE_CLAUDE_SID=""
 # A handoff written within this many seconds of the panel starting was
 # written FOR this launch, and is adopted unconditionally. An older one is
 # adopted only on positive evidence that the session it names is still live
-# (see adopt_handoff_pin) — a panel restarted mid-conversation is the case
+# (see adopt_handoff_pin), a panel restarted mid-conversation is the case
 # that needs it.
 PIN_HANDOFF_FRESH_SECS="${PANEL_PIN_FRESH:-180}"
 # How recently the transcript a STALE handoff names must have been written
@@ -256,7 +256,7 @@ PIN_HANDOFF_LIVE_SECS="${PANEL_PIN_LIVE:-1800}"
 #
 # Nothing used to ask the second question. A pin was tested for liveness once,
 # at adoption, and then kept for the life of the pane whatever happened to the
-# session it named — so a pin adopted from a session that ran for ninety
+# session it named, so a pin adopted from a session that ran for ninety
 # seconds and stopped was still being reported as this pane's forty minutes
 # later, model line, cost, burn rate, context percentage and turn table
 # included. Releasing it is not a guess about which session is right; it is
@@ -281,17 +281,17 @@ is_uuid() {
     *) return 1 ;;
   esac
 }
-# A pin that is not a UUID is corrupt on its face — it cannot name a
+# A pin that is not a UUID is corrupt on its face, it cannot name a
 # transcript Claude Code would ever write, so there is nothing to wait for.
 # Drop it here rather than spend the grace period above discovering it.
 if [ -n "$PIN_SESSION_ID" ] && ! is_uuid "$PIN_SESSION_ID"; then
-  pin_log "ignoring malformed argv pin '$PIN_SESSION_ID' (not a UUID) — falling back to the handoff file"
+  pin_log "ignoring malformed argv pin '$PIN_SESSION_ID' (not a UUID), falling back to the handoff file"
   PIN_SESSION_ID=""
   PIN_SOURCE=""
 fi
 # Recorded once so the unpinned session-detection fallback below can tell
 # "a session that started after I did" from "a session that was already
-# running when I started" — see that fallback for why this matters.
+# running when I started", see that fallback for why this matters.
 # ---- clock seam ----
 # Every wall-clock read in this file goes through these two, so a test can
 # pin "now" with PANEL_FAKE_NOW (an epoch) and reach the boundaries that are
@@ -363,9 +363,9 @@ C_CYAN=$'\033[36m'; C_YELLOW=$'\033[33m'; C_GREEN=$'\033[32m'; C_RED=$'\033[31m'
 C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
 # Electric blue (#7DF9FF), for the per-section "(refresh Ns)" tags and the
 # session id on the Model line. 24-bit rather than one of the 8 basic codes
-# because every one of those is already carrying meaning in this panel —
+# because every one of those is already carrying meaning in this panel,
 # cyan is section headings, blue/green/yellow/red/magenta are all
-# traffic-light states — and neither of these is a reading from the panel,
+# traffic-light states, and neither of these is a reading from the panel,
 # so neither should collide with them. The two basic-code blues were both
 # tried on the id first and both failed on legibility: \033[34m renders dark
 # on this near-black background, \033[94m renders as a grey barely different
@@ -506,13 +506,13 @@ proxy_state_line() {
   printf '  🔀 Proxy State: %s%s%s\n' "$route_color" "$route_label" "$C_RESET"
 }
 
-# There's no Anthropic API call for "what plan is this account on" — the
+# There's no Anthropic API call for "what plan is this account on", the
 # closest thing is ~/.claude.json's oauthAccount block, which Claude Code
 # itself populates from the account API at login and refreshes periodically
 # (organizationType e.g. "claude_max", organizationRateLimitTier e.g.
 # "default_claude_max_20x"). Absent entirely for API-key auth (no
 # subscription to report), so silently print nothing rather than "Unknown".
-# Cached on its own long TTL, not tied to CCUSAGE_CACHE_TTL — a plan
+# Cached on its own long TTL, not tied to CCUSAGE_CACHE_TTL, a plan
 # practically never changes mid-session, so there's no reason to re-parse
 # a multi-hundred-KB json file every 5-10s just to re-read the same string.
 LICENSE_CACHE_TTL=300
@@ -526,7 +526,7 @@ license_line() {
 
   # Route-aware: claude-burst's secondary path hits a totally different
   # vendor (config's secondary.provider, e.g. "openai-compatible" against
-  # Together/GLM) billed by its own API key — nothing to do with the
+  # Together/GLM) billed by its own API key, nothing to do with the
   # Anthropic Max/Pro seat below. Showing "Max (20x)" while traffic is
   # actually on secondary would be wrong, not just stale, so check the same
   # overflow state proxy_state_line() checks and short-circuit first.
@@ -592,7 +592,7 @@ BURN_RED=6
 CTX_YELLOW=30
 CTX_RED=50
 CTX_PURPLE=70
-# A value only gets colored once it clears an absolute floor — in a cheap
+# A value only gets colored once it clears an absolute floor, in a cheap
 # session (avg $0.05) a $0.13 turn is >2x average and would false-positive
 # red on money nobody would look twice at.
 MIN_SESSION_ALERT=5.00
@@ -625,12 +625,12 @@ ctx_tier_color() {
   printf '%s' "$color"
 }
 # model id -> green (cheapest tier, e.g. Haiku) / yellow (mid, e.g. Sonnet) /
-# cyan (most expensive, e.g. Opus/Fable/Mythos) — mirrors the PRICES table in
+# cyan (most expensive, e.g. Opus/Fable/Mythos), mirrors the PRICES table in
 # the per-turn-table python block below, but keyed on model-name substrings
 # since this runs in bash, before that table's exact $/1M figures are in scope.
 #
 # The top tier is cyan and NOT red on purpose. Red everywhere else in this
-# panel means "a threshold was crossed" — an over-average session, a burn
+# panel means "a threshold was crossed", an over-average session, a burn
 # rate past BURN_RED, a turn that spiked. The model is a deliberate choice
 # that holds for the whole session, so colouring it red made the panel open
 # on a standing alarm that never cleared and could not be acted on, which
@@ -643,7 +643,7 @@ model_tier_color() {
     *) printf '%s' "$C_YELLOW" ;;
   esac
 }
-# A short colored title, not a full-width divider bar — a bar that's drawn
+# A short colored title, not a full-width divider bar, a bar that's drawn
 # at $cols but rendered later in a narrower/resized pane just wraps into a
 # confusing second row of "=" or "-", which is worse than no rule at all.
 header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RESET"; }
@@ -667,8 +667,8 @@ header() { local title="$1"; printf '%s%s%s\n' "$C_BOLD$C_CYAN" "$title" "$C_RES
 # wrapped get hard-truncated anyway, chopping real content off the end
 # (e.g. losing the trailing ")" on a 44-char line in a 44-col pane). Strip
 # ANSI codes, then subtract UTF-8 continuation bytes (10xxxxxx, i.e.
-# \200-\277) — each is one extra byte contributed by a multi-byte
-# character, not a visible column — to get the true visible length before
+# \200-\277), each is one extra byte contributed by a multi-byte
+# character, not a visible column, to get the true visible length before
 # comparing to width. Only fall back to plain (uncolored) truncated text in
 # the genuine-overflow case, and correct the cut point by the same
 # continuation-byte count rather than slicing the raw ANSI-laden string.
@@ -678,7 +678,7 @@ clear_eol() { awk -v w="${COLS:-999}" '{ line = $0; plain = line; gsub(/\033\[[0
 # Forecasts the rest of today from this machine's own historical hour-of-day
 # spend pattern, instead of extrapolating ccusage's live burnRate.costPerHour
 # (a seconds-scale figure that spikes hugely right after any single pricey
-# turn, then decays as cheaper turns dilute it — e.g. $35/hr -> $4.64/hr ->
+# turn, then decays as cheaper turns dilute it, e.g. $35/hr -> $4.64/hr ->
 # $2.21/hr across three refreshes with nothing unusual happening). A full
 # 30-day JSONL scan is too slow to redo every 5s refresh, so this only
 # rebuilds when the cache is stale; every other refresh just reads the file.
@@ -712,14 +712,14 @@ refresh_hourly_buckets() {
 
   # Every open panel runs this same loop, so more than one can notice the
   # cache is stale in the same tick. mkdir is atomic on POSIX (no flock
-  # dependency) — whichever panel wins the mkdir does the (expensive)
+  # dependency), whichever panel wins the mkdir does the (expensive)
   # rebuild; the rest just keep using the still-valid cache this refresh
   # instead of duplicating the same 30-day scan. Both would compute the
   # same answer from the same shared JSONL files anyway, so this only
   # avoids wasted work, not a correctness issue.
   lock_dir="$HOURLY_BUCKET_CACHE.lock"
   if ! mkdir "$lock_dir" 2>/dev/null; then
-    # Held by another panel's rebuild — unless it died mid-rebuild and
+    # Held by another panel's rebuild, unless it died mid-rebuild and
     # left the lock behind, which a real rebuild never takes this long.
     lock_age=$(( now_epoch - $(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo "$now_epoch") ))
     if (( lock_age > 60 )); then
@@ -732,7 +732,7 @@ refresh_hourly_buckets() {
 
   mkdir -p "$(dirname "$HOURLY_BUCKET_CACHE")"
   # Same per-model pricing table as the per-turn breakdown below (JSONL
-  # entries carry token usage but no precomputed cost) — kept as a separate
+  # entries carry token usage but no precomputed cost), kept as a separate
   # copy since each heredoc here is a standalone python3 invocation.
   python3 - "$HOURLY_BUCKET_CACHE" "$HOURLY_BUCKET_WINDOW_DAYS" <<'BUCKET_PYEOF'
 import glob, json, os, sys, time, datetime as dt
@@ -771,7 +771,7 @@ seen = set()
 
 for path in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
     try:
-        # A file's mtime is >= its last entry's timestamp (append-only) —
+        # A file's mtime is >= its last entry's timestamp (append-only),
         # if that's still before the window, nothing inside can be in range.
         if os.path.getmtime(path) < cutoff:
             continue
@@ -808,7 +808,7 @@ for path in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")):
         cc = usage.get("cache_creation") or {}
         # No nested breakdown means the write used the default 5-minute TTL
         # (the 1h breakdown only appears when the extended-cache beta was
-        # actually used) — defaulting the whole cc_tok count to the 2x 1h
+        # actually used), defaulting the whole cc_tok count to the 2x 1h
         # multiplier instead overstated cache-write cost ~60% on every such
         # entry.
         if cc:
@@ -1539,14 +1539,14 @@ today_daily_shape() {
 }
 
 # ---- transcript-scan cache, keyed by mtime+size not TTL ----
-# Both python parses below read the WHOLE transcript file every refresh —
+# Both python parses below read the WHOLE transcript file every refresh,
 # fine for a small session, but for a multi-million-token one (see the
 # 4.66M-token session that motivated this) that's a full multi-MB re-parse
-# every 5-10s, per open panel, for as long as the pane stays open — most of
+# every 5-10s, per open panel, for as long as the pane stays open, most of
 # it spent re-deriving a result that hasn't changed because nothing new was
 # written since the last refresh (the common case: reading/typing between
 # turns, not mid-generation). Unlike ccusage_cached()'s TTL, staleness here
-# has an exact signal — the file's own mtime+size — so cache on THAT: a
+# has an exact signal, the file's own mtime+size, so cache on THAT: a
 # turn landing invalidates it immediately, and an idle pane pays for the
 # parse exactly once until the next one lands, not every 5-10s regardless.
 transcript_stamp() {
@@ -1754,7 +1754,7 @@ def fmt_k(n):
 # displayed percentage; the window now travels out of here in the metadata
 # line instead, so the row colours below and the Context Usage line above
 # cannot be divided by different numbers.
-# Every current-generation model is 1M except Haiku 4.5 (200k) — see the
+# Every current-generation model is 1M except Haiku 4.5 (200k), see the
 # bash version's comment for why this used to be a Sonnet-5/Fable-5-only
 # allowlist and why that went stale.
 def context_window_size(model_id):
@@ -1793,7 +1793,7 @@ def delta_color(d, avg):
 
 # Ranks the two independent per-cell colors above (context %, delta vs
 # session average) onto one scale so a row can be colored as a whole by
-# whichever signal is worse, instead of only the one cell that tripped it —
+# whichever signal is worse, instead of only the one cell that tripped it,
 # a row that's fine on context but has an outsized delta (or vice versa)
 # should still read as elevated at a glance, not just in one column.
 def severity_rank(color):
@@ -2042,7 +2042,7 @@ cost_h = f"{col_cost}{'Cost':>8}{c_reset}"
 print(f"  {turn_h}{model_h}{input_h}{cache_h}{cost_h}")
 if shown:
     start_idx = total_n - len(shown) + 1
-    # Newest turn first — this table sits at a fixed position above the
+    # Newest turn first, this table sits at a fixed position above the
     # sections below it, so the most recent activity would otherwise be the
     # one row that scrolls out of view first as the session grows.
     saw_secondary, secondary_routes = False, set()
@@ -2114,7 +2114,7 @@ if shown:
         # still prices and still renders, under the footnote below.
         ctx_pct = (total_ctx / win * 100) if win else 0.0
         # Cache hit % is the odd one out: low is bad (unlike ctx_pct/delta,
-        # where high is bad), so its bands run the opposite direction —
+        # where high is bad), so its bands run the opposite direction,
         # below 95% red, below 90% purple, 95%+ reads as normal.
         cache_c = col_purple if cache_pct < 90 else (col_cost if cache_pct < 95 else col_input)
         ctx_c, delta_c = ctx_pct_color(ctx_pct), delta_color(delta, avg_delta)
@@ -2216,7 +2216,7 @@ session_stats_refresh() {
 }
 
 # Save the real terminal fd BEFORE the loop ever redirects fd1 through a
-# command-substitution pipe — fd3 keeps pointing at the actual pane device
+# command-substitution pipe, fd3 keeps pointing at the actual pane device
 # no matter what fd1 becomes inside a $(...), and unlike /dev/tty it still
 # works for a process with no controlling terminal at all (e.g. one
 # relaunched via `nohup ... &` with stdout pointed straight at a pty device
@@ -2224,16 +2224,16 @@ session_stats_refresh() {
 exec 3>&1
 
 # ---- swallow stray keystrokes ----
-# This pane is read-only — it never reads from stdin — but the tty
+# This pane is read-only, it never reads from stdin, but the tty
 # underneath it still echoes and buffers whatever gets typed into it (focus
 # briefly landing here mid-launch, or a keystroke sent while Ghostty is
 # still splitting the window). Left alone, that typed text sits in the
 # pty's input queue and lands straight on the shell prompt the moment this
-# script exits — the stray characters/garbled prompt seen whenever the
+# script exits, the stray characters/garbled prompt seen whenever the
 # panel dies while someone was mid-keystroke in this pane. Turn off echo
 # and canonical line-buffering, drain the queue on every tick, and restore
 # the tty's original settings on exit no matter how the script ends, or the
-# pane's shell is left echo-less afterward — a new bug in place of the old.
+# pane's shell is left echo-less afterward, a new bug in place of the old.
 #
 # The drain runs INLINE, in the main shell. It used to be a background loop,
 #
@@ -2241,12 +2241,12 @@ exec 3>&1
 #
 # which did not work and was not cheap. POSIX says an asynchronous command
 # in a shell without job control gets its stdin redirected to /dev/null, and
-# a panel is `bash ccusage-panel.sh` — non-interactive, job control off. So
+# a panel is `bash ccusage-panel.sh`: non-interactive, job control off. So
 # that subshell was not reading the tty at all: it read instant EOF from
 # /dev/null, `read` returned immediately, and the `-t 0.2` never once
-# engaged. It spun a full core for the entire life of every panel — measured
+# engaged. It spun a full core for the entire life of every panel, measured
 # at 101 minutes of CPU across 103 minutes of wall clock, against 4 seconds
-# for the panel process that owned it — while draining exactly nothing.
+# for the panel process that owned it, while draining exactly nothing.
 #
 # `min 0 time 0` above makes tty reads non-blocking, so one call returns
 # whatever is queued and the next returns failure on an empty queue: the
@@ -2341,15 +2341,15 @@ refresh_active_block() {
 
   # ---- active 5h block: fetched once here (not down in the ACTIVE BLOCK
   # section) so the summary line above can show the same burn-rate-derived
-  # color as the detailed section — one source of truth, one API call.
+  # color as the detailed section, one source of truth, one API call.
   block_json=$(ccusage_cached claude blocks --active --json --offline)
   has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
   if [ "${has_block:-0}" = "1" ]; then
-    # `localtime` before `strftime` is required — fromdateiso8601 hands back
+    # `localtime` before `strftime` is required, fromdateiso8601 hands back
     # a UTC broken-down time and strftime formats whatever it's given with
     # no zone conversion of its own, so without it these clock times render
     # in UTC while everything else in the panel (the header, "This Session"
-    # times) is local — a 2h-off block window on any UTC+2 machine.
+    # times) is local, a 2h-off block window on any UTC+2 machine.
     # startTime/endTime come out as EPOCHS as well as clock strings. The
     # epochs are what let the fast tick recompute "elapsed" and "time left"
     # locally every 10s without refetching the block -- see
@@ -2380,12 +2380,12 @@ refresh_active_block() {
 # pure wall-clock arithmetic, and blk_cost only changes when a turn lands.
 #
 # blk_cph is the block's TRUE average $/hr (cost ÷ elapsed time), not
-# ccusage's own burnRate.costPerHour — that field is a seconds-scale
+# ccusage's own burnRate.costPerHour, that field is a seconds-scale
 # instantaneous rate that spikes 10x+ right after any single pricey turn
 # and decays within minutes (same failure mode already worked around for
 # "Today's Predicted Value" above), so it disagreed wildly with the block's
 # actual spend-so-far (e.g. reported $18.93/hr while the block had spent
-# $0.81 in 44 minutes — a true rate of ~$1.11/hr). Floor elapsed at 3
+# $0.81 in 44 minutes, a true rate of ~$1.11/hr). Floor elapsed at 3
 # minutes for the same reason sess_elapsed_h does.
 block_clock_tick() {
   [ "${has_block:-0}" = "1" ] || return
@@ -2424,7 +2424,7 @@ block_clock_tick() {
 # questions. A handoff written around the time this panel started was
 # written FOR this panel by the launcher or by this pane's SessionStart
 # hook, and is simply the answer. An OLDER one is the previous session in
-# this directory — which is the right answer exactly when the panel was
+# this directory, which is the right answer exactly when the panel was
 # restarted into a conversation already in progress (the case the
 # birth-after-panel-start heuristic below structurally cannot see), and the
 # wrong answer for a brand-new pane whose `claude` has not started yet. The
@@ -2602,7 +2602,7 @@ tty_has_claude() { # $1 = tty name, as `ps -o tty=` prints it
 # Pane pins are exempt: their key IS the pane, so a quiet transcript there
 # means the person at that keyboard is reading rather than typing, and there
 # is nothing better to replace it with. The two sources this does apply to
-# are the ones that only ever inferred this pane's session — an argv pin
+# are the ones that only ever inferred this pane's session, an argv pin
 # predicted by the launcher before the session existed, and a directory-keyed
 # handoff that any other session in the repo can overwrite.
 release_dead_pin() {
@@ -2652,7 +2652,7 @@ adopt_handoff_pin() {
   # A pane-scoped pin needs none of the freshness reasoning below. That
   # reasoning exists only to guess whether a directory-keyed pin was written
   # for THIS pane; here the key IS the pane, so whatever is in the file is
-  # this pane's session by construction — including a /clear or a --resume
+  # this pane's session by construction, including a /clear or a --resume
   # that hands the same pane a new id hours in, which the directory-keyed
   # path can only accept by also accepting every other pane's new id.
   if [ -n "$PIN_PANE_PIN_FILE" ] && [ -r "$PIN_PANE_PIN_FILE" ]; then
@@ -2692,7 +2692,7 @@ adopt_handoff_pin() {
   case "${written:-}" in ''|*[!0-9]*) written=0 ;; esac
   now=$(panel_now)
   # A sid this panel has just released is not re-adopted on the strength of
-  # the file that named it in the first place — that file has not changed,
+  # the file that named it in the first place, that file has not changed,
   # and reading it again is not new evidence. It is sent down the stale path
   # instead, where it has to prove its transcript is being written to again:
   # the same test that released it, so a genuinely resumed session comes
@@ -2702,15 +2702,15 @@ adopt_handoff_pin() {
     written=0
   fi
   # Two-sided, and the second side is the one that was missing. A handoff
-  # written LONG AFTER this panel started was not written for this launch —
-  # it is another pane opening in the same directory — so it belongs on the
+  # written LONG AFTER this panel started was not written for this launch,
+  # it is another pane opening in the same directory, so it belongs on the
   # stale path, where it has to prove the session it names is live before
   # anything believes it. The one-sided test read "written 18 hours after I
   # started" as fresh and adopted it unconditionally; that is how a pane
   # ended up pinned to a window that had never been typed into.
   if (( written < PANEL_START_EPOCH - PIN_HANDOFF_FRESH_SECS \
      || written > PANEL_START_EPOCH + PIN_HANDOFF_FRESH_SECS )); then
-    # Not written for this launch — either before it (a panel restarted
+    # Not written for this launch, either before it (a panel restarted
     # mid-conversation) or well after it (another pane opening in this same
     # directory). Believe it only while its transcript is still live, which
     # the never-typed-into window that broke this had no way to satisfy.
@@ -2718,13 +2718,13 @@ adopt_handoff_pin() {
     [ -f "$tsc" ] || return 0
     age=$(( now - $(stat -f %m "$tsc" 2>/dev/null || echo 0) ))
     (( age >= 0 && age <= PIN_HANDOFF_LIVE_SECS )) || return 0
-    # "Live" here is a half-hour window, which is generous by design — a
+    # "Live" here is a half-hour window, which is generous by design, a
     # pane can sit unread that long. It is far too generous to outrank a
     # session being written to right now: this file names a REPO, and a tty
     # pin names a PANE in it. So if there is exactly one live pane session
     # here and this is not it, stand aside rather than answer with the
     # weaker claim. (If this sid IS live it has a tty pin of its own, which
-    # makes two candidates, which is no answer — and this branch keeps it.)
+    # makes two candidates, which is no answer, and this branch keeps it.)
     lone=$(lone_live_pane_session) || lone=""
     if [ -n "$lone" ] && [ "$lone" != "$sid" ]; then
       # Once per decision, not once per tick. This one is reached on every
@@ -2753,8 +2753,8 @@ adopt_handoff_pin() {
 }
 
 # ---- last resort: the only live pane session in this project ----
-# Reached when nothing has addressed this panel directly — no launcher
-# pairing, and no directory handoff that survives the liveness test — and it
+# Reached when nothing has addressed this panel directly, no launcher
+# pairing, and no directory handoff that survives the liveness test, and it
 # is reached far more often than it should be, because the launcher writes
 # its pairing from a `pgrep` that does not always find the panel in time.
 # An unpaired panel restarted into a conversation already in progress is
@@ -2765,7 +2765,7 @@ adopt_handoff_pin() {
 #
 # The claim made here is narrow, and the evidence is pins that already exist.
 # Every entry under tty/ was written by the SessionStart hook for a claude
-# with a controlling terminal — a real pane, never a `--print` run. So a sid
+# with a controlling terminal, a real pane, never a `--print` run. So a sid
 # found there whose transcript is in THIS project directory and is still
 # being written to is a live pane session in this repo. Exactly one of those
 # and this panel is beside it. Two, and that is the ambiguity this file
@@ -2874,11 +2874,11 @@ resolve_session() {
   local birth f newest_birth other_jsonls
   # ---- current session identity: fetched once here (not inside the
   # guaranteed subshell below) so TOP SESSIONS TODAY, further down, can
-  # mark which row is THIS session — a command-substitution subshell can
+  # mark which row is THIS session, a command-substitution subshell can
   # read these variables outside itself but never write them back out.
   #
   # Scoped to THIS project's own transcript directory, not
-  # ~/.claude/projects/*/*.jsonl globally — with a second Claude Code
+  # ~/.claude/projects/*/*.jsonl globally, with a second Claude Code
   # session open in another repo, the global glob picks up whichever
   # session most recently wrote a line, so "THIS SESSION" would flip
   # between two unrelated conversations turn-count-and-all every few
@@ -2900,12 +2900,12 @@ resolve_session() {
   if [ -n "$PIN_SESSION_ID" ]; then
     latest="$project_dir/$PIN_SESSION_ID.jsonl"
     # The pinned session may not have written its first line yet (the
-    # launcher is still typing into the new pane) — treat "not there yet"
+    # launcher is still typing into the new pane), treat "not there yet"
     # as "no session", same as the unpinned case; the next fast refresh
     # picks it up.
     if [ ! -f "$latest" ]; then
       latest=""
-      # ...but only for a WHILE, and only for an ARGV pin — the one path
+      # ...but only for a WHILE, and only for an ARGV pin, the one path
       # where the id may have been TYPED into the pane and silently rewritten
       # by an interleaved keystroke (see PIN_HANDOFF_FILE for the observed
       # corruption). A pin like that names a transcript that will never
@@ -2915,7 +2915,7 @@ resolve_session() {
       #
       # A handoff pin is deliberately NOT timed out. Nothing can corrupt it,
       # so "the transcript is not there yet" only ever means the session has
-      # not written its first line — which happens whenever the user reads
+      # not written its first line, which happens whenever the user reads
       # for a couple of minutes before typing, and is not the panel's cue to
       # start guessing. The 90s timer used to fire on exactly that: an
       # observed pane abandoned a perfectly good pin at 14:21:53 and the
@@ -2929,7 +2929,7 @@ resolve_session() {
   fi
   if [ -z "$PIN_SESSION_ID" ]; then
     # "Most recently modified" picks whichever session is actively being
-    # chatted with — including one that's NOT this pane's, if another
+    # chatted with, including one that's NOT this pane's, if another
     # session in this same project dir is currently mid-conversation. That
     # misattributes an unrelated, already-running session's cost/turns to a
     # brand-new, still-empty session opened without going through the
@@ -2938,7 +2938,7 @@ resolve_session() {
     #
     # Prefer instead the newest transcript file CREATED after this panel
     # process itself started (birth time, via macOS `stat -f %B`, not
-    # mtime) — a file that didn't exist yet when this panel launched can
+    # mtime), a file that didn't exist yet when this panel launched can
     # only be a session that started alongside or after it, which is the
     # best available guess for "the session in this pane" without an
     # explicit pin.
@@ -2963,12 +2963,12 @@ resolve_session() {
         latest="$f"
       fi
     done < <(stat -f '%B %N' "$project_dir"/*.jsonl 2>/dev/null)
-    # No post-launch file yet — e.g. a brand-new session whose first line
+    # No post-launch file yet, e.g. a brand-new session whose first line
     # (or even --session-id pin) hasn't landed on disk. Only fall back to
     # "most recently modified in this directory" when that guess is
     # unambiguous (exactly one transcript here); with more than one it's a
     # coin flip which session is actively being chatted with, and guessing
-    # wrong means showing someone else's live turns/cost as this pane's —
+    # wrong means showing someone else's live turns/cost as this pane's,
     # worse than the honest "no session found" this pane would otherwise
     # show for the few seconds until its own file exists. A long-lived
     # project directory can easily hold a dozen-plus past transcripts, so
@@ -2985,20 +2985,20 @@ resolve_session() {
     # launched fresh, so PANEL_START_EPOCH is newer than even the
     # transcript this pane has been chatting in all along. Reverted:
     # "only one transcript modified recently" is NOT the same claim as
-    # "only one transcript modified recently in this exact pane" — a
+    # "only one transcript modified recently in this exact pane", a
     # second, already-open pane in the same project directory that's
     # mid-conversation makes that file the ONLY recent one project-wide
     # while this pane is a completely different, still-blank session
     # (nothing written yet, so it can't out-recency the other pane's
     # file no matter how the window is sized). That showed a live,
-    # unrelated 47-turn/$3.99 session's data in a brand-new empty pane —
+    # unrelated 47-turn/$3.99 session's data in a brand-new empty pane,
     # confidently wrong, which the guessing rule this whole function
     # exists to avoid explicitly calls worse than the honest "no active
     # session found" this now falls back to instead.
   fi
   if [ -n "$latest" ]; then
     IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(session_identity_cached "$latest")
-    # Floor elapsed time at 3 minutes — a session-so-far rate computed over
+    # Floor elapsed time at 3 minutes, a session-so-far rate computed over
     # the first few seconds swings wildly and would flash red/green noise.
     sess_elapsed_h=$(awk -v s="$sess_start_epoch" -v n="$(panel_now)" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
   fi
@@ -3015,10 +3015,10 @@ resolve_session() {
 # which is the honest reading of it: it is the "as of" stamp for every
 # number underneath, and it advances at exactly the rate the header claims.
 build_summary() {
-  printf '%sClaude Code Usage — %s %s\n' \
+  printf '%sClaude Code Usage: %s %s\n' \
     "$C_BOLD$C_CYAN" "$(panel_date '+%a %H:%M:%S')" "$(rate_tag "$RATE_SLOW")"
   # ---- baselines: average per-session cost over 7 days, total spend over
-  # 30 days. Session average needs >=3 real sessions to trust — otherwise a
+  # 30 days. Session average needs >=3 real sessions to trust, otherwise a
   # single earlier tiny/huge session would skew it.
   since7=$(panel_date -v-7d +%Y%m%d 2>/dev/null || panel_date -d '7 days ago' +%Y%m%d)
   since7_iso=$(panel_date -v-7d +%Y-%m-%d 2>/dev/null || panel_date -d '7 days ago' +%Y-%m-%d)
@@ -3076,8 +3076,8 @@ build_summary() {
   prev_avg_daily_30=$(awk -v s="$prev_spend30" 'BEGIN{ printf "%.4f", s/29 }')
 
   # ---- today's spend + EOD forecast: an account-wide total, so it renders
-  # fine with no session resolved yet. Only the three fields below it —
-  # Model, Session, Context Usage — genuinely need one, and all three now
+  # fine with no session resolved yet. Only the three fields below it,
+  # Model, Session, Context Usage: genuinely need one, and all three now
   # come from this pane's own transcript parse rather than from a query.
   today_daily_json=$(today_daily_shape "$recent_json")
   today_amt="0.00"
@@ -3086,14 +3086,14 @@ build_summary() {
   fi
   # today_amt (actual, already spent) + a forecast for the hours still
   # remaining today. Deliberately NOT a flat current-rate extrapolation
-  # (blk_cph*10) — that rate is a seconds-scale figure that spikes 10x+
+  # (blk_cph*10), that rate is a seconds-scale figure that spikes 10x+
   # right after a single pricey turn and decays within minutes, which
   # made this line swing wildly (e.g. $350 -> $46 -> $22 across three 5s
   # refreshes with nothing unusual happening).
   #
   # The remaining-hours forecast itself is the persisted bucket cache's
   # historical average per hour-of-day, SCALED by how today's pace
-  # compares to a typical day's pace so far — not used unscaled. An
+  # compares to a typical day's pace so far, not used unscaled. An
   # unscaled historical average ignores today entirely: on a quiet day
   # (e.g. $17.93 spent by 14:48 against a ~$274 historical average for
   # hours 0-14) it forecast $215 for the day, back near the 30-day
@@ -3111,19 +3111,19 @@ build_summary() {
 
   # ---- live status line (current session) ----
   # sess_id/model_id/model_label/folder_name/sess_start_epoch were already
-  # resolved once, up top, before this subshell — needs the REAL
+  # resolved once, up top, before this subshell, needs the REAL
   # session_id and model.id: a placeholder session_id ("live") matches no
   # recorded session (session cost silently comes back $-0.00), and an
   # unset model.id makes ccusage assume an old 200k context window instead
   # of Sonnet 5's actual 1M, so context% reads >100%.
   #
   # Only Model, Session, and Context Usage below actually need that
-  # resolved session — everything else in this block (Today, Current
+  # resolved session, everything else in this block (Today, Current
   # Block, All Sessions, Folder, 30-Day Value, Proxy State) was always
   # independently computable, but used to be gated behind the SAME
   # session check as these three, so a brand-new pane with nothing typed
-  # into it yet — the overwhelmingly common first few seconds of every
-  # session — showed nothing at all except "no active session found"
+  # into it yet, the overwhelmingly common first few seconds of every
+  # session, showed nothing at all except "no active session found"
   # instead of the account-wide context it could show all along.
   if [ -n "$latest" ]; then
     # Model: already resolved from the transcript by resolve_session(). It
@@ -3159,7 +3159,7 @@ build_summary() {
   # one identity row stranded on the wrong side of that split, five money
   # lines away from the two it belongs with.
   #
-  # Show just the project folder name — the transcript's own "cwd" field
+  # Show just the project folder name, the transcript's own "cwd" field
   # when a session is resolved (not Claude Code's sanitized full-path
   # directory name, which can run well past a narrow 1/3-width split), or
   # $PWD's own basename otherwise, since this panel is always launched
@@ -3173,9 +3173,9 @@ build_summary() {
   if [ "${#folder_disp}" -gt "$folder_maxw" ]; then
     folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
   fi
-  # Total spend attributed to THIS project — every session whose
+  # Total spend attributed to THIS project, every session whose
   # transcript lives under $project_dir, summed via ccusage's own
-  # per-session costs (not a token-repricing estimate) — shown next to
+  # per-session costs (not a token-repricing estimate), shown next to
   # the folder name rather than the account-wide block projection that
   # used to sit here. $project_dir needs no resolved session either.
   proj_ids_json=$(ls "$project_dir"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | jq -R -s -c 'split("\n") | map(select(length>0))')
@@ -3185,7 +3185,7 @@ build_summary() {
   # Electric blue on the name, for the same reason SID carries it: these are
   # strings you go looking for, not numbers you watch move, and the colour is
   # what separates the identity rows from the tier-coloured money below them.
-  # The spend stays uncoloured — it has no threshold to be coloured against.
+  # The spend stays uncoloured, it has no threshold to be coloured against.
   printf '  📁 Folder: %s%s%s (%s)\n' "$C_ELECTRIC" "$folder_disp" "$C_RESET" "$(fmt_money "$proj_spend")"
 
   # Session spend needs BOTH a resolved session and a priced turn in it;
@@ -3195,7 +3195,7 @@ build_summary() {
     sess_amt=$(awk -v c="$SESS_COST" 'BEGIN{ printf "%.2f", c }')
     sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
     # THIS session's own $/hr (spend so far ÷ time since its first
-    # message) — separate from the block burn rate below, which is
+    # message), separate from the block burn rate below, which is
     # every session's combined spend in the current 5h window, not
     # just this one. Shown on the same row as the spend it's derived
     # from rather than its own line.
@@ -3220,7 +3220,7 @@ build_summary() {
   today_unpriced=$(unpriced_models "$today_daily_json" | tr '\n' ' ')
   recent_unpriced=$(unpriced_models "$recent_json" | tr '\n' ' ')
   if [ -n "$recent_unpriced" ]; then
-    printf '  %s⚠ no price for %s— totals below exclude it%s\n' \
+    printf '  %s⚠ no price for %s(totals below exclude it)%s\n' \
       "$C_YELLOW" "$recent_unpriced" "$C_RESET"
   fi
   # Under 1% of the day's usage the priced figure is still the answer, so it
@@ -3245,7 +3245,7 @@ build_summary() {
   if [ "${has_block:-0}" = "1" ]; then
     printf '  ⏳ Current Block: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
     # This is the true average burn rate (blk_cost ÷ elapsed time) across
-    # ALL sessions active in the current 5h block, not just this one —
+    # ALL sessions active in the current 5h block, not just this one,
     # ccusage's block cost total is already aggregated across every
     # concurrent session; see blk_cph derivation above for why it's
     # recomputed here instead of trusting ccusage's own
@@ -3262,7 +3262,7 @@ build_summary() {
     # by a number nobody knows -- a 0% reads as an empty context window.
     if [ -n "$SESS_CTX" ] && [ "$SESS_CTX" != "0" ] \
        && [ -n "$SESS_WIN" ] && [ "$SESS_WIN" != "0" ]; then
-      # Context segment — recompute the window size and % ourselves rather
+      # Context segment, recompute the window size and % ourselves rather
       # than trust ccusage's own %. ccusage assumes each model's native
       # window (1M for Sonnet 5) regardless of whether
       # CLAUDE_CODE_DISABLE_1M_CONTEXT forced the real active boundary
@@ -3274,7 +3274,7 @@ build_summary() {
       ctx_color=$(ctx_tier_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")
       forced_note=""
       # Check the env var directly rather than re-deriving "was this model
-      # actually forced down" from a hardcoded model-name list — that list
+      # actually forced down" from a hardcoded model-name list, that list
       # (originally just Sonnet 5/Fable 5) is exactly what went stale and
       # caused the 1M-window bug this comment now sits next to.
       if [ "$win_size" = "200000" ] && [ "$model_id" != "claude-haiku-4-5" ] && [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-0}" = "1" ]; then
@@ -3302,7 +3302,7 @@ build_summary() {
 
   # Both trend lines below are colored against the SAME window one period
   # earlier (this week's avg vs last week's, this month's spend vs last
-  # month's) — a baseline has no natural threshold of its own, but a
+  # month's), a baseline has no natural threshold of its own, but a
   # widening gap vs its own past is exactly the "am I burning through
   # tokens faster than before" signal worth a color for.
   spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
@@ -3413,11 +3413,11 @@ build_trailing() {
 
   # ---- recent: today's totals/models + 3-day trend + week/month, one
   # header. Was three separate headers (TODAY, LAST 3 DAYS, WEEK / MONTH)
-  # with a bar chart eating 3 rows for 3 numbers — merged so this whole
+  # with a bar chart eating 3 rows for 3 numbers, merged so this whole
   # block reliably fits above the fold instead of scrolling off a short
   # pane.
   header "Recent $(rate_tag "$RATE_SLOW")"
-  # Same query as today_daily_json in build_summary() — that runs in its own
+  # Same query as today_daily_json in build_summary(), that runs in its own
   # $(...) subshell, so its value doesn't survive into this one. Re-fetching
   # here goes through ccusage_cached(), and build_summary() and this function
   # are called back to back on the same slow tick, so the entry is always
@@ -3497,12 +3497,12 @@ build_trailing() {
   session_json=$(sessions_window "$(all_sessions)" "$(panel_date +%Y-%m-%d)" "")
   if [ -n "$session_json" ] && [ "$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)" != "0" ]; then
     # ccusage's per-session totalCost/totalTokens are all-time-per-session,
-    # not date-scoped — `--since` only decides which sessions get *listed*
+    # not date-scoped, `--since` only decides which sessions get *listed*
     # (any with activity today), so a session spanning multiple days shows
     # its FULL history here, which can exceed the whole day's real total
     # (ccusage daily). Recompute today's slice from that session's own
     # deduped entry list (`-i <id>`, which matches ccusage's authoritative
-    # totalTokens exactly — re-parsing the raw JSONL ourselves double-counts
+    # totalTokens exactly, re-parsing the raw JSONL ourselves double-counts
     # branches/retries). Entry-level costUSD is 0 for this account (ccusage
     # prices from its model-rate table, not per-entry), so today's cost is
     # estimated as a share of the session's all-time cost proportional to
@@ -3540,7 +3540,7 @@ build_trailing() {
 
     while IFS=$'\t' read -r sid scost stok slast; do
       [ -z "$sid" ] && continue
-      # localtime before strftime — see the same fix on the active-block
+      # localtime before strftime, see the same fix on the active-block
       # start/end times above; without it this reads ~2h behind on UTC+2.
       lasthm=$(jq -rn --arg t "$slast" '($t[0:19]+"Z") | fromdateiso8601 | localtime | strftime("%H:%M")' 2>/dev/null)
       # "*" then the last 5 characters of the sid -- 5, not the previous 4,
@@ -3685,7 +3685,7 @@ last_frame=""
 while true; do
   restart_if_changed
 
-  # Cursor-home only, NOT a full \033[2J clear — a full clear blanks the
+  # Cursor-home only, NOT a full \033[2J clear, a full clear blanks the
   # whole pane for one frame before the redraw lands, which reads as a
   # visible flicker every refresh. Staying purely additive-overwrite only
   # works because clear_eol() (above) truncates every line to $COLS, so a
@@ -3694,7 +3694,7 @@ while true; do
   # `tput cols`/`tput lines` run inside $(...) have their OWN stdout
   # redirected to the capture pipe, so the ioctl they'd normally use to ask
   # the terminal for its real size fails and they silently return the
-  # compiled-in terminfo default (80x24) — a fixed ceiling that has nothing
+  # compiled-in terminfo default (80x24), a fixed ceiling that has nothing
   # to do with the pane's actual height. `stty size` doesn't have this
   # problem because it reads the size off the fd it's given, so pointing it
   # at fd3 (see above) gets the real, live pane dimensions.
@@ -3741,8 +3741,8 @@ while true; do
     last_model_label="${model_label:-}"
   fi
 
-  # Everything through the per-turn table is GUARANTEED — printed in full,
-  # never truncated, even on a short pane — so "show N turns" always means
+  # Everything through the per-turn table is GUARANTEED, printed in full,
+  # never truncated, even on a short pane, so "show N turns" always means
   # N turns, not "N turns if there's room after the other sections." Only
   # the sections below it compete for whatever pane height is left over.
   # At most three lines, so a burst of failures cannot push the turn table
@@ -3762,7 +3762,7 @@ while true; do
   used_lines=$(printf '%s\n' "$guaranteed" | wc -l | tr -d ' ')
   remaining=$(( rows - 1 - used_lines ))
 
-  # Both blocks are written to the terminal once, together, below —
+  # Both blocks are written to the terminal once, together, below,
   # previously the guaranteed block was printed immediately and the trailing
   # Recent/Top Sessions block followed seconds later (once its several
   # sequential `ccusage ...` calls finished), so every refresh visibly
@@ -3820,7 +3820,7 @@ echo "Installing claude-panel-keyblock (keyboard guard for the auto-split) ..."
 #
 # Safety valves against ever getting "stuck blocked":
 #   - the event tap is owned by this process; macOS tears it down the moment
-#     the process exits, crashes, or is killed — there is no way to leave
+#     the process exits, crashes, or is killed, there is no way to leave
 #     the keyboard blocked after this process is gone
 #   - CFRunLoopRunInMode returns on its own after $1 seconds even if no
 #     events arrive, so the normal path always exits by itself
@@ -3892,14 +3892,14 @@ if command -v clang >/dev/null 2>&1; then
     chmod +x "$BIN_DIR/claude-panel-keyblock"
     echo "Built ~/.local/bin/claude-panel-keyblock."
     echo "NOTE: the first time it runs, macOS will ask you to grant it Accessibility"
-    echo "and Input Monitoring access (System Settings > Privacy & Security) — approve"
+    echo "and Input Monitoring access (System Settings > Privacy & Security), approve"
     echo "both, otherwise it just logs a failure and the launcher proceeds unblocked."
   else
     echo "WARNING: failed to build claude-panel-keyblock (see /tmp/claude-panel-keyblock-build.log)."
     echo "The auto-split launcher will still work, just without the keyboard guard."
   fi
 else
-  echo "WARNING: no clang found — skipping claude-panel-keyblock (keyboard guard)."
+  echo "WARNING: no clang found, skipping claude-panel-keyblock (keyboard guard)."
   echo "The auto-split launcher will still work, just without the keyboard guard."
 fi
 rm -f "$KEYBLOCK_SRC"
@@ -3917,7 +3917,7 @@ cat > "$BIN_DIR/claude-panel-session-hook.sh" <<'SESSHOOK_EOF'
 # This is the only pin source that is authoritative rather than predictive.
 # The ~/.zshrc preexec hook has to CHOOSE the session id in advance and force
 # it on with --session-id, which it cannot do for `claude --resume`,
-# `--continue`, a GUI window or an IDE-embedded terminal — all of which were
+# `--continue`, a GUI window or an IDE-embedded terminal, all of which were
 # therefore unpinned, every time, and left the panel guessing. Here the
 # session has already started and simply reports what it is.
 #
@@ -3959,23 +3959,23 @@ esac
 mkdir -p "$PIN_DIR" 2>/dev/null || exit 0
 
 # Both writes below are same-directory write + rename, so a panel reading a
-# pin mid-write never sees half a UUID — the exact class of half-written id
+# pin mid-write never sees half a UUID, the exact class of half-written id
 # this whole mechanism exists to stop happening.
 #
 # Which pane is this claude running in? Its controlling terminal, which is
-# what makes a per-pane pin possible at all — the directory-keyed file below
+# what makes a per-pane pin possible at all, the directory-keyed file below
 # cannot tell two sessions in one repo apart, and every panel in that repo
 # follows whichever started last.
 #
 # The hook process itself has NO controlling terminal: Claude Code gives it
-# pipes, so `ps -o tty= -p $$` prints "??". So walk up — but stop at the
+# pipes, so `ps -o tty= -p $$` prints "??". So walk up, but stop at the
 # FIRST claude in the ancestry, the one that ran this hook, and answer with
 # that process's terminal or with nothing.
 #
 # The first version stopped at the first process with ANY terminal instead.
 # For an interactive pane that is claude, one level up, and it is right. For
-# a HEADLESS claude — `claude --print`, which is how the standards-review
-# sections and every build script that shells out to the CLI run — it walks
+# a HEADLESS claude, `claude --print`, which is how the standards-review
+# sections and every build script that shells out to the CLI run, it walks
 # straight past the terminal-less claude and returns the terminal of the
 # interactive shell that started the build. Observed 2026-09-14: a build's
 # review sections wrote pins naming a 7-turn Sonnet session against the pane
@@ -4007,12 +4007,12 @@ session_tty() {
 
 # Both pins are gated on the pane, and this is the gate: no terminal, no
 # pane, no pin. It is checked BEFORE the directory write rather than only
-# for the tty one — the directory key is the channel a headless session
+# for the tty one, the directory key is the channel a headless session
 # hijacked, because every panel in a repo reads it and nothing about it says
 # which pane it was written for.
 ctty=$(session_tty) || ctty=""
 if [ -z "$ctty" ]; then
-  printf '%s [%s] SessionStart: %s (no controlling terminal — headless claude, or no claude in this hook'"'"'s ancestry) -> %s, no pin written\n' \
+  printf '%s [%s] SessionStart: %s (no controlling terminal, headless claude, or no claude in this hook'"'"'s ancestry) -> %s, no pin written\n' \
     "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$cwd" "$sid" >> "$LOG" 2>/dev/null
   exit 0
 fi
@@ -4158,7 +4158,7 @@ cat > "$BIN_DIR/claude-panel-launch.sh" <<'LAUNCH_EOF'
 #
 # This retries up to 3 times and, critically, VERIFIES success by checking
 # for an actual new ccusage-panel.sh process afterward rather than trusting
-# AppleScript's own exit code — an early version logged "ok" while doing
+# AppleScript's own exit code, an early version logged "ok" while doing
 # nothing, because a stale frontmost check or a silent internal early
 # "return" inside the AppleScript both exit 0 with no stderr.
 set -uo pipefail
@@ -4192,7 +4192,7 @@ verify_pin() { # $1 = newline-separated pids (unused; kept for call-site shape)
   if [ "$got" = "$PIN_SID" ]; then
     log "attempt $attempt: pin handoff verified at $PIN_HANDOFF_FILE"
   else
-    log "attempt $attempt: WARNING — pin handoff did not land (sent '$PIN_SID', read back '${got:-nothing}' from $PIN_HANDOFF_FILE); the panel will fall back to the SessionStart hook or to detecting the session itself"
+    log "attempt $attempt: WARNING: pin handoff did not land (sent '$PIN_SID', read back '${got:-nothing}' from $PIN_HANDOFF_FILE); the panel will fall back to the SessionStart hook or to detecting the session itself"
   fi
 }
 
@@ -4208,14 +4208,14 @@ verify_pin() { # $1 = newline-separated pids (unused; kept for call-site shape)
 # the launcher itself chose.
 write_pin_handoff() {
   [ -n "$PIN_SID" ] || return 0
-  mkdir -p "$PIN_HANDOFF_DIR" 2>/dev/null || { log "WARNING — could not create $PIN_HANDOFF_DIR; panel will fall back to detecting the session itself"; return 0; }
+  mkdir -p "$PIN_HANDOFF_DIR" 2>/dev/null || { log "WARNING: could not create $PIN_HANDOFF_DIR; panel will fall back to detecting the session itself"; return 0; }
   local tmp="$PIN_HANDOFF_DIR/.$(basename "$PIN_HANDOFF_FILE").$$"
   if printf '%s\t%s\n' "$PIN_SID" "$(date +%s)" > "$tmp" 2>/dev/null &&
      mv -f "$tmp" "$PIN_HANDOFF_FILE" 2>/dev/null; then
     log "pin handoff written: $PIN_HANDOFF_FILE -> $PIN_SID"
   else
     rm -f "$tmp" 2>/dev/null
-    log "WARNING — could not write $PIN_HANDOFF_FILE; panel will fall back to detecting the session itself"
+    log "WARNING: could not write $PIN_HANDOFF_FILE; panel will fall back to detecting the session itself"
   fi
   # ...and again under this pane's own terminal, which is the key the panel
   # prefers. Same id, different question: the file above answers "what is the
@@ -4233,7 +4233,7 @@ write_pin_handoff() {
     log "pane pin written: $PIN_TTY_DIR/$CLAUDE_TTY -> $PIN_SID"
   else
     rm -f "$tmp" 2>/dev/null
-    log "WARNING — could not write $PIN_TTY_DIR/$CLAUDE_TTY; the panel falls back to the directory-keyed pin"
+    log "WARNING: could not write $PIN_TTY_DIR/$CLAUDE_TTY; the panel falls back to the directory-keyed pin"
   fi
 }
 
@@ -4241,7 +4241,7 @@ write_pin_handoff() {
 # This is the one moment either fact is knowable together: this script runs
 # in the claude pane's own shell (so $CLAUDE_TTY is that pane), and it has
 # just watched a new ccusage-panel.sh appear (so the panel's tty is a `ps`
-# away). Neither process can work the other out on its own — they sit in
+# away). Neither process can work the other out on its own, they sit in
 # different splits with different terminals and share nothing else.
 #
 # Nothing is written when more than one panel appeared in the window between
@@ -4253,13 +4253,13 @@ write_pane_pairing() { # $1 = newline-separated new panel pids
   [ -n "$CLAUDE_TTY" ] || return 0
   pids=$(printf '%s\n' "$1" | tr -s '[:space:]' '\n' | grep -c '^[0-9][0-9]*$') || pids=0
   if [ "$pids" != "1" ]; then
-    log "attempt $attempt: not writing a pane pairing — $pids new panel process(es), cannot tell which is ours"
+    log "attempt $attempt: not writing a pane pairing, $pids new panel process(es), cannot tell which is ours"
     return 0
   fi
   pid=$(printf '%s' "$1" | tr -dc '0-9')
   ptty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d '[:space:]')
   case "$ptty" in
-    ''|'??') log "attempt $attempt: not writing a pane pairing — panel pid $pid has no controlling terminal"; return 0 ;;
+    ''|'??') log "attempt $attempt: not writing a pane pairing, panel pid $pid has no controlling terminal"; return 0 ;;
   esac
   mkdir -p "$PIN_PANE_DIR" 2>/dev/null || return 0
   tmp="$PIN_PANE_DIR/.$ptty.$$"
@@ -4271,7 +4271,7 @@ write_pane_pairing() { # $1 = newline-separated new panel pids
     log "attempt $attempt: pane pairing written: panel $ptty (pid $pid) -> claude $CLAUDE_TTY"
   else
     rm -f "$tmp" 2>/dev/null
-    log "attempt $attempt: WARNING — could not write $PIN_PANE_DIR/$ptty; the panel falls back to the directory-keyed pin"
+    log "attempt $attempt: WARNING: could not write $PIN_PANE_DIR/$ptty; the panel falls back to the directory-keyed pin"
   fi
 }
 
@@ -4286,7 +4286,7 @@ start_keyboard_guard() { # $1 = seconds
 }
 
 # Passed by the autolaunch hook only for a bare `claude` invocation, which
-# it forces to run with this same ID via --session-id — lets the panel open
+# it forces to run with this same ID via --session-id, lets the panel open
 # that exact transcript instead of guessing by mtime. Empty for anything
 # else, and the panel falls back to the SessionStart hook's handoff or to
 # its own directory-scoped guess.
@@ -4295,7 +4295,7 @@ PIN_HANDOFF_DIR="${PANEL_PIN_DIR:-$HOME/.cache/claude-panel-pin}"
 PIN_HANDOFF_FILE="$PIN_HANDOFF_DIR/$(printf '%s' "$PWD" | tr '/' '-')"
 PIN_PANE_DIR="$PIN_HANDOFF_DIR/pane"
 PIN_TTY_DIR="$PIN_HANDOFF_DIR/tty"
-# The pane `claude` is about to run in — this script is backgrounded from the
+# The pane `claude` is about to run in, this script is backgrounded from the
 # zsh preexec hook (or from ghostty-claude-launcher), both of which run in
 # that pane's own shell, so our controlling terminal IS its controlling
 # terminal. `ps -o tty=`, not `tty`: backgrounded, stdin is not the terminal.
@@ -4332,7 +4332,7 @@ write_pin_handoff
 
 # Inside tmux, TERM_PROGRAM gets overridden (often to "tmux") regardless of
 # the outer terminal, so the Ghostty check below never sees "ghostty" even
-# when Ghostty is the real host — the launcher aborted silently for every
+# when Ghostty is the real host, the launcher aborted silently for every
 # tmux user. tmux has its own native split primitive that needs no
 # Accessibility permission and no keystroke simulation, so prefer it
 # whenever we're inside a tmux client at all, before falling through to the
@@ -4367,7 +4367,7 @@ log "context: ${ghostty_procs} ghostty process(es) running"
 # Service launch runs `Ghostty.app/Contents/MacOS/ghostty -e ...` directly,
 # which starts a new app INSTANCE rather than a new window inside the
 # existing one, so several processes named "ghostty" coexist as a matter of
-# routine — one per launched window, plus any whose window was closed while
+# routine, one per launched window, plus any whose window was closed while
 # a child shell kept the process alive.
 #
 # Everything below used to identify its target as "the frontmost process
@@ -4395,7 +4395,7 @@ done
 if [ -n "$ghostty_pid" ]; then
   log "context: our Ghostty instance is pid $ghostty_pid (walked $depth level(s) of process ancestry)"
 else
-  log "context: could not identify our Ghostty instance from process ancestry — falling back to matching on the name 'ghostty', which is ambiguous when several instances are running"
+  log "context: could not identify our Ghostty instance from process ancestry, falling back to matching on the name 'ghostty', which is ambiguous when several instances are running"
 fi
 
 # Which python3, if any, can post key events to a specific process?
@@ -4436,14 +4436,14 @@ find_quartz_python() {
   return 1
 }
 
-# A bare permission-probe first — if Accessibility access isn't granted,
+# A bare permission-probe first, if Accessibility access isn't granted,
 # every subsequent step will fail the same way, so say so once clearly
 # instead of three confusing retries.
 probe=$(osascript -e 'tell application "System Events" to get name of first process' 2>&1)
 probe_status=$?
 if [ "$probe_status" -ne 0 ]; then
   log "abort: System Events probe failed (exit=$probe_status): $probe"
-  log "abort: likely missing Accessibility permission — check System Settings > Privacy & Security > Accessibility for Ghostty"
+  log "abort: likely missing Accessibility permission, check System Settings > Privacy & Security > Accessibility for Ghostty"
   exit 0
 fi
 
@@ -4478,7 +4478,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
       [ "$attempt" = 1 ] && log "context: key events will be addressed to our process via $panel_python"
     else
       panel_python=""
-      [ "$attempt" = 1 ] && log "context: no python3 with pyobjc's Quartz bindings — using the focus-dependent AppleScript path"
+      [ "$attempt" = 1 ] && log "context: no python3 with pyobjc's Quartz bindings, using the focus-dependent AppleScript path"
     fi
   fi
   if [ -n "$panel_python" ] && [ -n "$ghostty_pid" ] && [ -x "$BIN_DIR_KEYSEND" ]; then
@@ -4494,7 +4494,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
     end tell" 2>&1)
     case "$geom" in
       ''|*[!0-9]*)
-        log "attempt $attempt: targeted path unavailable (window geometry: $geom) — falling through to the AppleScript path"
+        log "attempt $attempt: targeted path unavailable (window geometry: $geom), falling through to the AppleScript path"
         ;;
       *)
         presses=$(( geom * (50 - PANEL_WIDTH_PCT) / 4000 ))
@@ -4514,15 +4514,15 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
           after_pids=$(panel_pids)
           new_pids=$(comm -13 <(echo "$before_pids") <(echo "$after_pids") 2>/dev/null)
           if [ -n "$new_pids" ]; then
-            log "attempt $attempt: VERIFIED — new panel process(es): $(echo "$new_pids" | tr '\n' ' ')"
+            log "attempt $attempt: VERIFIED: new panel process(es): $(echo "$new_pids" | tr '\n' ' ')"
             verify_pin "$new_pids"
             write_pane_pairing "$new_pids"
             success=1
             continue
           fi
-          log "attempt $attempt: targeted send reported success but no panel appeared — falling through"
+          log "attempt $attempt: targeted send reported success but no panel appeared, falling through"
         else
-          log "attempt $attempt: targeted send failed (exit $?) — falling through to the AppleScript path"
+          log "attempt $attempt: targeted send failed (exit $?), falling through to the AppleScript path"
         fi
         ;;
     esac
@@ -4533,14 +4533,14 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
   # cosmetic: System Events delivers `keystroke` to whatever application is
   # frontmost, not to the process an enclosing `tell` names, so targeting
   # the right instance and typing into the right window are one and the
-  # same requirement — a check that merely observes frontmost can be
+  # same requirement, a check that merely observes frontmost can be
   # satisfied by an instance we are not about to type into.
   if [ -n "$ghostty_pid" ]; then
     osascript -e "tell application \"System Events\" to set frontmost of (first application process whose unix id is $ghostty_pid) to true" >/dev/null 2>&1
   fi
 
   # Brand-new windows can take a beat to become frontmost at the
-  # Accessibility API level — poll instead of checking once and giving up.
+  # Accessibility API level, poll instead of checking once and giving up.
   front=""
   polls=0
   for _ in $(seq 1 20); do
@@ -4555,12 +4555,12 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
     sleep 0.1
   done
   if [ -n "$ghostty_pid" ] && [ "$front" != "$ghostty_pid" ]; then
-    log "attempt $attempt: our Ghostty instance (pid $ghostty_pid) never became frontmost after $polls polls (last saw pid '$front') — retrying"
+    log "attempt $attempt: our Ghostty instance (pid $ghostty_pid) never became frontmost after $polls polls (last saw pid '$front'), retrying"
     sleep 0.5
     continue
   fi
   if [ -z "$ghostty_pid" ] && [ "$front" != "ghostty" ]; then
-    log "attempt $attempt: frontmost never became ghostty after $polls polls (last saw '$front') — retrying"
+    log "attempt $attempt: frontmost never became ghostty after $polls polls (last saw '$front'), retrying"
     sleep 0.5
     continue
   fi
@@ -4571,7 +4571,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
   # ~4s) so anything typed while the window is still settling can't land in
   # the new split or get woven into the command being typed into it. Fully
   # self-bounded: it exits on its own after the duration below even if this
-  # script dies first — see claude-panel-keyblock's own comments for the
+  # script dies first, see claude-panel-keyblock's own comments for the
   # safety valves. Best-effort: missing binary or ungranted permissions
   # just mean no guard, same as before this existed.
   start_keyboard_guard 6
@@ -4581,11 +4581,11 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
   # receive keystrokes.
   sleep 0.3
 
-  # Everything below — the frontmost re-check, the window-width read, the
-  # resize math, and every keystroke — happens inside ONE osascript call.
+  # Everything below, the frontmost re-check, the window-width read, the
+  # resize math, and every keystroke, happens inside ONE osascript call.
   # Splitting this across two calls previously let frontmost change out
   # from under the second one, and both halves would separately exit 0.
-  # 0 means "we never worked out which instance is ours" — the AppleScript
+  # 0 means "we never worked out which instance is ours", the AppleScript
   # then falls back to the old, ambiguous name match.
   TARGET_PID="${ghostty_pid:-0}"
 
@@ -4674,17 +4674,17 @@ APPLESCRIPT
   log "attempt $attempt: osascript exit=$osa_status result=$result"
 
   # Ground truth: did an actual new panel process appear? Don't trust the
-  # AppleScript's own report of success — verify it.
+  # AppleScript's own report of success, verify it.
   sleep 1
   after_pids=$(panel_pids)
   new_pids=$(comm -13 <(echo "$before_pids") <(echo "$after_pids") 2>/dev/null)
   if [ -n "$new_pids" ]; then
-    log "attempt $attempt: VERIFIED — new panel process(es): $(echo "$new_pids" | tr '\n' ' ')"
+    log "attempt $attempt: VERIFIED: new panel process(es): $(echo "$new_pids" | tr '\n' ' ')"
     verify_pin "$new_pids"
     write_pane_pairing "$new_pids"
     success=1
   else
-    log "attempt $attempt: FAILED — no new panel process appeared (before=[$(echo "$before_pids" | tr '\n' ' ')] after=[$(echo "$after_pids" | tr '\n' ' ')])"
+    log "attempt $attempt: FAILED: no new panel process appeared (before=[$(echo "$before_pids" | tr '\n' ' ')] after=[$(echo "$after_pids" | tr '\n' ' ')])"
     sleep 0.5
   fi
 done
@@ -4692,8 +4692,8 @@ done
 if [ "$success" -eq 1 ]; then
   log "done: succeeded on attempt $attempt/$max_attempts"
 else
-  log "done: GAVE UP after $max_attempts attempts — panel did not launch"
-  log "done: troubleshooting — confirm ctrl+shift+h/l keybinds exist in ~/.config/ghostty/config, confirm ~/.local/bin/ccusage-panel.sh is executable, try running it manually"
+  log "done: GAVE UP after $max_attempts attempts, panel did not launch"
+  log "done: troubleshooting: confirm ctrl+shift+h/l keybinds exist in ~/.config/ghostty/config, confirm ~/.local/bin/ccusage-panel.sh is executable, try running it manually"
 fi
 
 exit 0
@@ -4730,19 +4730,19 @@ cat > "$ZSHRC_BLOCK" <<'ZSHRC_EOF'
 # opens a right-hand Ghostty split running the live usage panel, then
 # returns focus to the left pane.
 #
-# A fresh `claude` invocation (no existing-session flag — the common
+# A fresh `claude` invocation (no existing-session flag, the common
 # "fresh session in a new window" case) is additionally pinned to a known
 # session ID, so the panel can open that EXACT transcript instead of
-# guessing "most recently modified file in this project directory" — a
+# guessing "most recently modified file in this project directory", a
 # guess that still can't tell two concurrent `claude` sessions in the SAME
 # directory apart. This used to require the command to be the literal bare
 # word "claude" with NO arguments at all, which almost never happens in
-# practice — `claude --dangerously-skip-permissions`, `caffeinate -d claude`,
+# practice, `claude --dangerously-skip-permissions`, `caffeinate -d claude`,
 # and similar everyday variants all failed the exact-string match, so
 # CLAUDE_PANEL_PIN_SID was never set and the panel silently fell back to the
 # directory-scoped guess on every real launch, occasionally showing a stale
 # session's turns when the project directory held more than one transcript.
-# That fix only reached the pin/no-pin decision below though — the launch
+# That fix only reached the pin/no-pin decision below though, the launch
 # gate right above it (deciding whether to run the launcher AT ALL) was
 # still `claude*`, anchored to the start of the command line, so any prefix
 # at all (`caffeinate -d claude`, `nohup claude`, `sudo claude`, an
@@ -4750,7 +4750,7 @@ cat > "$ZSHRC_BLOCK" <<'ZSHRC_EOF'
 # to reach in the first place. Matches "claude" as a whole word anywhere in
 # the command now, not just as its first token.
 # Now any `claude ...` invocation is pinned UNLESS it already carries its
-# own session semantics (--resume/-r, --continue/-c, --session-id) — those
+# own session semantics (--resume/-r, --continue/-c, --session-id), those
 # already know which transcript they mean and forcing a second --session-id
 # onto them would conflict. preexec can't rewrite the command it's about to
 # run, so it exports CLAUDE_PANEL_PIN_SID instead; the `claude` wrapper below
@@ -4813,7 +4813,7 @@ _ccusage_panel_autolaunch() {
       ;;
   esac
   # Diagnostic: the pin/no-pin split is a silent decision with no other
-  # trace of it anywhere — when "no pin" turns out to be the overwhelming
+  # trace of it anywhere, when "no pin" turns out to be the overwhelming
   # common case in practice, this is the only way to see the raw command
   # line that drove it instead of guessing at which flag matched.
   print -r -- "$(date '+%Y-%m-%d %H:%M:%S') [hook] cmd=[$1] pin_sid=${pin_sid:-none}" >> ~/.cache/claude-panel-launch.log
@@ -4848,7 +4848,7 @@ if [ -f "$ZSHRC" ] && grep -qF "$MARKER" "$ZSHRC"; then
     fi
     rm -f "$zshrc_new"
   else
-    echo "~/.zshrc has the autolaunch hook but no end marker — hand-edited, leaving it as-is." >&2
+    echo "~/.zshrc has the autolaunch hook but no end marker, hand-edited, leaving it as-is." >&2
   fi
 else
   echo "Adding the autolaunch hook to ~/.zshrc ..."
@@ -4858,20 +4858,20 @@ rm -f "$ZSHRC_BLOCK"
 
 # If a `ghostty-claude-launcher` script exists (e.g. a Finder Service /
 # Automator workflow that runs `open -na Ghostty.app --args -e
-# ghostty-claude-launcher <folder>`), patch it too — that path execs
+# ghostty-claude-launcher <folder>`), patch it too, that path execs
 # `claude` directly with no interactive shell involved, so the preexec
 # hook above never fires for it. Best-effort: inserts the launcher call
 # immediately before the file's last line (its own launch line).
 GCL="$BIN_DIR/ghostty-claude-launcher"
 GCL_MARKER="# Auto-open the live ccusage stats panel"
 if [ -f "$GCL" ] && grep -qF "$GCL_MARKER" "$GCL"; then
-  echo "~/.local/bin/ghostty-claude-launcher already patched — leaving it as-is."
+  echo "~/.local/bin/ghostty-claude-launcher already patched, leaving it as-is."
 elif [ -f "$GCL" ]; then
   echo "Patching ~/.local/bin/ghostty-claude-launcher (Finder Service launch path) ..."
   tmp=$(mktemp)
   gcl_lines=$(wc -l < "$GCL")
   # Keep a comment line directly above the final exec line attached to
-  # it — splitting purely on "all but the last line" strands that
+  # it, splitting purely on "all but the last line" strands that
   # comment above the newly inserted block instead of above the command
   # it actually describes.
   tail_start=$gcl_lines
@@ -4885,17 +4885,17 @@ elif [ -f "$GCL" ]; then
 
 # Auto-open the live ccusage stats panel in a right-hand split, pinned to
 # the exact session ID `claude` is about to start with (--session-id,
-# injected into the launch line below) — this path execs `claude` directly
+# injected into the launch line below), this path execs `claude` directly
 # as caffeinate's own argument, never typed at an interactive zsh prompt,
 # so the zshrc preexec hook (and its pin-vs-guess decision) never sees it
 # and never fires. Every session launched this way was unpinned, 100% of
 # the time, forcing the panel to guess which transcript was this pane's by
-# birth-time/recency — provably wrong whenever a second, already-open pane
+# birth-time/recency, provably wrong whenever a second, already-open pane
 # in the same project directory is concurrently active: confirmed live, a
 # brand-new blank pane displayed a different, already-running pane's
 # 47-turn/$3.99 conversation as its own "This Session" table. This window
 # is always freshly created by the Finder Service (`open -na`), so there's
-# no risk of double-launching — runs in the background so it doesn't delay
+# no risk of double-launching, runs in the background so it doesn't delay
 # Claude Code starting.
 PIN_SID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 [ -x "$HOME/.local/bin/claude-panel-launch.sh" ] && "$HOME/.local/bin/claude-panel-launch.sh" "$PIN_SID" &
@@ -4913,11 +4913,11 @@ GCL_EOF
     esac
   done < <(tail -n "$((gcl_lines - tail_start + 1))" "$GCL")
   grep -qF '"$CLAUDE" --session-id "$PIN_SID"' "$tmp" ||
-    echo "  (warning: couldn't find a \$CLAUDE invocation to pin --session-id onto — panel will still fall back to guessing for this launch path)" >&2
+    echo "  (warning: couldn't find a \$CLAUDE invocation to pin --session-id onto, panel will still fall back to guessing for this launch path)" >&2
   mv "$tmp" "$GCL"
   chmod +x "$GCL"
 else
-  echo "No ~/.local/bin/ghostty-claude-launcher found — skipping (not using that Finder Service workflow)."
+  echo "No ~/.local/bin/ghostty-claude-launcher found, skipping (not using that Finder Service workflow)."
 fi
 
 # CLAUDE_PANEL_REMOTE_CONTROL for the Finder launch path, which execs claude
@@ -4956,7 +4956,7 @@ GCL_RC_EOF
 fi
 
 # The launcher shrinks the new split to ~1/3 width via repeated
-# ctrl+shift+l presses — needs these two resize_split keybinds in
+# ctrl+shift+l presses, needs these two resize_split keybinds in
 # Ghostty's own config (idempotent: skip any already present).
 GHOSTTY_CONF="$HOME/.config/ghostty/config"
 if [ -f "$GHOSTTY_CONF" ]; then
@@ -4972,10 +4972,10 @@ if [ -f "$GHOSTTY_CONF" ]; then
   if [ "$added_keybind" -eq 1 ]; then
     echo "Added resize_split keybinds to ~/.config/ghostty/config."
   else
-    echo "~/.config/ghostty/config already has the resize_split keybinds — leaving as-is."
+    echo "~/.config/ghostty/config already has the resize_split keybinds, leaving as-is."
   fi
 else
-  echo "No ~/.config/ghostty/config found — skipping resize keybinds (the split will stay 50/50)."
+  echo "No ~/.config/ghostty/config found, skipping resize keybinds (the split will stay 50/50)."
 fi
 
 echo "Installing claude-day-projection.sh ..."
@@ -5313,7 +5313,7 @@ if [ "${1:-}" = "--report" ]; then
 fi
 
 # Claude Code passes this hook's own session_id on stdin as JSON (the
-# UserPromptSubmit payload) — read that instead of guessing "most recently
+# UserPromptSubmit payload), read that instead of guessing "most recently
 # modified transcript file" via `ls -t ~/.claude/projects/*/*.jsonl`, which
 # picks up whichever session anywhere on the machine last wrote a line and
 # would alert on (or throttle-state-track) the WRONG session whenever a
@@ -5556,7 +5556,7 @@ context = []
 # lock-screen preview.
 if alert_daily == "1":
     lines.append(
-        f"\U0001f7e5 DAILY SPEND — ${float(today_cost):.2f} today, over your "
+        f"\U0001f7e5 DAILY SPEND: ${float(today_cost):.2f} today, over your "
         f"${float(daily_limit):.2f} {daily_sigma}\u03c3 limit "
         f"(mean ${float(daily_mean):.2f} over {daily_n} days)"
     )
@@ -5571,7 +5571,7 @@ if alert_badday == "1":
     # a projection stated as though it had already happened is the kind of
     # alert people learn to stop believing.
     lines.append(
-        f"\U0001f7e0 BAD DAY AHEAD — heading for ${float(today_proj):.2f} today, over your "
+        f"\U0001f7e0 BAD DAY AHEAD: heading for ${float(today_proj):.2f} today, over your "
         f"${float(daily_limit_proj):.2f} {daily_sigma_proj}\u03c3 line "
         f"(${float(today_cost):.2f} spent so far)"
     )
@@ -5585,18 +5585,18 @@ if alert_cost == "1":
     avg = float(avg_session_cost)
     mult = (cost / avg) if avg > 0 else 0
     if tier == "purple":
-        head, tail = "\U0001f7e3 RUNAWAY COST", " — consider wrapping up or starting a fresh session"
+        head, tail = "\U0001f7e3 RUNAWAY COST", ", consider wrapping up or starting a fresh session"
     else:
         head, tail = "\U0001f534 COST ALERT", ""
     lines.append(
-        f"{head} — ${cost:.2f} this session, {mult:.1f}x your ${avg:.2f} average{tail}"
+        f"{head}: ${cost:.2f} this session, {mult:.1f}x your ${avg:.2f} average{tail}"
     )
     context.append(
         f"This session has cost ${cost:.2f}, {mult:.1f}x the 7-day average session cost of ${avg:.2f}."
     )
 if alert_launch == "1":
     lines.append(
-        "⚠️ PANEL DIDN'T LAUNCH — no usage panel for this window (see ~/.cache/claude-panel-launch.log)"
+        "⚠️ PANEL DIDN'T LAUNCH: no usage panel for this window (see ~/.cache/claude-panel-launch.log)"
     )
     context.append("The ccusage split-panel failed to launch for this window.")
 
@@ -5681,7 +5681,7 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
   if jq -e --arg cmd "$ALERT_CMD" '
       (.hooks.UserPromptSubmit // []) | any(.hooks[]?.command == $cmd)
     ' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
-    echo "~/.claude/settings.json already has the cost-alert hook — leaving as-is."
+    echo "~/.claude/settings.json already has the cost-alert hook, leaving as-is."
   else
     tmp=$(mktemp)
     jq --arg cmd "$ALERT_CMD" '
@@ -5692,7 +5692,7 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     echo "Added the cost-alert hook to ~/.claude/settings.json (UserPromptSubmit)."
   fi
 else
-  echo "No ~/.claude/settings.json found — skipping the cost-alert hook."
+  echo "No ~/.claude/settings.json found, skipping the cost-alert hook."
 fi
 
 SESSION_HOOK_CMD="~/.local/bin/claude-panel-session-hook.sh"
@@ -5700,7 +5700,7 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
   if jq -e --arg cmd "$SESSION_HOOK_CMD" '
       (.hooks.SessionStart // []) | any(.hooks[]?.command == $cmd)
     ' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
-    echo "~/.claude/settings.json already has the session-pin hook — leaving as-is."
+    echo "~/.claude/settings.json already has the session-pin hook, leaving as-is."
   else
     tmp=$(mktemp)
     # No matcher: every SessionStart source (startup, resume, clear, compact)
@@ -5714,14 +5714,14 @@ if [ -f "$CLAUDE_SETTINGS" ]; then
     echo "Added the session-pin hook to ~/.claude/settings.json (SessionStart)."
   fi
 else
-  echo "No ~/.claude/settings.json found — skipping the session-pin hook."
+  echo "No ~/.claude/settings.json found, skipping the session-pin hook."
   echo "  (the panel will still get its pin from claude-panel-launch.sh, but"
   echo "   --resume/--continue and GUI launches will fall back to guessing)"
 fi
 
 echo
 echo "Done. Open a NEW terminal window/tab (or 'source ~/.zshrc') and type"
-echo "any 'claude...' command — it'll auto-split right and start the panel."
+echo "any 'claude...' command, it'll auto-split right and start the panel."
 echo "Same goes for the 'Launch Claude Code in Ghostty' Finder Service, if"
 echo "you use one (patched above when present)."
 echo "Run the panel manually any time with: ~/.local/bin/ccusage-panel.sh"
@@ -5739,7 +5739,7 @@ fi
 if [ -x "$BIN_DIR/claude-panel-keyblock" ]; then
   echo
   echo "The first auto-split will prompt macOS for two more permissions, for"
-  echo "claude-panel-keyblock this time — grant BOTH Accessibility and Input"
+  echo "claude-panel-keyblock this time, grant BOTH Accessibility and Input"
   echo "Monitoring (System Settings > Privacy & Security) or the keyboard"
   echo "guard silently no-ops and typing during window setup can interfere"
   echo "again, same as before it existed."

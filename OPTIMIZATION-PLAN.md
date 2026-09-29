@@ -4,7 +4,7 @@
 > The cost this document identified is real and reproduces (~49 CPU-min/day,
 > measured). The attribution is wrong: ~90% of it is the 120s slow tier, not
 > the 10s fast tick, so Tier 2's ceiling was ~5 min/day. Two claims here are
-> also incorrect — `ps -o time` excludes children, so the 47-minute figure is
+> also incorrect, `ps -o time` excludes children, so the 47-minute figure is
 > not the panel process's own CPU; and Tier 2's "no change in behavior anyone
 > would notice" is false, since a backed-off tier shows a landed turn up to
 > 60s late. Kept as the record of the investigation.
@@ -14,7 +14,7 @@ dev machine traced part of the cost to this panel. Two instances of
 `ccusage-panel.sh` had been running continuously for ~24h (one per
 long-lived Claude Code session, auto-launched by `claude-panel-launch.sh`),
 each showing **~47 minutes of accumulated CPU time** in `ps`. That's not
-explained by the corpus-change gating already in the script (see below) —
+explained by the corpus-change gating already in the script (see below),
 that gating is real and working. The remaining cost is architectural: the
 panel wakes up and does a bounded amount of fork/exec work every 10s,
 **forever, regardless of whether anything has happened**, and that steady
@@ -30,21 +30,21 @@ feature allows, in three tiers ordered by risk.
 Verified by reading the current script, not assumed:
 
 - `ccusage_cached()` (line ~526) gates every `ccusage` invocation behind
-  `corpus_changed_since()` (line ~505) — a `find ~/.claude/projects -newer
+  `corpus_changed_since()` (line ~505), a `find ~/.claude/projects -newer
   <cache_file> -print -quit`, ~0.01 CPU-seconds, vs. ~3 CPU-seconds for a
   real `ccusage` call. `ccusage_query_is_gated()` is an intentional
-  always-true stub (line ~523) — every query is a pure function of the
+  always-true stub (line ~523), every query is a pure function of the
   transcript corpus, so nothing is exempt. **This is correct and already
   eliminates the expensive path when idle.**
 - `turn_table_cached()` (line ~880), `session_identity_cached()` (line
   ~812), and `session_today_tokens_cached()` (line ~779) all key on
   `transcript_stamp()` (mtime+size) and skip their `python3`/`ccusage`
   invocation entirely on a cache hit.
-- `block_clock_tick()` (line ~1319) is pure arithmetic (`awk`, no fetch) —
+- `block_clock_tick()` (line ~1319) is pure arithmetic (`awk`, no fetch),
   it recomputes the countdown from the block's fixed start/end epochs, not
   from a re-fetch. This is *supposed* to run every fast tick; the countdown
   is genuinely live information, not wasted work. Any optimization below
-  must not freeze this when a block is active — that exact regression was
+  must not freeze this when a block is active, that exact regression was
   already fixed once (`ccusage_query_is_gated()`'s own comment describes
   it) and must not come back.
 - `refresh_hourly_buckets()` (line ~307) is TTL-gated (900s) with an
@@ -52,12 +52,12 @@ Verified by reading the current script, not assumed:
   Correct as-is.
 
 None of the above needs to change. The gating logic is sound; don't rewrite
-it defensively "for safety" — every one of these functions has a commit in
+it defensively "for safety", every one of these functions has a commit in
 this repo's history fixing a real, previously-shipped bug in this exact
 area (`7ba4fe5`, `3c71c2d`, `8648e0b`). Read `git log -p` on a function
 before touching it.
 
-## Tier 1 — dedupe redundant forks per tick (low risk, do first)
+## Tier 1, dedupe redundant forks per tick (low risk, do first)
 
 Every fast tick (10s), the same transcript file's mtime+size is
 independently re-derived via `transcript_stamp()` up to 3 times in one
@@ -72,18 +72,18 @@ in the main loop, and pass it into `turn_table_cached()` /
 `session_identity_cached()` as a parameter instead of having each function
 independently re-derive it. `session_today_tokens_cached()` is called once
 per session-shown-in-Top-Sessions, so it necessarily stamps a different
-file each time — leave that one alone.
+file each time, leave that one alone.
 
 Expected effect: modest, real reduction in per-tick fork count on an idle
-pane (roughly halves the `stat` forks). Not the main win — see Tier 2 — but
+pane (roughly halves the `stat` forks). Not the main win, see Tier 2, but
 essentially free to do and zero behavioral risk since it's a pure
 call-site refactor of an already-correct cache key.
 
-## Tier 2 — adaptive backoff when idle (the actual fix for "zero work")
+## Tier 2, adaptive backoff when idle (the actual fix for "zero work")
 
 This is the one that matters. Right now the main loop (`while true; do ...
 sleep "$REFRESH" & wait $!; done`, line ~1900) wakes up every `$REFRESH`
-(10s) unconditionally, for the life of the pane — there is no concept of
+(10s) unconditionally, for the life of the pane, there is no concept of
 "nothing is happening, stop checking so often." That fixed cadence is what
 keeps the process (and by extension the machine) from ever settling into a
 longer idle interval, independent of how cheap each individual check is.
@@ -94,14 +94,14 @@ gate, applied to the pane's own transcript directory) and no active block.
 Back off the sleep interval on a schedule, e.g.:
 
 ```
-0–2 idle ticks:    10s  (unchanged — stay responsive right after activity)
-3–11 idle ticks:   30s  (nothing happened for 30–60s)
+0-2 idle ticks:    10s  (unchanged, stay responsive right after activity)
+3-11 idle ticks:   30s  (nothing happened for 30-60s)
 12+ idle ticks:    60s  (nothing happened for 2+ minutes)
 ```
 
 Reset to the 10s tier the instant `corpus_changed_since()` reports a change
 (a new turn landed) or the terminal is resized. **Never back off while a
-block is active and being shown with a live countdown** — the whole point
+block is active and being shown with a live countdown**, the whole point
 of `block_clock_tick()` is that it's live; backing off the tier while
 `has_block=1` would reintroduce the exact "frozen countdown" bug
 `ccusage_query_is_gated()`'s comment describes, just via a different
@@ -109,12 +109,12 @@ mechanism. Gate the backoff on `has_block` being unset/0.
 
 This turns "8640 ticks/day, every one doing a bounded amount of work" into
 "8640 ticks/day only while something is actually happening; an idle pane
-with no active block drops to ~1440 ticks/day (60s cadence)" — a real ~6x
+with no active block drops to ~1440 ticks/day (60s cadence)", a real ~6x
 reduction in wakeups for the common case (pane open, nobody typing, no
 block running), with no change in behavior anyone would notice: the
 information shown doesn't change any faster than the corpus does anyway.
 
-## Tier 3 — event-driven instead of polling (bigger change, do only if Tier 2 isn't enough)
+## Tier 3, event-driven instead of polling (bigger change, do only if Tier 2 isn't enough)
 
 The architecturally "true zero work" version doesn't poll on a timer at
 all: it blocks on a filesystem watch (`fswatch` if installed, otherwise
@@ -148,10 +148,10 @@ improvement isn't sufficient) because:
 
 ## Out of scope for this plan
 
-- `opencode-panel-setup.sh` / `opencode-panel.sh` — not investigated here;
+- `opencode-panel-setup.sh` / `opencode-panel.sh`: not investigated here;
   the same idle-cost question likely applies but needs its own pass since
   it has a different backing CLI (`opencode stats`, not `ccusage`).
-- claude-burst (the gateway) — unrelated finding from the same
+- claude-burst (the gateway): unrelated finding from the same
   investigation: a critical-battery event (2%) caused macOS to kill and
   unload claude-burst's own LaunchAgent, which is now handled by a
   separate self-heal watchdog in that repo. Not a ccusage-panel concern.
