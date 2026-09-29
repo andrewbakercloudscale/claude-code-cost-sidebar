@@ -3173,6 +3173,7 @@ build_summary() {
       awk -v v="$ctx_pct" -v t="$CTX_RED" 'BEGIN{exit !(v+0>t)}' && label_color="$ctx_color"
       printf '  %s🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
         "$label_color" "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
+      restart_banner "$ctx_tokens"
     else
       # No context figure from the parse -- a session whose first turn has
       # not landed yet, or an older cache entry. "N/A" is the honest answer;
@@ -3462,6 +3463,33 @@ panel_option() { # $1 = KEY
     true|1|yes|on) return 0 ;;
   esac
   return 1
+}
+
+# Numeric options from the same file, same precedence. Prints the value when
+# it is a plain non-negative integer, else the default ($2). A typo must not
+# silently disable a warning, so anything unparseable falls back.
+panel_option_int() { # $1 = KEY, $2 = default
+  local v="${!1:-}"
+  if [ -z "$v" ]; then
+    v=$(grep -E "^$1=" "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
+    v="${v#*=}"
+  fi
+  v=$(printf '%s' "$v" | tr -d '"'"'"' _,')
+  case "$v" in
+    ''|*[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$((10#$v))" ;;
+  esac
+}
+
+# CLAUDE_PANEL_RESTART_TOKENS (default 400000; 0 turns it off): once this
+# session's context reaches it, a bold red line says to restart. A token
+# count rather than a percentage, because the cost of a long context is per
+# token -- every turn re-reads it -- whether the window is 200k or 1M.
+restart_banner() { # $1 = context tokens
+  local limit
+  limit=$(panel_option_int CLAUDE_PANEL_RESTART_TOKENS 400000)
+  [ "$limit" -gt 0 ] && [ "${1:-0}" -ge "$limit" ] || return 0
+  printf '  %s%s*** RESTART DUE TO HIGH CONTEXT ***%s\n' "$C_BOLD" "$C_RED" "$C_RESET"
 }
 
 # Test seam: source this file with PANEL_LIB_ONLY=1 to get every function
@@ -4515,10 +4543,14 @@ mkdir -p "$(dirname "$PANEL_OPTIONS")"
   "# claude-panel options -- true/false. Written by claude-panel-setup.sh." \
   "# CLAUDE_PANEL_REMOTE_CONTROL: start interactive claude sessions with --remote-control" \
   "# CLAUDE_PANEL_CAFFEINATE: keep the Mac awake (caffeinate -i) while a panel runs" \
+  "# CLAUDE_PANEL_RESTART_TOKENS: context size that shows a red restart warning (0 = off)" \
   > "$PANEL_OPTIONS"
 for opt in CLAUDE_PANEL_REMOTE_CONTROL CLAUDE_PANEL_CAFFEINATE; do
   grep -qE "^$opt=" "$PANEL_OPTIONS" || printf '%s=false\n' "$opt" >> "$PANEL_OPTIONS"
 done
+grep -qE '^CLAUDE_PANEL_RESTART_TOKENS=' "$PANEL_OPTIONS" \
+  || printf '%s\n' "# CLAUDE_PANEL_RESTART_TOKENS: context size that shows a red restart warning (0 = off)" \
+       "CLAUDE_PANEL_RESTART_TOKENS=400000" >> "$PANEL_OPTIONS"
 echo "Options: $PANEL_OPTIONS ($(grep -E '^CLAUDE_PANEL_' "$PANEL_OPTIONS" | tr '\n' ' '))"
 
 ZSHRC="$HOME/.zshrc"
