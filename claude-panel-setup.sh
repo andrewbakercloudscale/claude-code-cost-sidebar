@@ -1399,6 +1399,20 @@ unpriced_models() {
           | .modelName] | unique | .[]' <<<"$1" 2>/dev/null
 }
 
+# The unpriced models' share of a daily report's usage, in percent, weighted
+# by the ratios every Claude model's price list shares (output 5x input, cache
+# writes 1.25x, cache reads 0.1x), so no price for the model itself is needed.
+# A model that is only a sliver of the day (a one-line test of a new alias)
+# must not blank the whole Today figure the way a day's main model would.
+unpriced_share_pct() {
+  jq -r 'def w: (.inputTokens // 0) + 5 * (.outputTokens // 0)
+               + 1.25 * (.cacheCreationTokens // 0) + 0.1 * (.cacheReadTokens // 0);
+         [.daily[]?.modelBreakdowns[]?] as $all
+         | ([$all[] | w] | add // 0) as $tot
+         | ([$all[] | select((.cost // 0) == 0) | w] | add // 0) as $un
+         | if $tot > 0 then ($un * 100 / $tot) else 0 end' <<<"$1" 2>/dev/null || echo 100
+}
+
 # This week's spend out of the weekly report, without knowing which day the
 # tool calls the start of a week.
 #
@@ -3200,8 +3214,18 @@ build_summary() {
     printf '  %s⚠ no price for %s— totals below exclude it%s\n' \
       "$C_YELLOW" "$recent_unpriced" "$C_RESET"
   fi
-  if [ -n "$today_unpriced" ]; then
+  # Under 1% of the day's usage the priced figure is still the answer, so it
+  # is shown with the gap named rather than withheld.
+  today_unpriced_small=0
+  if [ -n "$today_unpriced" ] && awk -v p="$(unpriced_share_pct "$today_daily_json")" 'BEGIN{exit !(p < 1)}'; then
+    today_unpriced_small=1
+  fi
+  if [ -n "$today_unpriced" ] && [ "$today_unpriced_small" != 1 ]; then
     printf '  📅 Today: %s? (unpriced model)%s\n' "$C_YELLOW" "$C_RESET"
+  elif [ -n "$today_unpriced" ]; then
+    tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
+    printf '  📅 Today: %s$%s%s %s(+ unpriced, under 1%%)%s\n' \
+      "$tc" "$today_amt" "$C_RESET" "$C_YELLOW" "$C_RESET"
   else
     tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
     pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
@@ -3377,7 +3401,6 @@ slow_frame_due() { # $1 = now epoch
 
 build_trailing() {
   echo
-  echo
 
   # ---- recent: today's totals/models + 3-day trend + week/month, one
   # header. Was three separate headers (TODAY, LAST 3 DAYS, WEEK / MONTH)
@@ -3397,12 +3420,20 @@ build_trailing() {
       .totals | [.totalCost, .totalTokens, .inputTokens, .outputTokens, .cacheCreationTokens, .cacheReadTokens] | @tsv
     ' <<<"$daily_json")"
     unpriced_today=$(unpriced_models "$daily_json")
-    if [ -n "$unpriced_today" ]; then
+    # Same rule as build_summary's Today line: an unpriced sliver (under 1%
+    # of the day) shows the priced total with the gap named.
+    if [ -n "$unpriced_today" ] && ! awk -v p="$(unpriced_share_pct "$daily_json")" 'BEGIN{exit !(p < 1)}'; then
       printf '  %stoday:%s ? | %s tokens\n' "$C_CYAN" "$C_RESET" "$(fmt_mt "$tTok")"
+    elif [ -n "$unpriced_today" ]; then
+      printf '  %stoday:%s %s %s(+ unpriced)%s | %s tokens\n' "$C_CYAN" "$C_RESET" "$(fmt_money "$tCost")" "$C_YELLOW" "$C_RESET" "$(fmt_mt "$tTok")"
     else
       printf '  %stoday:%s %s | %s tokens\n' "$C_CYAN" "$C_RESET" "$(fmt_money "$tCost")" "$(fmt_mt "$tTok")"
     fi
-    models_line=""
+    # Wrapped at the pane's width rather than cut off at its edge: five
+    # models in a day ran past a narrow pane and the last one's cost was
+    # the part lost. Widths are counted without the colour codes.
+    models_line="" models_w=0
+    local wrap_w=$(( ${cols:-80} - 2 ))
     while IFS=$'\t' read -r mname mcost; do
       [ -z "$mname" ] && continue
       # Short label: drop the "claude-" prefix and any -YYYYMMDD date suffix.
@@ -3410,11 +3441,18 @@ build_trailing() {
       [[ $mlabel =~ ^(.*)-[0-9]{8}$ ]] && mlabel=${BASH_REMATCH[1]}
       # ccusage's $0 for a model it cannot price is not a cost; show "?".
       if grep -qxF "$mname" <<<"$unpriced_today"; then
-        seg="${C_CYAN}${mlabel}:${C_RESET} ${C_YELLOW}?${C_RESET}"
+        mval="?" seg="${C_CYAN}${mlabel}:${C_RESET} ${C_YELLOW}?${C_RESET}"
       else
-        seg="${C_CYAN}${mlabel}:${C_RESET} $(fmt_money "$mcost")"
+        mval=$(fmt_money "$mcost") seg="${C_CYAN}${mlabel}:${C_RESET} $mval"
       fi
-      models_line="${models_line:+$models_line | }$seg"
+      seg_w=$(( ${#mlabel} + 2 + ${#mval} ))
+      if (( models_w == 0 )); then
+        models_line=$seg models_w=$seg_w
+      elif (( models_w + 3 + seg_w > wrap_w )); then
+        models_line+=$'\n  '"$seg" models_w=$seg_w
+      else
+        models_line+=" | $seg" models_w=$(( models_w + 3 + seg_w ))
+      fi
     done < <(jq -r '.daily[0].modelBreakdowns[]? | [.modelName, .cost] | @tsv' <<<"$daily_json")
     printf '  %s\n' "$models_line"
   else
