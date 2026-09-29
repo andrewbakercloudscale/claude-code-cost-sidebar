@@ -5677,6 +5677,17 @@ echo "any 'claude...' command — it'll auto-split right and start the panel."
 echo "Same goes for the 'Launch Claude Code in Ghostty' Finder Service, if"
 echo "you use one (patched above when present)."
 echo "Run the panel manually any time with: ~/.local/bin/ccusage-panel.sh"
+echo
+# Claude Burst (a separate, optional gateway) writes metrics.jsonl, which the
+# turn table reads for its auto compaction rows. Neither needs the other.
+if [ -d "$HOME/.config/claude-burst" ]; then
+  echo "Claude Burst detected: the turn table marks its auto compaction (Started and"
+  echo "Finished rows, a green negative delta, and the summary cost in the session total)."
+else
+  echo "Optional: Claude Burst (https://github.com/andrewbakercloudscale/claude-burst)"
+  echo "compacts long subscription sessions at the proxy, and this panel's turn table"
+  echo "then shows each compaction and what it cost."
+fi
 if [ -x "$BIN_DIR/claude-panel-keyblock" ]; then
   echo
   echo "The first auto-split will prompt macOS for two more permissions, for"
