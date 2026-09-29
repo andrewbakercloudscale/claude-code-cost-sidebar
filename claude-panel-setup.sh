@@ -3037,10 +3037,9 @@ build_summary() {
     # name say nothing about what they are -- and not "Session", which is
     # already the label on the money line directly below. Two rows reading
     # "Session:" and meaning different things (an identifier, a spend) is
-    # worse than either being unlabelled. Printed with the * prefix only in
-    # Top Sessions, where it marks one row out of several; here there is
-    # nothing to distinguish it from.
-    printf '  🤖 Model: %s%s%s  SID: %s%s%s\n' \
+    # worse than either being unlabelled. The leading * says the id is
+    # truncated (the last five characters of the UUID), not the whole thing.
+    printf '  🤖 Model: %s%s%s  SID: %s*%s%s\n' \
       "$mtc" "${model_label:-Unknown}" "$C_RESET" \
       "$C_ELECTRIC" "${sess_id: -5}" "$C_RESET"
   else
