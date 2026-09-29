@@ -353,7 +353,7 @@ panel_ps() {
   printf '%s\n' "$PANEL_PS_SNAPSHOT"
 }
 
-C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_BLINK=$'\033[5m'
 # No dim/faint attribute anywhere in this panel: \033[2m renders as a
 # low-contrast grey, which is unreadable at a glance on a dark pane and is
 # not a colour this panel uses. Everything it used to mark is now either a
@@ -3489,7 +3489,9 @@ restart_banner() { # $1 = context tokens
   local limit
   limit=$(panel_option_int CLAUDE_PANEL_RESTART_TOKENS 400000)
   [ "$limit" -gt 0 ] && [ "${1:-0}" -ge "$limit" ] || return 0
-  printf '  %s%s*** RESTART DUE TO HIGH CONTEXT ***%s\n' "$C_BOLD" "$C_RED" "$C_RESET"
+  # SGR 5 (blink) makes the terminal flash it on its own clock: this line is
+  # only redrawn every $SLOW_REFRESH, far too seldom to flash it ourselves.
+  printf '  %s%s%s*** RESTART DUE TO HIGH CONTEXT ***%s\n' "$C_BLINK" "$C_BOLD" "$C_RED" "$C_RESET"
 }
 
 # Test seam: source this file with PANEL_LIB_ONLY=1 to get every function

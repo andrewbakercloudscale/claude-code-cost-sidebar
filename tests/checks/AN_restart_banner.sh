@@ -11,6 +11,7 @@ check_AN_restart_banner() {
   assert_eq "below the default 400k: no warning" "" "$(restart_banner 399999)"
   assert_contains "at the default 400k: warning" "$msg" "$(restart_banner 400000)"
   assert_contains "in red" $'\033[31m' "$(restart_banner 400000)"
+  assert_contains "flashing" $'\033[5m' "$(restart_banner 400000)"
 
   mkdir -p "$(dirname "$f")"
   printf 'CLAUDE_PANEL_RESTART_TOKENS=250000\n' > "$f"
