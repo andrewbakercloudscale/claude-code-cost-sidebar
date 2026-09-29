@@ -3322,11 +3322,14 @@ build_trailing() {
     models_line=""
     while IFS=$'\t' read -r mname mcost; do
       [ -z "$mname" ] && continue
+      # Short label: drop the "claude-" prefix and any -YYYYMMDD date suffix.
+      mlabel=${mname#claude-}
+      [[ $mlabel =~ ^(.*)-[0-9]{8}$ ]] && mlabel=${BASH_REMATCH[1]}
       # ccusage's $0 for a model it cannot price is not a cost; show "?".
       if grep -qxF "$mname" <<<"$unpriced_today"; then
-        seg="${C_CYAN}${mname#claude-}:${C_RESET} ${C_YELLOW}?${C_RESET}"
+        seg="${C_CYAN}${mlabel}:${C_RESET} ${C_YELLOW}?${C_RESET}"
       else
-        seg="${C_CYAN}${mname#claude-}:${C_RESET} $(fmt_money "$mcost")"
+        seg="${C_CYAN}${mlabel}:${C_RESET} $(fmt_money "$mcost")"
       fi
       models_line="${models_line:+$models_line | }$seg"
     done < <(jq -r '.daily[0].modelBreakdowns[]? | [.modelName, .cost] | @tsv' <<<"$daily_json")
