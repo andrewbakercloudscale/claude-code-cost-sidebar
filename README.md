@@ -15,8 +15,7 @@ Full write-up and motivation: **[AI coding costs are guesswork without this: ins
 - **Per-turn breakdown of the current session** — turn number, model, context size, context growth (Δ) since the last turn, cache hit %, and estimated cost per turn, read straight out of the session transcript and priced against Anthropic's published per-model rates (including cache read/write multipliers).
 - **Live status line** — current session value, today's value, active-block burn rate, 7-day average session cost, 30-day value, and the current project folder. ("Value" because these are priced at pay-as-you-go API rates regardless of what plan you're actually on — see note below.)
 - **Active block** — start/end time, value so far, burn rate ($/hr and tokens/min, color-coded green/yellow/red), and a projected total for the block.
-- **Today** — total cost/tokens, input/output split, cache new/read split, and a per-model breakdown.
-- **Last 3 days** — a simple cost bar chart.
+- **Recent**: today's cost and tokens with a per-model breakdown (wrapped onto a second line when the pane is narrow), the last 3 days as dated costs (`3 days: 27th $75  28th $226  29th $141`), and this week and month. A model ccusage cannot price shows as `?`; when it is under 1% of the day's usage, today's total is still shown, marked `(+ unpriced)`, instead of being withheld.
 - **Week / month totals.**
 - **Top 5 sessions today** by cost.
 
