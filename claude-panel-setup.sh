@@ -1421,7 +1421,7 @@ unpriced_share_pct() {
 # consecutive `ccusage weekly` periods". They are Sundays. On a Tuesday the
 # panel therefore asked for a key no row carried, the `// 0` fallback caught
 # the miss, and the line rendered a confident `week: $0` on a week that had
-# several days of usage in it -- next to a `3d:` line listing that usage.
+# several days of usage in it -- next to a `3 days:` line listing that usage.
 # The same silent shape as the `.period` rename in check Q, and it survived
 # for the same reason: the only weekly fixture in the suite was keyed to a
 # Monday, so the test agreed with the bug.
@@ -3472,7 +3472,7 @@ build_trailing() {
       seg="${C_CYAN}${day:8}${C_RESET} $(fmt_money "$dcost")"
       trend_line="${trend_line:+$trend_line  }$seg"
     done < <(jq -r '.daily[] | [.period, .totalCost, .totalTokens] | @tsv' <<<"$trend_json")
-    printf '  %s3d:%s %s\n' "$C_CYAN" "$C_RESET" "$trend_line"
+    printf '  %s3 days:%s %s\n' "$C_CYAN" "$C_RESET" "$trend_line"
   fi
   recent_json=$(recent_sections)
   week_cost=$(current_week_cost "$recent_json")

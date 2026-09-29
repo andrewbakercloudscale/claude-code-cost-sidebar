@@ -4,7 +4,7 @@
 # a SUNDAY. The panel used to compute the Monday and ask for that key
 # exactly, so from Monday to Saturday it asked for a key no row carried; the
 # `// 0` fallback caught the miss and the line rendered `week: $0` on a week
-# with several days of spend in it, directly above a `3d:` line listing that
+# with several days of spend in it, directly above a `3 days:` line listing that
 # spend. Nothing errored and nothing was logged.
 #
 # The suite agreed with the bug, which is the part worth guarding: the only
