@@ -3,7 +3,7 @@
 # Today is withheld (`?`) when a model ccusage cannot price ran today,
 # because the missing part can be most of the day. On 2026-09-29 a one-line
 # `claude -p --model sonnet` test (the alias had moved to claude-sonnet-5-5)
-# blanked a $400 day over a few cents. unpriced_share_pct weighs the unpriced
+# blanked a whole day's total over a few cents. unpriced_share_pct weighs the unpriced
 # models' tokens against the day's; under 1% the priced figure is shown with
 # the gap named.
 check_AO_unpriced_share() {
