@@ -353,7 +353,7 @@ panel_ps() {
   printf '%s\n' "$PANEL_PS_SNAPSHOT"
 }
 
-C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_BLINK=$'\033[5m'
+C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
 # No dim/faint attribute anywhere in this panel: \033[2m renders as a
 # low-contrast grey, which is unreadable at a glance on a dark pane and is
 # not a colour this panel uses. Everything it used to mark is now either a
@@ -3489,9 +3489,41 @@ restart_banner() { # $1 = context tokens
   local limit
   limit=$(panel_option_int CLAUDE_PANEL_RESTART_TOKENS 400000)
   [ "$limit" -gt 0 ] && [ "${1:-0}" -ge "$limit" ] || return 0
-  # SGR 5 (blink) makes the terminal flash it on its own clock: this line is
-  # only redrawn every $SLOW_REFRESH, far too seldom to flash it ourselves.
-  printf '  %s%s%s*** RESTART DUE TO HIGH CONTEXT ***%s\n' "$C_BLINK" "$C_BOLD" "$C_RED" "$C_RESET"
+  restart_banner_line off
+  printf '\n'
+}
+
+# The banner in one of its two flash states, without a newline: "on" is
+# reverse video (a solid red bar), "off" is the plain bold red text. The main
+# loop alternates them between refreshes (flash_restart_banner). SGR 5 blink
+# was tried first and Ghostty does not render it.
+RESTART_BANNER_TEXT='*** RESTART DUE TO HIGH CONTEXT ***'
+restart_banner_line() { # $1 = on|off
+  local rev=""
+  [ "$1" = on ] && rev=$'\033[7m'
+  printf '  %s%s%s%s%s' "$C_BOLD" "$C_RED" "$rev" "$RESTART_BANNER_TEXT" "$C_RESET"
+}
+
+# Waits out one refresh interval like the plain `sleep & wait` it replaces,
+# but when the frame on screen carries the restart banner, redraws just that
+# row once a second in alternating states so it flashes. Only that one row
+# is written, and only while the banner is up, so a pane with a normal
+# context costs no more than before. Each step is a backgrounded, waited-on
+# sleep for the same reason as the main loop's: traps must not wait a tier.
+flash_restart_banner() { # $1 = seconds to wait, $2 = frame on screen
+  local row state=on i
+  row=$(printf '%s\n' "$2" | grep -n -F -m1 "$RESTART_BANNER_TEXT" | cut -d: -f1)
+  if [ -z "$row" ]; then
+    sleep "$1" &
+    wait $! 2>/dev/null
+    return
+  fi
+  for (( i = 0; i < $1; i++ )); do
+    printf '\033[%d;1H%s\033[K' "$row" "$(restart_banner_line "$state")"
+    [ "$state" = on ] && state=off || state=on
+    sleep 1 &
+    wait $! 2>/dev/null
+  done
 }
 
 # Test seam: source this file with PANEL_LIB_ONLY=1 to get every function
@@ -3637,8 +3669,7 @@ while true; do
   # measured at 9.06s on the 10s default. `wait` is interruptible, so the
   # handler runs the moment the signal lands. The orphaned sleep exits on
   # its own a few seconds later and costs nothing.
-  sleep "$REFRESH" &
-  wait $! 2>/dev/null
+  flash_restart_banner "$REFRESH" "$guaranteed"
 done
 PANEL_EOF
 # Mode before rename: the file must already be executable at the instant it

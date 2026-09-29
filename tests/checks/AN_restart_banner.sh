@@ -11,7 +11,9 @@ check_AN_restart_banner() {
   assert_eq "below the default 400k: no warning" "" "$(restart_banner 399999)"
   assert_contains "at the default 400k: warning" "$msg" "$(restart_banner 400000)"
   assert_contains "in red" $'\033[31m' "$(restart_banner 400000)"
-  assert_contains "flashing" $'\033[5m' "$(restart_banner 400000)"
+  assert_contains "flash on: reverse video" $'\033[7m' "$(restart_banner_line on)"
+  assert_contains "flash off: the plain red text" "$msg" "$(restart_banner_line off)"
+  assert_eq "flash off has no reverse video" "" "$(restart_banner_line off | grep -F $'\033[7m')"
 
   mkdir -p "$(dirname "$f")"
   printf 'CLAUDE_PANEL_RESTART_TOKENS=250000\n' > "$f"
