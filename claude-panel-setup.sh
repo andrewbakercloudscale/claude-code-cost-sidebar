@@ -392,6 +392,15 @@ fmt_num() {
 # (These print a "." decimal separator under this account's en_ZA locale,
 # which uses a comma, because the top of this script exports LC_ALL=C --
 # it has since the first commit. Nothing here needs to re-pin it.)
+# ordinal_day 01 -> 1st, 22 -> 22nd, 13 -> 13th.
+ordinal_day() {
+  local n=$((10#${1:-0})) suf=th
+  if (( n % 100 < 11 || n % 100 > 13 )); then
+    case $(( n % 10 )) in 1) suf=st ;; 2) suf=nd ;; 3) suf=rd ;; esac
+  fi
+  printf '%d%s' "$n" "$suf"
+}
+
 fmt_money() {
   awk -v n="${1:-0}" 'BEGIN{ a = (n<0?-n:n); printf (a>0 && a<1) ? "$%.2f" : "$%.0f", n }'
 }
@@ -3469,7 +3478,8 @@ build_trailing() {
       # month is the same for all three cells in a 3-day window and this
       # line was running past the pane's right edge -- the third day's cost,
       # i.e. TODAY's, was the number being truncated away.
-      seg="${C_CYAN}${day:8}${C_RESET} $(fmt_money "$dcost")"
+      # An ordinal ("27th") so a bare day number cannot be read as a count.
+      seg="${C_CYAN}$(ordinal_day "${day:8}")${C_RESET} $(fmt_money "$dcost")"
       trend_line="${trend_line:+$trend_line  }$seg"
     done < <(jq -r '.daily[] | [.period, .totalCost, .totalTokens] | @tsv' <<<"$trend_json")
     printf '  %s3 days:%s %s\n' "$C_CYAN" "$C_RESET" "$trend_line"
