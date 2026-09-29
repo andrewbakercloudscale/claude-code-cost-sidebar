@@ -1811,7 +1811,8 @@ def parse_iso(t):
         return None
 
 def load_secondary_events():
-    """[(epoch, model, output_tokens)] for secondary-served requests."""
+    """[(epoch, model, output_tokens, input_tokens, usd, route)] for
+    secondary-served requests."""
     out = []
     try:
         with open(BURST_METRICS) as f:
@@ -1825,7 +1826,11 @@ def load_secondary_events():
                 ts = parse_iso(e.get("time"))
                 if ts is None or not e.get("model"):
                     continue
-                out.append((ts, e["model"], e.get("output_tokens"), e.get("input_tokens")))
+                # api_equivalent_usd is the gateway's own price for the hop,
+                # from its config's per-model rates (GLM-5.3 on Together:
+                # $1.40/$4.40). Absent on events older than that field.
+                out.append((ts, e["model"], e.get("output_tokens"), e.get("input_tokens"),
+                            e.get("api_equivalent_usd"), e.get("route")))
     except OSError:
         return []
     return out
@@ -1833,19 +1838,19 @@ def load_secondary_events():
 SECONDARY_EVENTS = load_secondary_events()
 
 def secondary_event_for(turn_ts, out_tok):
-    """(model, input_tokens) for the secondary hop that served this turn, or
-    None if it went to primary."""
+    """(model, input_tokens, usd, route) for the secondary hop that served
+    this turn, or None if it went to primary."""
     if turn_ts is None:
         return None
     best, best_gap = None, MATCH_WINDOW_S
-    for ts, model, ev_out, ev_in in SECONDARY_EVENTS:
+    for ts, model, ev_out, ev_in, usd, route in SECONDARY_EVENTS:
         gap = abs(ts - turn_ts)
         if gap > best_gap:
             continue
         # Token agreement is what makes this safe rather than merely likely.
         if ev_out is not None and out_tok is not None and ev_out != out_tok:
             continue
-        best, best_gap = (model, ev_in), gap
+        best, best_gap = (model, ev_in, usd, route), gap
     return best
 
 turns, seen = [], set()
@@ -1899,8 +1904,9 @@ for line in lines:
     # invented. Cost is reported as unknown for these instead.
     ev = secondary_event_for(turn_ts, out_tok)
     is_secondary = ev is not None
+    sec_usd, sec_route = None, None
     if is_secondary:
-        model, ev_in = ev
+        model, ev_in, sec_usd, sec_route = ev
         # Turns served before claude-burst's 2026-09-03 message_delta fix were
         # recorded with "input_tokens": 0 -- the translator sent only
         # output_tokens, so message_start's placeholder 0 stood. The gateway
@@ -1925,10 +1931,15 @@ for line in lines:
             + cw_1h * price_in * CACHE_WRITE_1H_MULT
             + cw_5m * price_in * CACHE_WRITE_5M_MULT
         ) / 1_000_000
+    elif is_secondary and sec_usd is not None:
+        # The secondary vendor's bill, as the gateway priced it. Shown on the
+        # row but kept out of the session total below, which is Anthropic
+        # spend only.
+        cost = float(sec_usd)
     else:
         cost = None
 
-    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model, is_secondary, is_unpriced))
+    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model, is_secondary, is_unpriced, sec_route))
 
 total_n = len(turns)
 shown = turns[-max_rows:]
@@ -1949,7 +1960,7 @@ avg_delta = (sum(t[2] for t in primary_turns) / len(primary_turns)) if primary_t
 # an empty figure as "--". Secondary turns were never Anthropic spend, so
 # they do not blank it.
 sess_total = ("" if any(t[7] for t in turns)
-              else f"{sum(t[4] for t in turns if t[4] is not None):.6f}")
+              else f"{sum(t[4] for t in turns if t[4] is not None and not t[6]):.6f}")
 print(f"#META\t{sess_total}\t{turns[-1][1] if turns else 0}"
       f"\t{context_window_size(turns[-1][5]) if turns else 0}")
 turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
@@ -1963,9 +1974,9 @@ if shown:
     # Newest turn first — this table sits at a fixed position above the
     # sections below it, so the most recent activity would otherwise be the
     # one row that scrolls out of view first as the session grows.
-    saw_secondary = False
+    saw_secondary, secondary_routes = False, set()
     for i in reversed(range(len(shown))):
-        label, total_ctx, delta, cache_pct, cost, model, is_secondary, is_unpriced = shown[i]
+        label, total_ctx, delta, cache_pct, cost, model, is_secondary, is_unpriced, route = shown[i]
         turn_no = start_idx + i
         total_str, delta_str = fmt_k(total_ctx), fmt_k(delta)
         plain_cell = f"{total_str} (+{delta_str})"
@@ -1976,18 +1987,22 @@ if shown:
             # is a third of a terminal wide and every column is already at
             # its minimum.
             saw_secondary = True
+            if route:
+                secondary_routes.add(route)
             label = (label[:9] + "*") if len(label) > 9 else label + "*"
             # Everything downstream of here is an Anthropic-shaped inference
             # that does not survive the trip to a third-party model:
-            #   - cost: no pricing entry, so there is no figure to show
+            #   - cost: the gateway's own figure for the hop when it logged
+            #     one, else "?" -- never an Anthropic rate
             #   - cache: the secondary reports no prompt caching at all, so a
             #     0% here means "not applicable", not "cache missed" -- and
             #     the cache bands would paint it purple, an alarm for a
             #     condition that cannot occur
             #   - context %: the window size is unknown, so ctx_pct is noise
+            sec_cost = "?" if cost is None else "$" + format(cost, ".2f")
             print(f"  {col_purple}{turn_no:<5}{label:<10}{c_reset}"
                   f"{pad}{total_str} (+{delta_str})"
-                  f"{c_na}{'--':>6}{'?':>8}{c_reset}")
+                  f"{c_na}{'--':>6}{sec_cost:>8}{c_reset}")
             continue
         win = context_window_size(model)
         # 0 means the model is not in PRICES, so its window is unknown --
@@ -2037,7 +2052,10 @@ if shown:
         print(f"  {c_na}? no known price for {', '.join(unpriced)}; "
               f"cost not shown{c_reset}")
     if saw_secondary:
-        print(f"  {c_na}* served by claude-burst secondary; not Anthropic spend{c_reset}")
+        # Short on purpose: the pane is ~55 columns and the old wording was
+        # truncated mid-word. Naming the vendor says "not Anthropic" by itself.
+        biller = ", ".join(sorted(secondary_routes)) or "secondary vendor"
+        print(f"  {c_na}* via claude-burst secondary; billed by {biller}{c_reset}")
 PYEOF
   } > "$cache_file.$$.tmp"
   if [ $? -eq 0 ] && [ -s "$cache_file.$$.tmp" ]; then
