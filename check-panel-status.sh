@@ -32,11 +32,11 @@ main() {
   fi
 
   echo
-  echo "== ~/.config/ghostty/config resize_split keybinds =="
-  if [[ -f "$GHOSTTY_CONF" ]] && grep -qF "keybind = ctrl+shift+h=resize_split:left,40" "$GHOSTTY_CONF"; then
-    echo "present"
+  echo "== Ghostty split keys (defaults: cmd+opt+left focus, cmd+ctrl+right resize) =="
+  if [[ -f "$GHOSTTY_CONF" ]] && grep -qE '^[[:space:]]*keybind[[:space:]]*=[[:space:]]*(super|cmd)\+((alt|opt|option)\+(left|arrow_left)|(ctrl|control)\+(right|arrow_right))=' "$GHOSTTY_CONF"; then
+    echo "WARNING: rebound in ~/.config/ghostty/config -- the launcher relies on the defaults"
   else
-    echo "absent (or no ghostty config file)"
+    echo "defaults in effect"
   fi
 
   echo

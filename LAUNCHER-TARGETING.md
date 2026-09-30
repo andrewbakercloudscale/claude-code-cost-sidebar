@@ -28,7 +28,7 @@ process?", and the answer is no, in a way that explains every bug below.
 
 The launcher has no IPC with Ghostty. It drives the GUI: it presses `cmd+d`
 to split the window, *types* the panel command as literal keystrokes, presses
-Return, then sends `ctrl+shift+h`/`ctrl+shift+l` to resize the split. That is
+Return, then sends `cmd+opt+left` and `cmd+ctrl+right` (Ghostty defaults; `ctrl+h` and `ctrl+shift+l` before 2026-09-30) to refocus and resize the split. That is
 the whole mechanism.
 
 And `System Events`' `keystroke` goes to **whatever window currently holds

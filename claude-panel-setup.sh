@@ -3064,7 +3064,7 @@ resolve_session() {
 # number underneath, and it advances at exactly the rate the header claims.
 build_summary() {
   printf '%sClaude Code Usage: %s %s\n' \
-    "$C_BOLD$C_CYAN" "$(panel_date '+%a %H:%M:%S')" "$(rate_tag "$RATE_SLOW")"
+    "$C_BOLD$C_CYAN" "$(panel_date '+%H:%M:%S')" "$(rate_tag "$RATE_SLOW")"
   # ---- baselines: average per-session cost over 7 days, total spend over
   # 30 days. Session average needs >=3 real sessions to trust, otherwise a
   # single earlier tiny/huge session would skew it.
@@ -3878,7 +3878,7 @@ PANEL_EOF
 chmod +x "$BIN_DIR/.ccusage-panel.sh.new"
 mv -f "$BIN_DIR/.ccusage-panel.sh.new" "$BIN_DIR/ccusage-panel.sh"
 
-echo "Installing claude-panel-keyblock (keyboard guard for the auto-split) ..."
+echo "Installing claude-panel-keyblock (keyboard and click guard for the auto-split) ..."
 # Swallows real keyboard input system-wide for a few seconds while
 # claude-panel-launch.sh is driving synthetic keystrokes into the new split,
 # so typing during that window can't land in the wrong pane or get
@@ -3899,6 +3899,12 @@ echo "Installing claude-panel-keyblock (keyboard guard for the auto-split) ..."
 # Events" (osascript's keystroke command) posts on our behalf report ITS
 # pid. So real typing gets dropped and the launcher's own automation still
 # gets through untouched.
+#
+# Mouse BUTTONS are swallowed too (movement and scrolling are not). The
+# keystrokes are addressed to the Ghostty process, and Ghostty hands them to
+# whichever of its splits has focus -- so a click back on the claude pane
+# half way through moved the rest of the panel command, Return included,
+# into the claude prompt. A click cannot move focus while this runs.
 KEYBLOCK_SRC="$(mktemp -t claude-panel-keyblock).c"
 cat > "$KEYBLOCK_SRC" <<'KEYBLOCK_EOF'
 #include <ApplicationServices/ApplicationServices.h>
@@ -3908,8 +3914,16 @@ cat > "$KEYBLOCK_SRC" <<'KEYBLOCK_EOF'
 #include <stdlib.h>
 #include <unistd.h>
 
+static CFMachPortRef g_tap;
+
 static CGEventRef tap_callback(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon) {
-    (void)proxy; (void)type; (void)refcon;
+    (void)proxy; (void)refcon;
+    /* macOS disables a tap it thinks is slow; turn it straight back on, or
+       the rest of the guard window silently lets everything through. */
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        if (g_tap) CGEventTapEnable(g_tap, true);
+        return event;
+    }
     int64_t source_pid = CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID);
     if (source_pid == 0) {
         return NULL; /* hardware-originated keystroke: swallow it */
@@ -3931,9 +3945,16 @@ int main(int argc, char **argv) {
 
     CGEventMask mask = CGEventMaskBit(kCGEventKeyDown)
                       | CGEventMaskBit(kCGEventKeyUp)
-                      | CGEventMaskBit(kCGEventFlagsChanged);
+                      | CGEventMaskBit(kCGEventFlagsChanged)
+                      | CGEventMaskBit(kCGEventLeftMouseDown)
+                      | CGEventMaskBit(kCGEventLeftMouseUp)
+                      | CGEventMaskBit(kCGEventRightMouseDown)
+                      | CGEventMaskBit(kCGEventRightMouseUp)
+                      | CGEventMaskBit(kCGEventOtherMouseDown)
+                      | CGEventMaskBit(kCGEventOtherMouseUp);
     CFMachPortRef tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
                                           kCGEventTapOptionDefault, mask, tap_callback, NULL);
+    g_tap = tap;
     if (!tap) {
         fprintf(stderr, "claude-panel-keyblock: failed to create event tap "
                         "(grant Accessibility + Input Monitoring to this binary)\n");
@@ -4064,6 +4085,11 @@ session_tty() {
     # A wrapper shell between the hook and claude costs nothing; keep going.
     case "${comm##*/}" in
       claude|claude-code) ;;
+      # An npm install runs as `node .../bin/claude`, so its comm is node.
+      # Without this such a machine never got a pin from this hook, and a
+      # panel paired to that pane stayed on the first session for good.
+      node)
+        ps -o args= -p "$p" 2>/dev/null | grep -qE '(/|^| )claude(-code)?( |$)|@anthropic-ai/claude-code' || continue ;;
       *) continue ;;
     esac
     t=$(ps -o tty= -p "$p" 2>/dev/null | tr -d '[:space:]')
@@ -4142,11 +4168,15 @@ except ImportError:
     sys.exit(2)
 
 # macOS virtual key codes. Only the four this sequence needs.
-KEY = {"d": 2, "h": 4, "l": 37, "return": 36}
+KEY = {"d": 2, "left": 123, "right": 124, "return": 36}
+# "fn" and "numpad" are what a real arrow key press carries; Ghostty matched
+# the arrow chords below with them set, verified against a live instance.
 FLAG = {
     "cmd": Quartz.kCGEventFlagMaskCommand,
     "ctrl": Quartz.kCGEventFlagMaskControl,
-    "shift": Quartz.kCGEventFlagMaskShift,
+    "alt": Quartz.kCGEventFlagMaskAlternate,
+    "fn": Quartz.kCGEventFlagMaskSecondaryFn,
+    "numpad": Quartz.kCGEventFlagMaskNumericPad,
 }
 
 # Each event is posted down-then-up with a short gap. Ghostty drops keys sent
@@ -4193,16 +4223,24 @@ def main():
 
     # Same sequence, and the same delays, as the AppleScript path below it:
     # split, type, run, focus left pane, shrink the right one.
+    #
+    # Focus and resize use Ghostty's OWN default bindings (cmd+opt+left is
+    # goto_split:left, cmd+ctrl+right is resize_split:right,10), not keybinds
+    # this installer adds. The old ctrl+h / ctrl+shift+l needed lines in
+    # ~/.config/ghostty/config that a fresh machine does not have (and that a
+    # running Ghostty ignores until reloaded), so on a new install ctrl+h was
+    # typed into the panel as a backspace, focus stayed on the panel, and the
+    # split stayed 50/50.
     chord(pid, src, "d", ("cmd",))
     time.sleep(0.6)
     text(pid, src, command)
     time.sleep(0.1)
     chord(pid, src, "return")
     time.sleep(0.3)
-    chord(pid, src, "h", ("ctrl",))
+    chord(pid, src, "left", ("cmd", "alt", "fn", "numpad"))
     time.sleep(0.2)
     for _ in range(presses):
-        chord(pid, src, "l", ("ctrl", "shift"))
+        chord(pid, src, "right", ("cmd", "ctrl", "fn", "numpad"))
         time.sleep(0.05)
     return 0
 
@@ -4217,9 +4255,9 @@ cat > "$BIN_DIR/claude-panel-launch.sh" <<'LAUNCH_EOF'
 # it to $PANEL_WIDTH_PCT of the window width (splits are created 50/50 by
 # default), then returns keyboard focus to the left (original) pane. Invoked once
 # per terminal window by the ccusage split-panel autolaunch hook in
-# ~/.zshrc, or directly by ~/.local/bin/ghostty-claude-launcher. Needs the
-# ctrl+shift+h/l resize_split keybinds in ~/.config/ghostty/config
-# (installed by claude-panel-setup.sh).
+# ~/.zshrc, or directly by ~/.local/bin/ghostty-claude-launcher. Uses
+# Ghostty's default bindings only: cmd+d (new split), cmd+opt+left (focus
+# left), cmd+ctrl+right (resize), so it needs nothing in ~/.config/ghostty.
 #
 # Every invocation writes a run to $LOG, one line per step, prefixed with
 # a shared run id so concurrent/rapid invocations (opening several windows
@@ -4380,11 +4418,12 @@ PANEL_CMD="~/.local/bin/ccusage-panel.sh"
 
 # How much of the window the panel gets, as a whole percent. Ghostty makes
 # splits 50/50, so the launcher shrinks the new pane with N presses of
-# ctrl+shift+l (resize_split:right,40 -- 40px each):
+# cmd+ctrl+right (Ghostty's default resize_split:right,10 -- 10pt each;
+# measured: 20 presses took a 71-column pane to 47):
 #
-#   presses = (50% - target%) of the window width, in 40px steps
-#           = width * (50 - PCT) / 100 / 40
-#           = width * (50 - PCT) / 4000
+#   presses = (50% - target%) of the window width, in 10pt steps
+#           = width * (50 - PCT) / 100 / 10
+#           = width * (50 - PCT) / 1000
 #
 # A number rather than the old open-coded `(width / 6) / 40`, which was the
 # same expression with 1/3 already substituted in and no way to see that
@@ -4414,7 +4453,7 @@ if [ -n "${TMUX:-}" ]; then
     log "abort: TMUX is set but tmux binary not found"
     exit 0
   fi
-  if tmux split-window -h -l 33% "$PANEL_CMD" 2>>"$LOG"; then
+  if tmux split-window -h -l "${PANEL_WIDTH_PCT}%" "$PANEL_CMD" 2>>"$LOG"; then
     tmux select-pane -L >>"$LOG" 2>&1
     log "done: tmux split-window succeeded"
   else
@@ -4569,7 +4608,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
         log "attempt $attempt: targeted path unavailable (window geometry: $geom), falling through to the AppleScript path"
         ;;
       *)
-        presses=$(( geom * (50 - PANEL_WIDTH_PCT) / 4000 ))
+        presses=$(( geom * (50 - PANEL_WIDTH_PCT) / 1000 ))
         log "attempt $attempt: targeted send to pid $ghostty_pid (width=$geom presses=$presses) via $panel_python"
         # The guard belongs on THIS path too. It used to be started only
         # further down, on the AppleScript path, so the targeted path -- the
@@ -4724,17 +4763,17 @@ tell application "System Events"
   tell frontApp
     set winSize to size of front window
     set winWidth to item 1 of winSize
-    set numPresses to round ((winWidth * (50 - $PANEL_WIDTH_PCT)) / 4000)
+    set numPresses to round ((winWidth * (50 - $PANEL_WIDTH_PCT)) / 1000)
     delay 0.3
     keystroke "d" using command down
     delay 0.6
     keystroke "$PANEL_CMD"
     key code 36
     delay 0.3
-    keystroke "h" using control down
+    key code 123 using {command down, option down}
     delay 0.2
     repeat numPresses times
-      keystroke "l" using {control down, shift down}
+      key code 124 using {command down, control down}
       delay 0.05
     end repeat
   end tell
@@ -4765,7 +4804,7 @@ if [ "$success" -eq 1 ]; then
   log "done: succeeded on attempt $attempt/$max_attempts"
 else
   log "done: GAVE UP after $max_attempts attempts, panel did not launch"
-  log "done: troubleshooting: confirm ctrl+shift+h/l keybinds exist in ~/.config/ghostty/config, confirm ~/.local/bin/ccusage-panel.sh is executable, try running it manually"
+  log "done: troubleshooting: confirm cmd+opt+left / cmd+ctrl+right are not rebound in ~/.config/ghostty/config, confirm ~/.local/bin/ccusage-panel.sh is executable, try running it manually"
 fi
 
 exit 0
@@ -4887,25 +4926,62 @@ claude() {
     command claude "${args[@]}" "$@"
   fi
 }
+# Is this command line an interactive claude session with no session flag
+# of its own, i.e. one this hook can and should give a known --session-id?
+# Not `claude -p`, `claude --version` or a subcommand (`claude mcp list`,
+# `claude update`): none of those is the session a pane is showing.
+_ccusage_is_fresh_session() {
+  local -a w; w=(${(z)1})
+  local i=${w[(i)claude]} a
+  (( i <= $#w )) || return 1
+  local -a rest; rest=(${w[i+1,-1]})
+  case "${rest[1]:-}" in ''|-*) ;; *) return 1 ;; esac
+  for a in $rest; do
+    case "$a" in
+      -p|--print|-h|--help|-v|--version|--session-id*|--resume*|--continue*|-r|-c) return 1 ;;
+    esac
+  done
+  return 0
+}
+# Record which session this pane is running, where the panel reads it: the
+# tty pin (pane-scoped) and the directory handoff. The same two files, in the
+# same format, that the launcher and the SessionStart hook write.
+_ccusage_write_pins() { # $1 = session id
+  # CCUSAGE_PANE_TTY only for the test suite: zsh sets $TTY itself and it
+  # cannot be overridden from outside.
+  local dir=~/.cache/claude-panel-pin t=${CCUSAGE_PANE_TTY:-${TTY#/dev/}} now=$(date +%s) key
+  mkdir -p "$dir/tty" 2>/dev/null || return
+  key=$(print -r -- "$PWD" | tr '/' '-')
+  print -r -- "$1"$'\t'"$now" > "$dir/.$key.$$" && mv -f "$dir/.$key.$$" "$dir/$key"
+  [ -n "$t" ] && print -r -- "$1"$'\t'"$now" > "$dir/tty/.$t.$$" && mv -f "$dir/tty/.$t.$$" "$dir/tty/$t"
+}
 _ccusage_panel_autolaunch() {
   [[ "$1" =~ '(^|[[:space:]])claude([[:space:]]|$)' ]] || return
-  [ -n "${CCUSAGE_PANEL_LAUNCHED:-}" ] && return
-  export CCUSAGE_PANEL_LAUNCHED=1
 
   local pin_sid=""
-  case "$1" in
-    *--session-id*|*--resume*|*--continue*|*' -r '*|*' -r'|*' -c '*|*' -c')
-      ;;
-    *)
-      pin_sid=$(uuidgen | tr '[:upper:]' '[:lower:]')
-      export CLAUDE_PANEL_PIN_SID="$pin_sid"
-      ;;
-  esac
+  if _ccusage_is_fresh_session "$1"; then
+    pin_sid=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    export CLAUDE_PANEL_PIN_SID="$pin_sid"
+  fi
   # Diagnostic: the pin/no-pin split is a silent decision with no other
   # trace of it anywhere, when "no pin" turns out to be the overwhelming
   # common case in practice, this is the only way to see the raw command
   # line that drove it instead of guessing at which flag matched.
-  print -r -- "$(date '+%Y-%m-%d %H:%M:%S') [hook] cmd=[$1] pin_sid=${pin_sid:-none}" >> ~/.cache/claude-panel-launch.log
+  print -r -- "$(date '+%Y-%m-%d %H:%M:%S') [hook] cmd=[$1] pin_sid=${pin_sid:-none}${CCUSAGE_PANEL_LAUNCHED:+ (panel already open: re-pinning)}" >> ~/.cache/claude-panel-launch.log
+
+  # The panel is opened once per window, but claude can be exited and started
+  # again in the same pane any number of times. Each restart is a new
+  # session, and the panel beside it was still reading the pin written for
+  # the first one -- so it showed a session that had ended and none of the
+  # new turns. The SessionStart hook normally rewrites the pin, but only
+  # where the hook is installed and can see a claude with a terminal above
+  # it; this does not depend on either. (--resume/--continue still rely on
+  # the hook: only claude knows which session those pick.)
+  if [ -n "${CCUSAGE_PANEL_LAUNCHED:-}" ]; then
+    [ -n "$pin_sid" ] && _ccusage_write_pins "$pin_sid"
+    return
+  fi
+  export CCUSAGE_PANEL_LAUNCHED=1
   ~/.local/bin/claude-panel-launch.sh "$pin_sid" &
 }
 autoload -Uz add-zsh-hook
@@ -5044,39 +5120,23 @@ GCL_RC_EOF
   chmod +x "$GCL"
 fi
 
-# The launcher shrinks the new split to $PANEL_WIDTH_PCT via repeated
-# ctrl+shift+l presses, needs these two resize_split keybinds in
-# Ghostty's own config (idempotent: skip any already present).
-#
-# A missing config file is created rather than skipped. Ghostty runs fine
-# with no config at all, so a fresh machine usually has none, and skipping
-# it left every split at 50/50 on exactly the installs least likely to know
-# why. Ghostty always reads this path (alongside the macOS Application
-# Support one), so a file that holds only these two lines is safe.
+# The launcher drives Ghostty through its DEFAULT bindings (cmd+d,
+# cmd+opt+left, cmd+ctrl+right), so nothing is added to ~/.config/ghostty.
+# It used to append ctrl+shift+h/l resize keybinds and rely on a ctrl+h focus
+# bind it never installed: a fresh machine had neither, so focus stayed on the
+# panel and the split stayed 50/50. All that can break it now is a config
+# that rebinds those defaults, so say so if one does.
 GHOSTTY_CONF="$HOME/.config/ghostty/config"
-if [ ! -f "$GHOSTTY_CONF" ] && [ -d /Applications/Ghostty.app -o -n "$(command -v ghostty 2>/dev/null)" ]; then
-  mkdir -p "$(dirname "$GHOSTTY_CONF")" && : > "$GHOSTTY_CONF"
-  echo "Created ~/.config/ghostty/config for the split resize keybinds."
-fi
 if [ -f "$GHOSTTY_CONF" ]; then
-  added_keybind=0
-  if ! grep -qF "keybind = ctrl+shift+h=resize_split:left,40" "$GHOSTTY_CONF"; then
-    printf '%s\n' "keybind = ctrl+shift+h=resize_split:left,40" >> "$GHOSTTY_CONF"
-    added_keybind=1
+  rebound=$( {
+    grep -E '^[[:space:]]*keybind[[:space:]]*=[[:space:]]*(super|cmd)\+(alt|opt|option)\+(left|arrow_left)=' "$GHOSTTY_CONF" | grep -v 'goto_split:left'
+    grep -E '^[[:space:]]*keybind[[:space:]]*=[[:space:]]*(super|cmd)\+(ctrl|control)\+(right|arrow_right)=' "$GHOSTTY_CONF" | grep -v 'resize_split:right'
+  } 2>/dev/null )
+  if [ -n "$rebound" ]; then
+    echo "WARNING: ~/.config/ghostty/config rebinds a Ghostty default the launcher uses"
+    echo "  (cmd+opt+left = focus left split, cmd+ctrl+right = resize):"
+    printf '    %s\n' "$rebound"
   fi
-  if ! grep -qF "keybind = ctrl+shift+l=resize_split:right,40" "$GHOSTTY_CONF"; then
-    printf '%s\n' "keybind = ctrl+shift+l=resize_split:right,40" >> "$GHOSTTY_CONF"
-    added_keybind=1
-  fi
-  if [ "$added_keybind" -eq 1 ]; then
-    echo "Added resize_split keybinds to ~/.config/ghostty/config."
-    echo "  A running Ghostty only picks them up after a config reload (cmd+shift+,)"
-    echo "  or a restart; until then new splits stay 50/50."
-  else
-    echo "~/.config/ghostty/config already has the resize_split keybinds, leaving as-is."
-  fi
-else
-  echo "Ghostty not found, skipping resize keybinds (a Ghostty split would stay 50/50)."
 fi
 
 echo "Installing claude-day-projection.sh ..."
@@ -5815,6 +5875,12 @@ chmod +x "$BIN_DIR/claude-cost-alert-check.sh"
 
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 ALERT_CMD="~/.local/bin/claude-cost-alert-check.sh"
+# Created when missing rather than skipped. A machine where Claude Code has
+# never had a setting changed has no settings.json, and skipping it there
+# meant no cost alerts and no SessionStart pin on exactly the fresh installs.
+if [ ! -f "$CLAUDE_SETTINGS" ] && [ -d "$HOME/.claude" ]; then
+  printf '{}\n' > "$CLAUDE_SETTINGS" && echo "Created ~/.claude/settings.json for the panel's hooks."
+fi
 if [ -f "$CLAUDE_SETTINGS" ]; then
   if jq -e --arg cmd "$ALERT_CMD" '
       (.hooks.UserPromptSubmit // []) | any(.hooks[]?.command == $cmd)
