@@ -2074,12 +2074,12 @@ if shown:
     def print_markers(j):
         for _, kind, usd in reversed(markers_before.get(j, [])):
             if kind == "started":
-                print(f"  {col_mid_tier}*** Pauseless Compaction Started ***{c_reset}")
+                print(f"  {col_mid_tier}*** Async Compaction Started ***{c_reset}")
             elif kind == "pending":
-                print(f"  {col_cache}*** Pauseless Compaction Pending (next prompt) ***{c_reset}")
+                print(f"  {col_cache}*** Async Compaction Pending (next prompt) ***{c_reset}")
             else:
                 cost_note = "" if usd is None else f" (${usd:.2f})"
-                print(f"  {col_input}*** Pauseless Compaction Finished{cost_note} ***{c_reset}")
+                print(f"  {col_input}*** Async Compaction Finished{cost_note} ***{c_reset}")
 
     print_markers(len(shown))
     for i in reversed(range(len(shown))):

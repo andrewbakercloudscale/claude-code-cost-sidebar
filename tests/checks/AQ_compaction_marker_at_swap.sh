@@ -1,4 +1,4 @@
-# Check AQ -- "Pauseless Compaction Finished" sits at the swap, not the
+# Check AQ -- "Async Compaction Finished" sits at the swap, not the
 # summary, and "Pending" at the summary's end, when it was ready.
 #
 # A session compacted twice keeps sending its first summary (compacted
