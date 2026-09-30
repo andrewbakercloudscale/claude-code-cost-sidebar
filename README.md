@@ -161,6 +161,19 @@ how often it comes round. The block countdown and `$/hr` denominator are
 derived locally from the block's own start/end timestamps, so they keep
 moving between fetches without one.
 
+## Uninstall
+
+```bash
+bash claude-panel-uninstall.sh --dry-run   # list what would change
+bash claude-panel-uninstall.sh             # remove it
+```
+
+It removes exactly what `claude-panel-setup.sh` installed: the scripts and helpers in `~/.local/bin`, the autolaunch block in `~/.zshrc`, the panel's two hooks in `~/.claude/settings.json`, its patch to `~/.local/bin/ghostty-claude-launcher`, `~/.config/claude-panel` and the panel's caches and logs. Everything else in those files is left as it was, and each edited file is backed up beside itself first (`*.bak-ccusage-uninstall-<time>`). A block or launcher that has been hand-edited is left alone with a warning. The Ghostty `resize_split` keybinds stay (they are harmless and may predate the panel).
+
+- **Remote Control:** the launcher's `--remote-control` option belongs to the panel's patch, so uninstalling removes it. Add `--remote-control` to the launcher yourself if you still want it.
+- Panels already open keep running until their split is closed.
+- Running it again is safe: it reports that nothing is installed.
+
 ## FAQ
 
 - **Sonnet 5 (and Fable 5) burns through tokens much faster than Sonnet 4.6 did on the same kind of task, is there a way to cap it back to a 200k context window?** Yes. Set `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` in your shell profile. Claude Code then treats Sonnet 5 / Fable 5 as having a 200k context window instead of their native 1M, removes the 1M variant from the model picker, and, this is the part that actually matters for cost, **auto-compaction kicks in at the 200k boundary**, the same discipline that was implicitly keeping 4.6's token usage in check. You don't need to switch models back to get that behavior. The panel shows which cap is currently in effect (`🧭 Context cap: 200k (forced via CLAUDE_CODE_DISABLE_1M_CONTEXT)` vs `1M (native)`) so it's visible at a glance rather than something you have to remember you set.
