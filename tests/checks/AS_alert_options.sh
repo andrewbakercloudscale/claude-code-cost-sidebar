@@ -47,4 +47,37 @@ check_AS_alert_options() {
   assert_contains "alerts off: the launch failure still fires" "DIDN'T LAUNCH" "$msg"
   assert_not_contains "alerts off: no cost alert beside it" "COST ALERT" "$msg"
   rm -f "$HOME/.cache/claude-panel-launch.log"
+
+  # Setup's options block writes each key and each comment exactly once:
+  # in a fresh file, and when topping up a file an older setup wrote. Run
+  # alone, extracted from the repo's setup script, with HOME in the sandbox
+  # (checked above), so nothing outside it is touched.
+  local setup="$HERE/../claude-panel-setup.sh" block
+  block=$(awk '/^PANEL_OPTIONS="\$HOME\/.config\/claude-panel\/options"$/{on=1} /^echo "Options: /{on=0} on' "$setup")
+  assert_contains "options block found in setup" "OPTIONS_EOF" "$block"
+  local keys="REMOTE_CONTROL CAFFEINATE SESSION_TITLE RESTART_TOKENS COST_ALERTS ALERT_MIN_USD" k
+  once() { # $1 label, $2 file
+    for k in $keys; do
+      assert_eq "$1: CLAUDE_PANEL_$k= once" "1" "$(grep -c "^CLAUDE_PANEL_$k=" "$2")"
+      assert_eq "$1: its comment once" "1" "$(grep -c "^# CLAUDE_PANEL_$k: " "$2")"
+    done
+  }
+  rm -f "$opts"
+  bash -c "$block"
+  once "fresh file" "$opts"
+  assert_eq "fresh file: defaults" "CLAUDE_PANEL_SESSION_TITLE=true CLAUDE_PANEL_ALERT_MIN_USD=5.00" \
+    "$(grep -E '^CLAUDE_PANEL_(SESSION_TITLE|ALERT_MIN_USD)=' "$opts" | tr '\n' ' ' | sed 's/ $//')"
+  bash -c "$block"
+  once "second run" "$opts"
+
+  # An older file: two keys set by the user, the header listing comments
+  # for keys it never wrote. Kept values survive, missing keys arrive once.
+  printf '%s\n' "# claude-panel options -- true/false. Written by claude-panel-setup.sh." \
+    "# CLAUDE_PANEL_REMOTE_CONTROL: start interactive claude sessions with --remote-control" \
+    "# CLAUDE_PANEL_CAFFEINATE: keep the Mac awake (caffeinate -i) while a panel runs" \
+    "# CLAUDE_PANEL_SESSION_TITLE: name new sessions after their folder" \
+    "CLAUDE_PANEL_REMOTE_CONTROL=true" "CLAUDE_PANEL_CAFFEINATE=true" > "$opts"
+  bash -c "$block"
+  once "old file topped up" "$opts"
+  assert_eq "old file: user's value kept" "1" "$(grep -c '^CLAUDE_PANEL_REMOTE_CONTROL=true$' "$opts")"
 }

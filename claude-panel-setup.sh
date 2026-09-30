@@ -4710,34 +4710,29 @@ chmod +x "$BIN_DIR/claude-panel-launch.sh"
 
 # Install-time options, read at run time by the panel (CLAUDE_PANEL_CAFFEINATE)
 # and by the `claude` wrapper / Finder launcher (CLAUDE_PANEL_REMOTE_CONTROL).
-# Created with everything off; an existing file is never overwritten, and a
-# key missing from it is appended as false so the file lists every option.
+# An existing file is never overwritten: a key missing from it is appended
+# with its default, preceded by its comment unless that comment is already
+# there, so every key and every comment appears once, in a fresh file and in
+# one an older setup wrote. One table, so a new option cannot get a comment
+# in one place and a default in another.
 PANEL_OPTIONS="$HOME/.config/claude-panel/options"
 mkdir -p "$(dirname "$PANEL_OPTIONS")"
 [ -f "$PANEL_OPTIONS" ] || printf '%s\n' \
   "# claude-panel options -- true/false. Written by claude-panel-setup.sh." \
-  "# CLAUDE_PANEL_REMOTE_CONTROL: start interactive claude sessions with --remote-control" \
-  "# CLAUDE_PANEL_CAFFEINATE: keep the Mac awake (caffeinate -i) while a panel runs" \
-  "# CLAUDE_PANEL_SESSION_TITLE: name new sessions after their folder" \
-  "# CLAUDE_PANEL_RESTART_TOKENS: context size that shows a red restart warning (0 = off)" \
-  "# CLAUDE_PANEL_COST_ALERTS: warn in the chat when a session or the day costs far more than usual" \
-  "# CLAUDE_PANEL_ALERT_MIN_USD: a session below this many dollars never raises a cost alert" \
   > "$PANEL_OPTIONS"
-for opt in CLAUDE_PANEL_REMOTE_CONTROL CLAUDE_PANEL_CAFFEINATE; do
-  grep -qE "^$opt=" "$PANEL_OPTIONS" || printf '%s=false\n' "$opt" >> "$PANEL_OPTIONS"
-done
-grep -qE '^CLAUDE_PANEL_SESSION_TITLE=' "$PANEL_OPTIONS" \
-  || printf '%s\n' "# CLAUDE_PANEL_SESSION_TITLE: name new sessions after their folder" \
-       "CLAUDE_PANEL_SESSION_TITLE=true" >> "$PANEL_OPTIONS"
-grep -qE '^CLAUDE_PANEL_RESTART_TOKENS=' "$PANEL_OPTIONS" \
-  || printf '%s\n' "# CLAUDE_PANEL_RESTART_TOKENS: context size that shows a red restart warning (0 = off)" \
-       "CLAUDE_PANEL_RESTART_TOKENS=400000" >> "$PANEL_OPTIONS"
-grep -qE '^CLAUDE_PANEL_COST_ALERTS=' "$PANEL_OPTIONS" \
-  || printf '%s\n' "# CLAUDE_PANEL_COST_ALERTS: warn in the chat when a session or the day costs far more than usual" \
-       "CLAUDE_PANEL_COST_ALERTS=true" >> "$PANEL_OPTIONS"
-grep -qE '^CLAUDE_PANEL_ALERT_MIN_USD=' "$PANEL_OPTIONS" \
-  || printf '%s\n' "# CLAUDE_PANEL_ALERT_MIN_USD: a session below this many dollars never raises a cost alert" \
-       "CLAUDE_PANEL_ALERT_MIN_USD=5.00" >> "$PANEL_OPTIONS"
+while IFS='|' read -r opt default comment; do
+  grep -qE "^$opt=" "$PANEL_OPTIONS" && continue
+  grep -qxF "# $opt: $comment" "$PANEL_OPTIONS" \
+    || printf '# %s: %s\n' "$opt" "$comment" >> "$PANEL_OPTIONS"
+  printf '%s=%s\n' "$opt" "$default" >> "$PANEL_OPTIONS"
+done <<'OPTIONS_EOF'
+CLAUDE_PANEL_REMOTE_CONTROL|false|start interactive claude sessions with --remote-control
+CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a panel runs
+CLAUDE_PANEL_SESSION_TITLE|true|name new sessions after their folder
+CLAUDE_PANEL_RESTART_TOKENS|400000|context size that shows a red restart warning (0 = off)
+CLAUDE_PANEL_COST_ALERTS|true|warn in the chat when a session or the day costs far more than usual
+CLAUDE_PANEL_ALERT_MIN_USD|5.00|a session below this many dollars never raises a cost alert
+OPTIONS_EOF
 echo "Options: $PANEL_OPTIONS ($(grep -E '^CLAUDE_PANEL_' "$PANEL_OPTIONS" | tr '\n' ' '))"
 
 ZSHRC="$HOME/.zshrc"
