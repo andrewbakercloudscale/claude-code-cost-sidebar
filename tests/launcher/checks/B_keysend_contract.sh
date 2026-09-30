@@ -38,7 +38,8 @@ check_B_keysend_contract() {
   local src; src=$(cat "$KEYSEND")
   assert_contains "it opens a split" '"d", ("cmd",)' "$src"
   assert_contains "it presses Return"  '"return"' "$src"
-  assert_contains "it focuses the left pane" '"h", ("ctrl",)' "$src"
-  assert_contains "it shrinks the right one" '"l", ("ctrl", "shift")' "$src"
+  # Ghostty's default bindings, so nothing has to be in the user's config.
+  assert_contains "it focuses the left pane (cmd+opt+left)" '"left", ("cmd", "alt", "fn", "numpad")' "$src"
+  assert_contains "it shrinks the right one (cmd+ctrl+right)" '"right", ("cmd", "ctrl", "fn", "numpad")' "$src"
   assert_contains "and it targets a pid, not the focus" "CGEventPostToPid" "$src"
 }
