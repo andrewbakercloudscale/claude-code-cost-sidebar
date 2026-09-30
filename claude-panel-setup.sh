@@ -69,6 +69,32 @@ set -uo pipefail
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$BIN_DIR"
 
+# ccusage is not optional: every figure outside the per-turn table comes from
+# it, and a panel without it still renders -- a frame of `ccusage ... failed
+# (exit 127)` errors, which a fresh install used to ship with because nothing
+# here checked. Installed globally with npm when missing, and a missing npm,
+# or an install that leaves no `ccusage` on PATH, stops the setup here rather
+# than finishing with "Done." over a panel that cannot show anything.
+if command -v ccusage >/dev/null 2>&1; then
+  echo "ccusage: $(command -v ccusage)"
+elif command -v npm >/dev/null 2>&1; then
+  echo "ccusage not found, installing it (npm install -g ccusage) ..."
+  if ! npm install -g ccusage; then
+    echo "ERROR: 'npm install -g ccusage' failed; install it yourself and re-run." >&2
+    exit 1
+  fi
+  hash -r
+  if ! command -v ccusage >/dev/null 2>&1; then
+    echo "ERROR: ccusage installed, but npm's global bin ($(npm prefix -g 2>/dev/null)/bin) is not on PATH." >&2
+    exit 1
+  fi
+  echo "ccusage: installed at $(command -v ccusage)"
+else
+  echo "ERROR: ccusage is required and npm is not available to install it." >&2
+  echo "  Install Node.js (brew install node), then re-run this setup." >&2
+  exit 1
+fi
+
 echo "Installing ccusage-panel.sh ..."
 # Written to a temp name and renamed into place, never redirected straight
 # onto the live path. Two reasons, both now that the panel watches this file:
@@ -4364,12 +4390,14 @@ PANEL_CMD="~/.local/bin/ccusage-panel.sh"
 # same expression with 1/3 already substituted in and no way to see that
 # that was what it meant, let alone change it. 40 because a third was too
 # narrow for the widest rows the panel draws -- the Top Sessions block and
-# the 3-day trend were wrapping mid-value.
+# the 3-day trend were wrapping mid-value. Now 30 (a 70/30 split): the
+# panel wraps its long rows itself since then, and the chat pane is the
+# one being worked in.
 #
 # Both send paths below compute this, and they must agree: a launch that
 # lands on the AppleScript fallback should produce the same pane as one
 # that does not.
-PANEL_WIDTH_PCT="${PANEL_WIDTH_PCT:-40}"
+PANEL_WIDTH_PCT="${PANEL_WIDTH_PCT:-30}"
 
 log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} TMUX=${TMUX:-unset} PWD=$PWD PIN_SID=${PIN_SID:-none}"
 write_pin_handoff
@@ -4638,7 +4666,7 @@ tell application "System Events"
   -- Identify the focused instance POSITIVELY, and refuse to type if we
   -- cannot.
   --
-  -- `first application process whose frontmost is true` returns whichever
+  -- "first application process whose frontmost is true" returns whichever
   -- match comes first in System Events' own process order. That is fine
   -- with one Ghostty and wrong with several: on 2026-09-05 the shell-side
   -- poll logged "frontmost confirmed (pid 37092)" and this script, asking
@@ -4651,9 +4679,9 @@ tell application "System Events"
   -- frontmost and it is ours. Anything else skips.
   --
   -- Skipping is the right failure. The alternative -- assume it is ours and
-  -- type anyway -- was tried and is far worse: `keystroke` goes to whatever
+  -- type anyway -- was tried and is far worse: "keystroke" goes to whatever
   -- window holds keyboard focus system-wide, NOT to the process an
-  -- enclosing `tell` names (see the comment on the raise above), so a wrong
+  -- enclosing "tell" names (see the comment on the raise above), so a wrong
   -- guess types a shell command into whatever the user is actually working
   -- in. It did: six panels appeared in one unrelated window, and since the
   -- typed command lands in a shell that runs the autolaunch hook, it
@@ -4753,6 +4781,15 @@ chmod +x "$BIN_DIR/claude-panel-launch.sh"
 # in one place and a default in another.
 PANEL_OPTIONS="$HOME/.config/claude-panel/options"
 mkdir -p "$(dirname "$PANEL_OPTIONS")"
+# The Telegram push defaults ON only where its credentials already exist. A
+# fresh machine has no ~/Desktop/github/.creds, and defaulting on there meant
+# every alert carried a "no phone push sent" notice for a channel nobody set
+# up. Where the push IS switched on and the credentials later go missing, the
+# hook still says so -- that is the silent breakage the notice exists for.
+TG_DEFAULT=false
+grep -q 'TELEGRAM_BOT_TOKEN' "$HOME/Desktop/github/.creds" 2>/dev/null \
+  && grep -q 'TELEGRAM_CHAT_ID' "$HOME/Desktop/github/.creds" 2>/dev/null \
+  && TG_DEFAULT=true
 [ -f "$PANEL_OPTIONS" ] || printf '%s\n' \
   "# claude-panel options -- true/false. Written by claude-panel-setup.sh." \
   > "$PANEL_OPTIONS"
@@ -4761,13 +4798,14 @@ while IFS='|' read -r opt default comment; do
   grep -qxF "# $opt: $comment" "$PANEL_OPTIONS" \
     || printf '# %s: %s\n' "$opt" "$comment" >> "$PANEL_OPTIONS"
   printf '%s=%s\n' "$opt" "$default" >> "$PANEL_OPTIONS"
-done <<'OPTIONS_EOF'
+done <<OPTIONS_EOF
 CLAUDE_PANEL_REMOTE_CONTROL|false|start interactive claude sessions with --remote-control
 CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a panel runs
 CLAUDE_PANEL_SESSION_TITLE|true|name new sessions after their folder
 CLAUDE_PANEL_RESTART_TOKENS|400000|context size that shows a red restart warning (0 = off)
 CLAUDE_PANEL_COST_ALERTS|true|warn in the chat when a session or the day costs far more than usual
 CLAUDE_PANEL_ALERT_MIN_USD|5.00|a session below this many dollars never raises a cost alert
+CLAUDE_PANEL_TELEGRAM|$TG_DEFAULT|push cost alerts to Telegram (needs TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID in ~/Desktop/github/.creds)
 OPTIONS_EOF
 echo "Options: $PANEL_OPTIONS ($(grep -E '^CLAUDE_PANEL_' "$PANEL_OPTIONS" | tr '\n' ' '))"
 
@@ -5006,10 +5044,20 @@ GCL_RC_EOF
   chmod +x "$GCL"
 fi
 
-# The launcher shrinks the new split to ~1/3 width via repeated
+# The launcher shrinks the new split to $PANEL_WIDTH_PCT via repeated
 # ctrl+shift+l presses, needs these two resize_split keybinds in
 # Ghostty's own config (idempotent: skip any already present).
+#
+# A missing config file is created rather than skipped. Ghostty runs fine
+# with no config at all, so a fresh machine usually has none, and skipping
+# it left every split at 50/50 on exactly the installs least likely to know
+# why. Ghostty always reads this path (alongside the macOS Application
+# Support one), so a file that holds only these two lines is safe.
 GHOSTTY_CONF="$HOME/.config/ghostty/config"
+if [ ! -f "$GHOSTTY_CONF" ] && [ -d /Applications/Ghostty.app -o -n "$(command -v ghostty 2>/dev/null)" ]; then
+  mkdir -p "$(dirname "$GHOSTTY_CONF")" && : > "$GHOSTTY_CONF"
+  echo "Created ~/.config/ghostty/config for the split resize keybinds."
+fi
 if [ -f "$GHOSTTY_CONF" ]; then
   added_keybind=0
   if ! grep -qF "keybind = ctrl+shift+h=resize_split:left,40" "$GHOSTTY_CONF"; then
@@ -5022,11 +5070,13 @@ if [ -f "$GHOSTTY_CONF" ]; then
   fi
   if [ "$added_keybind" -eq 1 ]; then
     echo "Added resize_split keybinds to ~/.config/ghostty/config."
+    echo "  A running Ghostty only picks them up after a config reload (cmd+shift+,)"
+    echo "  or a restart; until then new splits stay 50/50."
   else
     echo "~/.config/ghostty/config already has the resize_split keybinds, leaving as-is."
   fi
 else
-  echo "No ~/.config/ghostty/config found, skipping resize keybinds (the split will stay 50/50)."
+  echo "Ghostty not found, skipping resize keybinds (a Ghostty split would stay 50/50)."
 fi
 
 echo "Installing claude-day-projection.sh ..."
@@ -5604,7 +5654,15 @@ term_program="${TERM_PROGRAM:-}"
 CREDS_FILE="$HOME/Desktop/github/.creds"
 TG_LOG="$HOME/.cache/claude-cost-alert-telegram.log"
 tg_state="unconfigured"
-if [ "${CLAUDE_COST_ALERT_TELEGRAM:-1}" = "0" ]; then
+# CLAUDE_COST_ALERT_TELEGRAM in the environment wins; otherwise the
+# CLAUDE_PANEL_TELEGRAM option setup wrote (false on a machine that had no
+# credentials at install). No key at all keeps the old default, on.
+tg_opt="${CLAUDE_COST_ALERT_TELEGRAM:-$(alert_option CLAUDE_PANEL_TELEGRAM)}"
+case "$(printf '%s' "$tg_opt" | tr -d "\"' " | tr '[:upper:]' '[:lower:]')" in
+  0|false|no|off) tg_off=1 ;;
+  *) tg_off=0 ;;
+esac
+if [ "$tg_off" = 1 ]; then
   tg_state="disabled"
 elif [ -f "$CREDS_FILE" ]; then
   # shellcheck source=/dev/null

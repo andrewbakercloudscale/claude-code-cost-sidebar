@@ -45,6 +45,31 @@ STUB
   assert_not_contains "the notice does not leak into the model's context" \
     "no phone push sent" "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out_nocreds")"
 
+  # ---- switched off in the options file, no credentials --------------------
+  # What setup writes on a machine with no creds store: no push and no nag,
+  # since nobody set this channel up. The env var still wins over the file.
+  local opts="$HOME/.config/claude-panel/options" out_optoff
+  mkdir -p "$(dirname "$opts")"
+  printf 'CLAUDE_PANEL_TELEGRAM=false\n' > "$opts"
+  rm -f "$HOME/.cache/claude-cost-alert-state/SID-AC.json"
+  out_optoff=$(PATH="$bin:$PATH" TERM_PROGRAM=ghostty bash "$hook" <<<"$payload")
+  assert_not_contains "TELEGRAM=false in options: no missing-creds notice" \
+    "no phone push sent" "$(jq -r '.systemMessage' <<<"$out_optoff")"
+  assert_contains "but the alert itself still arrives" \
+    "RUNAWAY COST" "$(jq -r '.systemMessage' <<<"$out_optoff")"
+  rm -f "$HOME/.cache/claude-cost-alert-state/SID-AC.json"
+  out_optoff=$(PATH="$bin:$PATH" TERM_PROGRAM=ghostty CLAUDE_COST_ALERT_TELEGRAM=1 \
+    bash "$hook" <<<"$payload")
+  assert_contains "CLAUDE_COST_ALERT_TELEGRAM=1 overrides the file, and nags" \
+    "no phone push sent" "$(jq -r '.systemMessage' <<<"$out_optoff")"
+  printf 'CLAUDE_PANEL_TELEGRAM=true\n' > "$opts"
+  rm -f "$HOME/.cache/claude-cost-alert-state/SID-AC.json"
+  out_optoff=$(PATH="$bin:$PATH" TERM_PROGRAM=ghostty bash "$hook" <<<"$payload")
+  assert_contains "TELEGRAM=true with creds gone: the breakage is announced" \
+    "no phone push sent" "$(jq -r '.systemMessage' <<<"$out_optoff")"
+  rm -f "$opts"
+  assert_eq "nothing sent in any of those" "0" "$(wc -c < "$CURL_CAPTURE" | tr -d ' ')"
+
   # ---- credentials present -------------------------------------------------
   mkdir -p "$HOME/Desktop/github"
   printf 'export TELEGRAM_BOT_TOKEN=FAKE:TOKEN\nexport TELEGRAM_CHAT_ID=99999\n' \

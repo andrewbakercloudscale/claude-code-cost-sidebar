@@ -55,7 +55,7 @@ check_AS_alert_options() {
   local setup="$HERE/../claude-panel-setup.sh" block
   block=$(awk '/^PANEL_OPTIONS="\$HOME\/.config\/claude-panel\/options"$/{on=1} /^echo "Options: /{on=0} on' "$setup")
   assert_contains "options block found in setup" "OPTIONS_EOF" "$block"
-  local keys="REMOTE_CONTROL CAFFEINATE SESSION_TITLE RESTART_TOKENS COST_ALERTS ALERT_MIN_USD" k
+  local keys="REMOTE_CONTROL CAFFEINATE SESSION_TITLE RESTART_TOKENS COST_ALERTS ALERT_MIN_USD TELEGRAM" k
   once() { # $1 label, $2 file
     for k in $keys; do
       assert_eq "$1: CLAUDE_PANEL_$k= once" "1" "$(grep -c "^CLAUDE_PANEL_$k=" "$2")"
@@ -65,6 +65,8 @@ check_AS_alert_options() {
   rm -f "$opts"
   bash -c "$block"
   once "fresh file" "$opts"
+  assert_eq "fresh file, no creds store: Telegram off" "CLAUDE_PANEL_TELEGRAM=false" \
+    "$(grep -E '^CLAUDE_PANEL_TELEGRAM=' "$opts")"
   assert_eq "fresh file: defaults" "CLAUDE_PANEL_SESSION_TITLE=true CLAUDE_PANEL_ALERT_MIN_USD=5.00" \
     "$(grep -E '^CLAUDE_PANEL_(SESSION_TITLE|ALERT_MIN_USD)=' "$opts" | tr '\n' ' ' | sed 's/ $//')"
   bash -c "$block"
