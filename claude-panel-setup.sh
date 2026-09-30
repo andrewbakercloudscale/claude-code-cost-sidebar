@@ -1907,6 +1907,13 @@ def load_compaction_markers():
                     # The swap is the first request after a summary whose
                     # compacted count CHANGED. Requests in between still carry
                     # the previous summary (same count) and are not this one.
+                    # A request with no compacted count is another
+                    # conversation under the same session id (a subagent, a
+                    # title request): it says nothing about this one's
+                    # swap. Counting it as 0 once made the next ordinary
+                    # request look like a new swap.
+                    if "compacted_messages" not in e:
+                        continue
                     n = e.get("compacted_messages") or 0
                     if n and n != last_compacted and last_summary is not None:
                         out.append((began, "finished", last_summary))

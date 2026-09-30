@@ -7,7 +7,10 @@
 # after the summary call, which on 2026-09-30 put it minutes before the real
 # swap: the row where context fell 945k to 66k had no marker, and the marker
 # sat below the visible turns. The swap is the first request whose
-# compacted count changed.
+# compacted count changed. A request with no count (a subagent or title
+# request under the same session id, 08:50:06) is another conversation and
+# must not reset it: on 2026-09-30 it put Finished on an ordinary
+# requests while the second summary was still waiting.
 check_AQ_compaction_marker_at_swap() {
   sandbox_new AQ
   local m="$SBX/metrics.jsonl"
@@ -16,6 +19,7 @@ check_AQ_compaction_marker_at_swap() {
 {"time":"2026-09-30T08:49:30+02:00","session_id":"S","note":"compaction summary","api_equivalent_usd":0.21}
 {"time":"2026-09-30T08:49:37+02:00","session_id":"S","input_tokens":2,"compacted_messages":994}
 {"time":"2026-09-30T08:50:06+02:00","session_id":"S","input_tokens":2}
+{"time":"2026-09-30T08:51:00+02:00","session_id":"S","input_tokens":2,"compacted_messages":994}
 {"time":"2026-09-30T08:55:26+02:00","session_id":"S","input_tokens":2,"compacted_messages":1741}
 {"time":"2026-09-30T08:56:00+02:00","session_id":"S","input_tokens":2,"compacted_messages":1741}
 JSON
