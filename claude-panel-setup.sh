@@ -2076,7 +2076,7 @@ if shown:
             if kind == "started":
                 print(f"  {col_mid_tier}*** Pauseless Compaction Started ***{c_reset}")
             elif kind == "pending":
-                print(f"  {col_mid_tier}*** Pauseless Compaction Pending: swaps in at your next prompt ***{c_reset}")
+                print(f"  {col_cache}*** Pauseless Compaction Pending (next prompt) ***{c_reset}")
             else:
                 cost_note = "" if usd is None else f" (${usd:.2f})"
                 print(f"  {col_input}*** Pauseless Compaction Finished{cost_note} ***{c_reset}")
