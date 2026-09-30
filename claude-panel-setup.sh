@@ -3208,7 +3208,10 @@ build_summary() {
   # written out twice with near-identical reasoning attached to each.
   if [ -n "$latest" ] && [ -n "$SESS_COST" ]; then
     sess_amt=$(awk -v c="$SESS_COST" 'BEGIN{ printf "%.2f", c }')
-    sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_SESSION_ALERT")
+    # The same floor as the chat alert (CLAUDE_PANEL_ALERT_MIN_USD, the
+    # dashboard's "Session alert only above"): the $5 default was hardcoded
+    # here, so raising the setting quietened the alert but not this colour.
+    sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$(panel_option_usd CLAUDE_PANEL_ALERT_MIN_USD "$MIN_SESSION_ALERT")")
     # THIS session's own $/hr (spend so far ÷ time since its first
     # message), separate from the block burn rate below, which is
     # every session's combined spend in the current 5h window, not
@@ -3627,6 +3630,21 @@ panel_option_int() { # $1 = KEY, $2 = default
   case "$v" in
     ''|*[!0-9]*) printf '%s' "$2" ;;
     *) printf '%s' "$((10#$v))" ;;
+  esac
+}
+
+# A dollar option: a plain non-negative number with at most one point, else
+# the default ($2). Same precedence and tolerance as the two above.
+panel_option_usd() { # $1 = KEY, $2 = default
+  local v="${!1:-}"
+  if [ -z "$v" ]; then
+    v=$(grep -E "^$1=" "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
+    v="${v#*=}"
+  fi
+  v=$(printf '%s' "$v" | tr -d '"'"'"' $')
+  case "$v" in
+    ''|.|*[!0-9.]*|*.*.*) printf '%s' "$2" ;;
+    *) printf '%s' "$v" ;;
   esac
 }
 
