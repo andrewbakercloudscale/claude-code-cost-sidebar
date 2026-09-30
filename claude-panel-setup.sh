@@ -4720,6 +4720,8 @@ mkdir -p "$(dirname "$PANEL_OPTIONS")"
   "# CLAUDE_PANEL_CAFFEINATE: keep the Mac awake (caffeinate -i) while a panel runs" \
   "# CLAUDE_PANEL_SESSION_TITLE: name new sessions after their folder" \
   "# CLAUDE_PANEL_RESTART_TOKENS: context size that shows a red restart warning (0 = off)" \
+  "# CLAUDE_PANEL_COST_ALERTS: warn in the chat when a session or the day costs far more than usual" \
+  "# CLAUDE_PANEL_ALERT_MIN_USD: a session below this many dollars never raises a cost alert" \
   > "$PANEL_OPTIONS"
 for opt in CLAUDE_PANEL_REMOTE_CONTROL CLAUDE_PANEL_CAFFEINATE; do
   grep -qE "^$opt=" "$PANEL_OPTIONS" || printf '%s=false\n' "$opt" >> "$PANEL_OPTIONS"
@@ -4730,6 +4732,12 @@ grep -qE '^CLAUDE_PANEL_SESSION_TITLE=' "$PANEL_OPTIONS" \
 grep -qE '^CLAUDE_PANEL_RESTART_TOKENS=' "$PANEL_OPTIONS" \
   || printf '%s\n' "# CLAUDE_PANEL_RESTART_TOKENS: context size that shows a red restart warning (0 = off)" \
        "CLAUDE_PANEL_RESTART_TOKENS=400000" >> "$PANEL_OPTIONS"
+grep -qE '^CLAUDE_PANEL_COST_ALERTS=' "$PANEL_OPTIONS" \
+  || printf '%s\n' "# CLAUDE_PANEL_COST_ALERTS: warn in the chat when a session or the day costs far more than usual" \
+       "CLAUDE_PANEL_COST_ALERTS=true" >> "$PANEL_OPTIONS"
+grep -qE '^CLAUDE_PANEL_ALERT_MIN_USD=' "$PANEL_OPTIONS" \
+  || printf '%s\n' "# CLAUDE_PANEL_ALERT_MIN_USD: a session below this many dollars never raises a cost alert" \
+       "CLAUDE_PANEL_ALERT_MIN_USD=5.00" >> "$PANEL_OPTIONS"
 echo "Options: $PANEL_OPTIONS ($(grep -E '^CLAUDE_PANEL_' "$PANEL_OPTIONS" | tr '\n' ' '))"
 
 ZSHRC="$HOME/.zshrc"
@@ -5080,7 +5088,29 @@ mkdir -p "$STATE_DIR"
 YELLOW_MULT=1.5
 RED_MULT=2.0
 PURPLE_MULT=3.0
-MIN_SESSION_ALERT=5.00  # never alert below this, no matter the multiple
+
+# Two options from ~/.config/claude-panel/options (the Claude Burst dashboard
+# switches both), read like the panel reads its own: quotes, spaces and case
+# are tolerated, and anything unreadable falls back to the default.
+#   CLAUDE_PANEL_COST_ALERTS (default true): false silences the cost alerts
+#     (session tier, runaway day, bad day). The panel-launch failure alert
+#     still fires: it reports a broken install, not spend, and switching off
+#     spend alerts is no reason to hide that the panel never opened.
+#   CLAUDE_PANEL_ALERT_MIN_USD (default 5.00): a session below this never
+#     alerts, whatever its multiple of the average.
+alert_option() { # $1 = KEY
+  local v
+  v=$(grep -E "^$1=" "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
+  printf '%s' "${v#*=}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]'
+}
+case "$(alert_option CLAUDE_PANEL_COST_ALERTS)" in
+  false|0|no|off) COST_ALERTS=0 ;;
+  *) COST_ALERTS=1 ;;
+esac
+MIN_SESSION_ALERT=$(alert_option CLAUDE_PANEL_ALERT_MIN_USD)
+case "$MIN_SESSION_ALERT" in
+  ''|.|*[!0-9.]*|*.*.*) MIN_SESSION_ALERT=5.00 ;;
+esac
 
 CCUSAGE_CACHE_DIR="$HOME/.cache/ccusage-panel-cache"
 HOOK_CACHE_TTL=120
@@ -5471,6 +5501,13 @@ fi
 alert_launch=0
 if [ "$launch_failed" -eq 1 ] && [ "$last_launch_line" != "$prev_launch_line" ]; then
   alert_launch=1
+fi
+
+# Cost alerts switched off: drop them here rather than skipping the work
+# above, so the tier state keeps tracking and turning alerts back on does not
+# fire at once for a tier the session reached while they were off.
+if [ "$COST_ALERTS" -eq 0 ]; then
+  alert_cost=0; alert_daily=0; alert_badday=0
 fi
 
 # Persist state unconditionally (tracks de-escalation too, so a later
