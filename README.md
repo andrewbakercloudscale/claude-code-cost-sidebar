@@ -107,7 +107,7 @@ Or via the wrapper script:
 bash deploy.sh
 ```
 
-**With Claude Burst.** [Claude Burst](https://github.com/andrewbakercloudscale/claude-burst) is a separate, optional local gateway for Claude Code. Its installer offers to install this panel too. When it is present, the turn table reads its `~/.config/claude-burst/metrics.jsonl` and marks each auto compaction: a Started row, a Finished row with the summary's cost, and a green negative delta on the turn where the context dropped. Without it those rows simply never appear.
+**With Claude Burst.** [Claude Burst](https://github.com/andrewbakercloudscale/claude-burst) is a separate, optional local gateway for Claude Code. Its installer offers to install this panel too. When it is present, the turn table reads its `~/.config/claude-burst/metrics.jsonl` and marks each Pauseless Compaction: a Started row, a Pending row once the summary is ready and waiting for your next prompt, a Finished row with the summary's cost, and a green negative delta on the turn where the context dropped. Without it those rows simply never appear.
 
 `deploy.sh` doesn't do anything the installer above doesn't already do on its own, there's no remote server for this repo, so "deploy" means re-running the installer to pick up the latest script changes on this machine. It's just a single command to re-run after pulling changes, mirroring the `deploy-*.sh` convention used elsewhere. Safe to re-run any time; the installer is idempotent. `bash deploy.sh claude` still works too, the argument existed while this repo also held the OpenCode panel, and quietly ignoring a word that used to mean something is the failure this project is about.
 

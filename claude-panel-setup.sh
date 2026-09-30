@@ -1872,12 +1872,15 @@ SECONDARY_EVENTS = load_secondary_events()
 # (the transcript's own file name): the summary call (note "compaction
 # summary") and every request that carried the swap (compacted_messages).
 # Both are stamped at the END of their request, so the start is time minus
-# duration: that places "Started" at the prompt it ran beside, and
-# "Finished" just before the first turn that was actually sent compacted.
+# duration: that places "Started" at the prompt it ran beside, "Pending" at
+# the moment the summary was ready (it waits for the next plain prompt, so a
+# long turn can run for minutes above the threshold with nothing else to
+# show), and "Finished" just before the first turn that was actually sent
+# compacted.
 SESSION_ID = os.path.basename(path).removesuffix(".jsonl")
 
 def load_compaction_markers():
-    """[(epoch, kind, summary_usd)] in time order; kind is started/finished."""
+    """[(epoch, kind, summary_usd)] in time order; kind is started/pending/finished."""
     out, last_summary, last_compacted = [], None, 0
     try:
         with open(BURST_METRICS) as f:
@@ -1895,8 +1898,11 @@ def load_compaction_markers():
                     continue
                 began = ts - (e.get("duration_ms") or 0) / 1000
                 if e.get("note") == "compaction summary":
-                    last_summary = e.get("api_equivalent_usd")
                     out.append((began, "started", None))
+                    # A failed summary never swaps in: nothing is pending.
+                    if (e.get("http_status") or 200) < 400:
+                        last_summary = e.get("api_equivalent_usd")
+                        out.append((ts, "pending", None))
                 elif "compacted_messages" in e or e.get("input_tokens") is not None:
                     # The swap is the first request after a summary whose
                     # compacted count CHANGED. Requests in between still carry
@@ -2068,10 +2074,12 @@ if shown:
     def print_markers(j):
         for _, kind, usd in reversed(markers_before.get(j, [])):
             if kind == "started":
-                print(f"  {col_mid_tier}*** Started Auto Compaction ***{c_reset}")
+                print(f"  {col_mid_tier}*** Pauseless Compaction Started ***{c_reset}")
+            elif kind == "pending":
+                print(f"  {col_mid_tier}*** Pauseless Compaction Pending: swaps in at your next prompt ***{c_reset}")
             else:
                 cost_note = "" if usd is None else f" (${usd:.2f})"
-                print(f"  {col_input}*** Finished Auto Compaction{cost_note} ***{c_reset}")
+                print(f"  {col_input}*** Pauseless Compaction Finished{cost_note} ***{c_reset}")
 
     print_markers(len(shown))
     for i in reversed(range(len(shown))):
@@ -5774,10 +5782,11 @@ echo "you use one (patched above when present)."
 echo "Run the panel manually any time with: ~/.local/bin/ccusage-panel.sh"
 echo
 # Claude Burst (a separate, optional gateway) writes metrics.jsonl, which the
-# turn table reads for its auto compaction rows. Neither needs the other.
+# turn table reads for its Pauseless Compaction rows. Neither needs the other.
 if [ -d "$HOME/.config/claude-burst" ]; then
-  echo "Claude Burst detected: the turn table marks its auto compaction (Started and"
-  echo "Finished rows, a green negative delta, and the summary cost in the session total)."
+  echo "Claude Burst detected: the turn table marks its Pauseless Compaction (Started,"
+  echo "Pending and Finished rows, a green negative delta, and the summary cost in the"
+  echo "session total)."
 else
   echo "Optional: Claude Burst (https://github.com/andrewbakercloudscale/claude-burst)"
   echo "compacts long subscription sessions at the proxy, and this panel's turn table"
