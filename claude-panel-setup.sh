@@ -3948,8 +3948,12 @@ cwd=$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)
 #
 # "startup" only. A resumed session may carry a title someone chose with
 # /rename, and clobbering it with the folder name would undo that choice.
-# PANEL_SESSION_TITLE=0 turns it off.
+# CLAUDE_PANEL_SESSION_TITLE=false in ~/.config/claude-panel/options (the
+# Claude Burst dashboard switches it) or PANEL_SESSION_TITLE=0 turns it off.
 source=$(printf '%s' "$payload" | jq -r '.source // empty' 2>/dev/null)
+title_opt=$(grep -E '^CLAUDE_PANEL_SESSION_TITLE=' "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
+title_opt=$(printf '%s' "${title_opt#*=}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]')
+case "$title_opt" in false|0|no|off) PANEL_SESSION_TITLE=0 ;; esac
 if [ "$source" = "startup" ] && [ "${PANEL_SESSION_TITLE:-1}" != "0" ]; then
   jq -cn --arg t "${cwd##*/}" \
     '{hookSpecificOutput: {hookEventName: "SessionStart", sessionTitle: $t}}' 2>/dev/null
@@ -4714,11 +4718,15 @@ mkdir -p "$(dirname "$PANEL_OPTIONS")"
   "# claude-panel options -- true/false. Written by claude-panel-setup.sh." \
   "# CLAUDE_PANEL_REMOTE_CONTROL: start interactive claude sessions with --remote-control" \
   "# CLAUDE_PANEL_CAFFEINATE: keep the Mac awake (caffeinate -i) while a panel runs" \
+  "# CLAUDE_PANEL_SESSION_TITLE: name new sessions after their folder" \
   "# CLAUDE_PANEL_RESTART_TOKENS: context size that shows a red restart warning (0 = off)" \
   > "$PANEL_OPTIONS"
 for opt in CLAUDE_PANEL_REMOTE_CONTROL CLAUDE_PANEL_CAFFEINATE; do
   grep -qE "^$opt=" "$PANEL_OPTIONS" || printf '%s=false\n' "$opt" >> "$PANEL_OPTIONS"
 done
+grep -qE '^CLAUDE_PANEL_SESSION_TITLE=' "$PANEL_OPTIONS" \
+  || printf '%s\n' "# CLAUDE_PANEL_SESSION_TITLE: name new sessions after their folder" \
+       "CLAUDE_PANEL_SESSION_TITLE=true" >> "$PANEL_OPTIONS"
 grep -qE '^CLAUDE_PANEL_RESTART_TOKENS=' "$PANEL_OPTIONS" \
   || printf '%s\n' "# CLAUDE_PANEL_RESTART_TOKENS: context size that shows a red restart warning (0 = off)" \
        "CLAUDE_PANEL_RESTART_TOKENS=400000" >> "$PANEL_OPTIONS"

@@ -34,4 +34,14 @@ check_AL_session_title() {
   out=$(env PANEL_SESSION_TITLE=0 bash -c 'printf "%s" "$0" | PANEL_PIN_DIR="$1" bash "$2"' \
     '{"session_id":"'"$sid"'","cwd":"/Users/x/my-repo","source":"startup"}' "$SBX/pin" "$hook" 2>/dev/null)
   assert_eq "PANEL_SESSION_TITLE=0: prints nothing" "" "$out"
+
+  # The option the Claude Burst dashboard switches. HOME is the sandbox.
+  mkdir -p "$HOME/.config/claude-panel"
+  printf '# c\nCLAUDE_PANEL_SESSION_TITLE=false\n' > "$HOME/.config/claude-panel/options"
+  out=$(run_hook startup)
+  assert_eq "option false: prints nothing" "" "$out"
+  printf 'CLAUDE_PANEL_SESSION_TITLE=true\n' > "$HOME/.config/claude-panel/options"
+  out=$(run_hook startup)
+  assert_eq "option true: titles the session" \
+    "my-repo" "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.sessionTitle // "none"' 2>/dev/null)"
 }
