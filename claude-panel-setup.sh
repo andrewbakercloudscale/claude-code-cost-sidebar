@@ -1875,7 +1875,7 @@ SESSION_ID = os.path.basename(path).removesuffix(".jsonl")
 
 def load_compaction_markers():
     """[(epoch, kind, summary_usd)] in time order; kind is started/finished."""
-    out, last_summary = [], None
+    out, last_summary, last_compacted = [], None, 0
     try:
         with open(BURST_METRICS) as f:
             for line in f:
@@ -1894,11 +1894,15 @@ def load_compaction_markers():
                 if e.get("note") == "compaction summary":
                     last_summary = e.get("api_equivalent_usd")
                     out.append((began, "started", None))
-                elif e.get("compacted_messages") and last_summary is not None:
-                    # Only the first compacted request after a summary: every
-                    # later one carries the same swap and is not news.
-                    out.append((began, "finished", last_summary))
-                    last_summary = None
+                elif "compacted_messages" in e or e.get("input_tokens") is not None:
+                    # The swap is the first request after a summary whose
+                    # compacted count CHANGED. Requests in between still carry
+                    # the previous summary (same count) and are not this one.
+                    n = e.get("compacted_messages") or 0
+                    if n and n != last_compacted and last_summary is not None:
+                        out.append((began, "finished", last_summary))
+                        last_summary = None
+                    last_compacted = n
     except OSError:
         return []
     return out
