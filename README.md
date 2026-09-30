@@ -32,7 +32,7 @@ UserPromptSubmit says: 🔴 COST ALERT: $20.00 this session, 2.4x your $8.20 ave
 UserPromptSubmit says: 🟣 RUNAWAY COST: $61.00 this session, 7.4x your $8.20 average, consider wrapping up or starting a fresh session
 ```
 
-On Ghostty it also fires a real macOS desktop notification (OSC 777) alongside the chat line; every other terminal gets a bell. And it **pushes to Telegram**, which is the only one of the three channels that will reach a phone you aren't currently looking at, credentials come from the shared `~/Desktop/github/.creds` (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`), the same store the Pi watchdogs use. Set `CLAUDE_COST_ALERT_TELEGRAM=0` to turn the push off; `bash check-panel-status.sh` reports whether it's configured and whether any sends have failed.
+On Ghostty it also fires a real macOS desktop notification (OSC 777) alongside the chat line; every other terminal gets a bell. And it **pushes to Telegram**, which is the only one of the three channels that will reach a phone you aren't currently looking at, credentials come from the shared `~/Desktop/github/.creds` (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`), the same store the Pi watchdogs use. Setup turns the push on (`CLAUDE_PANEL_TELEGRAM=true` in `~/.config/claude-panel/options`) only when those credentials already exist, so a fresh machine gets no Telegram and no nagging about it; flip the option to change that, or set `CLAUDE_COST_ALERT_TELEGRAM=0`/`1` in the environment to override it; `bash check-panel-status.sh` reports whether it's configured and whether any sends have failed.
 
 ### Launching
 
@@ -92,7 +92,7 @@ The installer lays down a **panel script** (the thing that renders live stats in
 
 - macOS + [Ghostty](https://ghostty.org/) for the auto-split part, unless you run inside tmux, in which case tmux's own split is used instead and Ghostty isn't required. The panel script itself works in any terminal if you just run it manually.
 - `jq`
-- Node.js (for [`ccusage`](https://github.com/ryoppippi/ccusage)) and Python 3
+- Node.js (for [`ccusage`](https://github.com/ryoppippi/ccusage), which setup installs with `npm install -g ccusage` when it is missing, and stops if it cannot) and Python 3
 - Accessibility permission granted to Ghostty (macOS will prompt the first time the launcher tries to drive it via System Events), not needed for the tmux path
 
 ## Install

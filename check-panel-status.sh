@@ -52,8 +52,13 @@ main() {
   # The one channel whose breakage is silent: a missing token means no push,
   # and no push is indistinguishable from no overspend. Report it here so it
   # is visible without waiting for an alert that never comes.
+  local tg_opt
+  tg_opt=$(grep -E '^CLAUDE_PANEL_TELEGRAM=' "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
+  tg_opt=$(printf '%s' "${tg_opt#*=}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]')
   if [[ "${CLAUDE_COST_ALERT_TELEGRAM:-1}" == "0" ]]; then
     echo "disabled (CLAUDE_COST_ALERT_TELEGRAM=0)"
+  elif [[ -z "${CLAUDE_COST_ALERT_TELEGRAM:-}" && "$tg_opt" =~ ^(false|0|no|off)$ ]]; then
+    echo "disabled (CLAUDE_PANEL_TELEGRAM=false in ~/.config/claude-panel/options)"
   elif [[ -f "$CREDS_FILE" ]] && grep -q "TELEGRAM_BOT_TOKEN" "$CREDS_FILE" \
        && grep -q "TELEGRAM_CHAT_ID" "$CREDS_FILE"; then
     echo "configured (credentials in ~/Desktop/github/.creds)"
