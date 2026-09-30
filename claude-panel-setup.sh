@@ -740,6 +740,7 @@ import glob, json, os, sys, time, datetime as dt
 cache_path, window_days = sys.argv[1], int(sys.argv[2])
 
 PRICES = {
+    "claude-sonnet-5-5": (2.00, 10.00),
     "claude-sonnet-5":   (2.00, 10.00),
     "claude-opus-5-5":   (4.00, 20.00),
     "claude-opus-5":     (5.00, 25.00),
@@ -1231,6 +1232,7 @@ backfill_unpriced() {
 import glob, json, os, sys, datetime as dt
 
 PRICES = {
+    "claude-sonnet-5-5": (2.00, 10.00),
     "claude-sonnet-5":   (2.00, 10.00),
     "claude-opus-5-5":   (4.00, 20.00),
     "claude-opus-5":     (5.00, 25.00),
@@ -1705,6 +1707,7 @@ delta_yellow_mult, delta_red_mult, delta_floor = (float(x) for x in sys.argv[15:
 c_na = sys.argv[18]
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
+    "claude-sonnet-5-5": (2.00, 10.00),
     "claude-sonnet-5":   (2.00, 10.00),
     "claude-opus-5-5":   (4.00, 20.00),
     "claude-opus-5":     (5.00, 25.00),

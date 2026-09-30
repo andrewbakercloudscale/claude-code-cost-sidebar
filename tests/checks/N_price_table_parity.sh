@@ -31,6 +31,7 @@ check_N_price_table_parity() {
   assert_contains "Opus 5 at 5/25"      '"claude-opus-5":(5.00,25.00),' "$a"
   assert_contains "Opus 5.5 at 4/20"    '"claude-opus-5-5":(4.00,20.00),' "$a"
   assert_contains "Sonnet 5 at 2/10"    '"claude-sonnet-5":(2.00,10.00),' "$a"
+  assert_contains "Sonnet 5.5 at 2/10"  '"claude-sonnet-5-5":(2.00,10.00),' "$a"
   assert_contains "Haiku 4.5 at 1/5"    '"claude-haiku-4-5":(1.00,5.00),' "$a"
   assert_contains "Fable 5.1 at 10/50"  '"claude-fable-5-1":(10.00,50.00),' "$a"
   assert_contains "Mythos 5.1 at 10/50" '"claude-mythos-5-1":(10.00,50.00),' "$a"
