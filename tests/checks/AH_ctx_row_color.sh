@@ -47,7 +47,7 @@ check_AH_ctx_row_color() {
     seed_recent
     panel_tick_slow
     session_stats_refresh
-    AH_CTX_LINE=$(build_summary 2>/dev/null | grep -a 'Context Usage' || true)
+    AH_CTX_LINE=$(build_summary 2>/dev/null | grep -a 'Context:' || true)
     AH_ROWS=$(printf '%s\n' "$SESS_TABLE" | grep -a 'Opus 5' || true)
   }
 
@@ -74,7 +74,7 @@ check_AH_ctx_row_color() {
   # The label, not just the figure. A magenta open must precede the emoji and
   # the words -- this is the specific thing that was invisible.
   case "$AH_CTX_LINE" in
-    "  $(printf '\033')[35m"*"Context Usage:"*) assert_eq "the whole Context Usage line goes purple" "1" "1" ;;
+    "  $(printf '\033')[35m"*"Context:"*) assert_eq "the whole Context Usage line goes purple" "1" "1" ;;
     *) assert_eq "the whole Context Usage line goes purple" "1" "0" ;;
   esac
   local row
@@ -95,7 +95,7 @@ check_AH_ctx_row_color() {
   # ---- 65%: red, same rule ------------------------------------------------
   _ah_render 645000
   case "$AH_CTX_LINE" in
-    "  $(printf '\033')[31m"*"Context Usage:"*) assert_eq "the whole Context Usage line goes red" "1" "1" ;;
+    "  $(printf '\033')[31m"*"Context:"*) assert_eq "the whole Context Usage line goes red" "1" "1" ;;
     *) assert_eq "the whole Context Usage line goes red" "1" "0" ;;
   esac
   while IFS= read -r row; do

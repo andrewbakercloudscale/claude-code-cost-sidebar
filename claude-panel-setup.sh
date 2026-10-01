@@ -3367,7 +3367,7 @@ build_summary() {
       # make the whole header line shout.
       label_color=""
       awk -v v="$ctx_pct" -v t="$CTX_RED" 'BEGIN{exit !(v+0>t)}' && label_color="$ctx_color"
-      printf '  %s🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
+      printf '  %s🧠 Context: %s%s / %s tokens (%s%%)%s%s\n' \
         "$label_color" "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
       # Not while a pauseless compaction is about to replace this context:
       # the summary is ready, so restarting would only throw it away.
@@ -3376,10 +3376,10 @@ build_summary() {
       # No context figure from the parse -- a session whose first turn has
       # not landed yet, or an older cache entry. "N/A" is the honest answer;
       # a 0% would read as an empty context window.
-      printf '  🧠 Context Usage: N/A\n' 
+      printf '  🧠 Context: N/A\n' 
     fi
   else
-    printf '  🧠 Context Usage: N/A\n'
+    printf '  🧠 Context: N/A\n'
   fi
 
   # Both trend lines below are colored against the SAME window one period
