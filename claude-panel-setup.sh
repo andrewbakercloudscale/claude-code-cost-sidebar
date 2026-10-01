@@ -5048,7 +5048,9 @@ _ccusage_panel_autolaunch() {
     return
   fi
   export CCUSAGE_PANEL_LAUNCHED=1
-  ~/.local/bin/claude-panel-launch.sh "$pin_sid" &
+  # &! disowns: a plain & in an interactive shell prints "[1] + done ..."
+  # over the claude prompt when the launcher exits.
+  ~/.local/bin/claude-panel-launch.sh "$pin_sid" &!
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _ccusage_panel_autolaunch
