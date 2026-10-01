@@ -11,7 +11,7 @@
 # it, which is indistinguishable from a project that has never been used. So
 # $latest stayed empty for the whole life of the pane and the panel rendered
 # its honest "nothing here" state forever -- "(no active Claude Code session
-# found)", "Model: Unknown", "Context Usage: N/A" -- while Today, the block,
+# found)", "Model: Unknown", "Context: N/A" -- while Today, the block,
 # Recent and Top Sessions, which glob the corpus and never build this key,
 # kept updating beside them. Some sections permanently frozen, the rest live.
 #
@@ -100,7 +100,7 @@ check_AE_project_dir_encoding() {
   assert_not_contains "and no longer says Unknown" "Model: Unknown" "$plain"
   # One of the two lines the frozen pane actually showed.
   assert_not_contains "and does not report the context as unknowable" \
-    "Context Usage: N/A" "$plain"
+    "Context: N/A" "$plain"
   # The third casualty of the same key: `ls "$project_dir"/*.jsonl` supplies
   # the session ids that the folder's spend is summed over, so a directory
   # that does not exist printed $0.00 against a session that had spent $26.

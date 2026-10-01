@@ -78,7 +78,7 @@ check_I_unknown_model() {
   err="$TEST_TMP/I-build-summary.err"
   summary=$(build_summary 2>"$err")
   assert_eq "the summary builds with no stderr at all" "" "$(cat "$err")"
-  assert_contains "the summary shows N/A for context" "Context Usage: N/A" "$summary"
+  assert_contains "the summary shows N/A for context" "Context: N/A" "$summary"
   assert_not_contains "and never a percentage against an unknown window" "(0%)" "$summary"
 
   # An API error, logged by Claude Code as a zero-usage reply from model
