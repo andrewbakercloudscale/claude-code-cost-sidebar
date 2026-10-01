@@ -1951,6 +1951,20 @@ def load_compaction_markers():
 
 COMPACTION_MARKERS = load_compaction_markers()
 
+def compaction_supersedes(markers, last_turn_ts):
+    """True when the newest turn's context is about to be replaced by a
+    summary, so a "restart, context is high" warning is out of date: the
+    summary is ready and waiting for the next prompt (pending), or the swap
+    has been sent and its turn has not landed yet (finished, newer than the
+    last turn). A finished swap older than the last turn is history -- if
+    context is high again after it, the warning is real."""
+    if not markers:
+        return False
+    ts, kind, _ = markers[-1]
+    if kind == "pending":
+        return True
+    return kind == "finished" and (last_turn_ts is None or ts > last_turn_ts)
+
 def secondary_event_for(turn_ts, out_tok):
     """(model, input_tokens, usd, route) for the secondary hop that served
     this turn, or None if it went to primary."""
@@ -2079,7 +2093,8 @@ summary_usd = sum(m[2] or 0 for m in COMPACTION_MARKERS if m[1] == "finished")
 sess_total = ("" if any(t[7] for t in turns)
               else f"{sum(t[4] for t in turns if t[4] is not None and not t[6]) + summary_usd:.6f}")
 print(f"#META\t{sess_total}\t{turns[-1][1] if turns else 0}"
-      f"\t{context_window_size(turns[-1][5]) if turns else 0}")
+      f"\t{context_window_size(turns[-1][5]) if turns else 0}"
+      f"\t{int(compaction_supersedes(COMPACTION_MARKERS, turns[-1][9] if turns else None))}")
 turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
 model_h = f"{col_model}{'Model':<10}{c_reset}"
 input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
@@ -2103,6 +2118,13 @@ if shown:
             continue
         j = next((k for k in range(len(shown)) if shown[k][9] is not None and shown[k][9] > m[0]), len(shown))
         markers_before.setdefault(j, []).append(m)
+    # A Pending with its Finished in the same gap is spent: no turn ran while
+    # the summary waited, so it says nothing the Finished does not, and drawn
+    # newest-first it sat BELOW the Finished still saying "(next prompt)",
+    # which reads as the two events in the wrong order.
+    for j, ms in markers_before.items():
+        markers_before[j] = [m for k, m in enumerate(ms)
+                             if not (m[1] == "pending" and any(n[1] == "finished" for n in ms[k + 1:]))]
 
     def print_markers(j):
         for _, kind, usd in reversed(markers_before.get(j, [])):
@@ -2235,9 +2257,9 @@ PYEOF
 # Set on every FAST tick, before either builder runs, so the slow-tier
 # summary and the fast-tier table read the same session from the same parse
 # rather than two snapshots that can disagree on screen.
-SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""
+SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""
 session_stats_refresh() {
-  SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""
+  SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""
   [ -n "${latest:-}" ] || return 0
   local out meta
   out=$(turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
@@ -2250,6 +2272,7 @@ session_stats_refresh() {
       SESS_COST=$(printf '%s' "$meta" | cut -f2)
       SESS_CTX=$(printf '%s' "$meta" | cut -f3)
       SESS_WIN=$(printf '%s' "$meta" | cut -f4)
+      SESS_COMPACTING=$(printf '%s' "$meta" | cut -f5)
       SESS_TABLE=$(printf '%s\n' "$out" | tail -n +2)
       ;;
     *)
@@ -3217,9 +3240,11 @@ build_summary() {
   else
     folder_disp="$(basename "$PWD")"
   fi
-  folder_maxw=$(( cols - 12 )); (( folder_maxw < 10 )) && folder_maxw=10
-  if [ "${#folder_disp}" -gt "$folder_maxw" ]; then
-    folder_disp="${folder_disp:0:$((folder_maxw - 3))}..."
+  # The right-hand 20 characters: a repo name's distinguishing part is
+  # usually its end (wordpress-cyber-devtools, ...-cost-usage-panel), and a
+  # longer name pushed the spend after it off a narrow pane.
+  if [ "${#folder_disp}" -gt 20 ]; then
+    folder_disp="…${folder_disp: -20}"
   fi
   # Total spend attributed to THIS project, every session whose
   # transcript lives under $project_dir, summed via ccusage's own
@@ -3340,7 +3365,9 @@ build_summary() {
       awk -v v="$ctx_pct" -v t="$CTX_RED" 'BEGIN{exit !(v+0>t)}' && label_color="$ctx_color"
       printf '  %s🧠 Context Usage: %s%s / %s tokens (%s%%)%s%s\n' \
         "$label_color" "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
-      restart_banner "$ctx_tokens"
+      # Not while a pauseless compaction is about to replace this context:
+      # the summary is ready, so restarting would only throw it away.
+      [ "$SESS_COMPACTING" = 1 ] || restart_banner "$ctx_tokens"
     else
       # No context figure from the parse -- a session whose first turn has
       # not landed yet, or an older cache entry. "N/A" is the honest answer;
@@ -3726,6 +3753,35 @@ flash_restart_banner() { # $1 = seconds to wait, $2 = frame on screen
   done
 }
 
+# Remembers the width the user drags this pane to, for the next launch.
+# Saved as the panel's share of the panel+claude pair, a whole percent, to
+# PANEL_WIDTH_FILE, which the launcher reads as its PANEL_WIDTH_PCT. A share
+# rather than columns: the next window may be a different size. The claude
+# pane's width is read off its own tty (`stty -f`), the pairing tells us
+# which one. Saved only once the pair has held still for two ticks, so the
+# launcher's own shrink -- this pane starts at 50% and is pressed down over
+# a few seconds -- is never mistaken for a choice.
+PANEL_WIDTH_FILE="$HOME/.config/claude-panel/width-pct"
+_width_seen=""
+remember_panel_width() { # $1 = this pane's columns
+  local ccols pct now
+  [ -n "$PANE_CLAUDE_TTY" ] || return 0
+  ccols=$(stty -f "/dev/$PANE_CLAUDE_TTY" size 2>/dev/null | awk '{print $2}')
+  case "$ccols" in ''|*[!0-9]*|0) return 0 ;; esac
+  pct=$(( ($1 * 100 + ($1 + ccols) / 2) / ($1 + ccols) ))
+  (( pct < 15 )) && pct=15
+  (( pct > 50 )) && pct=50
+  now="$1:$ccols"
+  if [ "$now" != "$_width_seen" ]; then
+    _width_seen="$now"
+    return 0
+  fi
+  [ "$(cat "$PANEL_WIDTH_FILE" 2>/dev/null)" = "$pct" ] && return 0
+  mkdir -p "$(dirname "$PANEL_WIDTH_FILE")" 2>/dev/null
+  printf '%s\n' "$pct" > "$PANEL_WIDTH_FILE.$$" 2>/dev/null \
+    && mv -f "$PANEL_WIDTH_FILE.$$" "$PANEL_WIDTH_FILE" 2>/dev/null
+}
+
 # Test seam: source this file with PANEL_LIB_ONLY=1 to get every function
 # above without entering the render loop. The tty setup further up is
 # already guarded by `[ -t 0 ]`, so a sourced panel touches no terminal and
@@ -3777,6 +3833,7 @@ while true; do
 
   now_epoch=$(panel_now)
   resolve_session
+  remember_panel_width "$cols"
   # Before either builder: the slow-tier summary and the fast-tier table
   # must read the same session from the same parse, or they can disagree
   # on screen about what this session has cost.
@@ -4436,7 +4493,12 @@ PANEL_CMD="~/.local/bin/ccusage-panel.sh"
 # Both send paths below compute this, and they must agree: a launch that
 # lands on the AppleScript fallback should produce the same pane as one
 # that does not.
-PANEL_WIDTH_PCT="${PANEL_WIDTH_PCT:-30}"
+# The width the user last dragged a panel to, saved by the panel itself
+# (remember_panel_width), wins over the 30 default; the environment over both.
+_saved_pct=$(cat "$HOME/.config/claude-panel/width-pct" 2>/dev/null)
+case "$_saved_pct" in ''|*[!0-9]*) _saved_pct=30 ;; esac
+(( _saved_pct < 15 || _saved_pct > 50 )) && _saved_pct=30
+PANEL_WIDTH_PCT="${PANEL_WIDTH_PCT:-$_saved_pct}"
 
 log "start: TERM_PROGRAM=${TERM_PROGRAM:-unset} TMUX=${TMUX:-unset} PWD=$PWD PIN_SID=${PIN_SID:-none}"
 write_pin_handoff
