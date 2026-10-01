@@ -3240,11 +3240,15 @@ build_summary() {
   else
     folder_disp="$(basename "$PWD")"
   fi
-  # The right-hand 20 characters: a repo name's distinguishing part is
+  # The right-hand 25 characters: a repo name's distinguishing part is
   # usually its end (wordpress-cyber-devtools, ...-cost-usage-panel), and a
-  # longer name pushed the spend after it off a narrow pane.
-  if [ "${#folder_disp}" -gt 20 ]; then
-    folder_disp="…${folder_disp: -20}"
+  # longer name pushed the spend after it off a narrow pane. The cut is
+  # marked with a plain "..." outside the name's colour: a single "…" in
+  # the same blue read as part of the name.
+  folder_cut=""
+  if [ "${#folder_disp}" -gt 25 ]; then
+    folder_disp="${folder_disp: -25}"
+    folder_cut="..."
   fi
   # Total spend attributed to THIS project, every session whose
   # transcript lives under $project_dir, summed via ccusage's own
@@ -3259,7 +3263,7 @@ build_summary() {
   # strings you go looking for, not numbers you watch move, and the colour is
   # what separates the identity rows from the tier-coloured money below them.
   # The spend stays uncoloured, it has no threshold to be coloured against.
-  printf '  📁 Folder: %s%s%s (%s)\n' "$C_ELECTRIC" "$folder_disp" "$C_RESET" "$(fmt_money "$proj_spend")"
+  printf '  📁 Folder: %s%s%s%s (%s)\n' "$folder_cut" "$C_ELECTRIC" "$folder_disp" "$C_RESET" "$(fmt_money "$proj_spend")"
 
   # Session spend needs BOTH a resolved session and a priced turn in it;
   # the two used to be nested, which is why the "--" fallback had to be
