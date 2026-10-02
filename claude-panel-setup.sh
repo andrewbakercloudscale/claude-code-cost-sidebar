@@ -2349,7 +2349,10 @@ if [ -t 0 ]; then
     restore_tty() {
       rm -f "$PANEL_ERR_FILE"
       drain_stdin
-      [ -t 1 ] && printf '\033[?1049l'
+      # Mouse reporting off (the close button turns it on) before leaving the
+      # alternate screen, or the shell left in this pane receives every click
+      # as escape codes. Harmless when it was never on.
+      [ -t 1 ] && printf '\033[?1000l\033[?1006l\033[?1049l'
       stty "$ORIG_STTY" 2>/dev/null
     }
     # INT/TERM need a handler that EXITS, not just one that tidies up. A
@@ -2410,6 +2413,8 @@ restart_if_changed() {
   [ "$now_mtime" = "$PANEL_SELF_MTIME" ] && return 0
   bash -n "$PANEL_SELF" 2>/dev/null || return 0
   [ -n "${ORIG_STTY:-}" ] && stty "$ORIG_STTY" 2>/dev/null
+  # The new version turns mouse reporting back on if it still wants it.
+  [ -t 1 ] && printf '\033[?1000l\033[?1006l'
   exec bash "$PANEL_SELF" "$@"
 }
 
@@ -3692,6 +3697,20 @@ panel_option() { # $1 = KEY
   return 1
 }
 
+# For options that default to ON: true only when the value is explicitly
+# false/0/no/off. A missing file or key, or anything else, leaves it on.
+panel_option_off() { # $1 = KEY
+  local v="${!1:-}"
+  if [ -z "$v" ]; then
+    v=$(grep -E "^$1=" "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
+    v="${v#*=}"
+  fi
+  case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]' | tr -d '"'"'"' ')" in
+    false|0|no|off) return 0 ;;
+  esac
+  return 1
+}
+
 # Numeric options from the same file, same precedence. Prints the value when
 # it is a plain non-negative integer, else the default ($2). A typo must not
 # silently disable a warning, so anything unparseable falls back.
@@ -3756,15 +3775,13 @@ flash_restart_banner() { # $1 = seconds to wait, $2 = frame on screen
   local row state=on i
   row=$(printf '%s\n' "$2" | grep -n -F -m1 "$RESTART_BANNER_TEXT" | cut -d: -f1)
   if [ -z "$row" ]; then
-    sleep "$1" &
-    wait $! 2>/dev/null
+    panel_sleep "$1"
     return
   fi
   for (( i = 0; i < $1; i++ )); do
     printf '\033[%d;1H%s\033[K' "$row" "$(restart_banner_line "$state")"
     [ "$state" = on ] && state=off || state=on
-    sleep 1 &
-    wait $! 2>/dev/null
+    panel_sleep 1
   done
 }
 
@@ -3797,6 +3814,95 @@ remember_panel_width() { # $1 = this pane's columns
     && mv -f "$PANEL_WIDTH_FILE.$$" "$PANEL_WIDTH_FILE" 2>/dev/null
 }
 
+# ---- close button ----
+# An [X] in the top-right corner closes the panel with a click. In the split
+# the launcher opened (it types CLAUDE_PANEL_SPLIT=1 before the command) the
+# split closes too, since that pane exists only to show the panel; run by
+# hand, the panel just exits back to the prompt.
+#
+# The click arrives as xterm mouse reporting (1000 = press and release, 1006
+# = SGR encoding: ESC [ < button ; column ; row M). While it is on, a plain
+# drag in this pane no longer selects text; Shift+drag still does in
+# Ghostty. CLAUDE_PANEL_CLOSE_BUTTON=false turns the button and the mouse
+# reporting off. Clicks are read while the panel waits between refreshes,
+# in 0.2s slices, so one lands within a fifth of a second, not a refresh.
+PANEL_CLOSE=0
+PANEL_INBUF=""
+panel_close_col() { # $1 = pane columns; first column of the [X]
+  printf '%s' "$(( $1 - 2 ))"
+}
+draw_close_button() { # $1 = pane columns
+  (( PANEL_CLOSE )) || return 0
+  printf '\033[1;%dH%s[X]%s' "$(panel_close_col "$1")" "$C_BOLD" "$C_RESET"
+}
+# Is there a left-button press on the [X] in PANEL_INBUF? Consumes the
+# buffer either way, keeping only an incomplete trailing sequence.
+panel_clicked_close() { # $1 = pane columns
+  # Every complete mouse report is consumed (releases, other buttons);
+  # only a left-button press (0 ... M) on row 1 at the [X] counts.
+  local re=$'\e\\[<([0-9]+);([0-9]+);([0-9]+)([Mm])' rest="$PANEL_INBUF" hit=1 col
+  col=$(panel_close_col "$1")
+  while [[ $rest =~ $re ]]; do
+    if [ "${BASH_REMATCH[4]}" = M ] && (( BASH_REMATCH[1] == 0 && BASH_REMATCH[3] == 1 && BASH_REMATCH[2] >= col )); then
+      hit=0
+    fi
+    rest=${rest#*"${BASH_REMATCH[0]}"}
+  done
+  case "$rest" in *$'\e'*) PANEL_INBUF=$'\e'"${rest##*$'\e'}" ;; *) PANEL_INBUF="" ;; esac
+  (( ${#PANEL_INBUF} > 32 )) && PANEL_INBUF=""
+  return "$hit"
+}
+# Close the panel, and in the launcher's split the split as well, by
+# hanging up the pane's own shell. Only a shell on this same terminal: under
+# tmux the parent is the server, and exiting is already what closes the pane.
+panel_close() {
+  trap - EXIT INT TERM
+  declare -F restore_tty >/dev/null && restore_tty
+  if [ "${CLAUDE_PANEL_SPLIT:-}" = 1 ]; then
+    local pcomm ptty mytty
+    pcomm=$(ps -o comm= -p "$PPID" 2>/dev/null)
+    ptty=$(ps -o tty= -p "$PPID" 2>/dev/null | tr -d ' ')
+    mytty=$(ps -o tty= -p "$$" 2>/dev/null | tr -d ' ')
+    case "${pcomm##*/}" in
+      -zsh|zsh|-bash|bash|-sh|sh|-fish|fish)
+        if [ -n "$mytty" ] && [ "$mytty" != "??" ] && [ "$ptty" = "$mytty" ]; then
+          kill -HUP "$PPID" 2>/dev/null
+        fi
+        ;;
+    esac
+  fi
+  exit 0
+}
+# Read whatever is waiting on the terminal for up to $1 seconds (0 = only
+# what is already there) and close on a click on the [X]. Without the
+# button this is the old discard, so typed text never reaches the prompt.
+panel_poll_input() { # $1 = seconds
+  local c t="${1:-0}"
+  if (( ! PANEL_CLOSE )); then
+    drain_stdin
+    return 0
+  fi
+  [ "$t" = 0 ] && t=0.01
+  c=""
+  read -r -s -t "$t" -n 64 c 2>/dev/null
+  PANEL_INBUF+="$c"
+  panel_clicked_close "${COLS:-80}" && panel_close
+  return 0
+}
+# sleep $1, answering clicks meanwhile. Without the button it is the old
+# backgrounded sleep, which a signal interrupts at once (see the main loop).
+panel_sleep() { # $1 = whole seconds
+  if (( ! PANEL_CLOSE )); then
+    sleep "$1" &
+    wait $! 2>/dev/null
+    return 0
+  fi
+  local end=$(( SECONDS + $1 ))
+  while (( SECONDS < end )); do
+    panel_poll_input 0.2
+  done
+}
+
 # Test seam: source this file with PANEL_LIB_ONLY=1 to get every function
 # above without entering the render loop. The tty setup further up is
 # already guarded by `[ -t 0 ]`, so a sourced panel touches no terminal and
@@ -3815,6 +3921,11 @@ if panel_option CLAUDE_PANEL_CAFFEINATE && [ "${CLAUDE_PANEL_CAFFEINATED:-}" != 
    && command -v caffeinate >/dev/null 2>&1; then
   caffeinate -i -w "$$" >/dev/null 2>&1 &
   export CLAUDE_PANEL_CAFFEINATED="$$"
+fi
+
+if [ -n "${ORIG_STTY:-}" ] && [ -t 1 ] && ! panel_option_off CLAUDE_PANEL_CLOSE_BUTTON; then
+  PANEL_CLOSE=1
+  printf '\033[?1000h\033[?1006h'
 fi
 
 last_frame=""
@@ -3843,8 +3954,9 @@ while true; do
   export COLS="$cols"
 
   # Discard anything typed into this read-only pane since the last tick, so
-  # it cannot land on the shell prompt when the panel exits.
-  drain_stdin
+  # it cannot land on the shell prompt when the panel exits; a click on the
+  # [X] closes the panel.
+  panel_poll_input 0
 
   now_epoch=$(panel_now)
   resolve_session
@@ -3932,6 +4044,7 @@ while true; do
     printf '%s\n' "$guaranteed" | clear_eol
     [ -n "$trailing" ] && printf '%s\n' "$trailing" | clear_eol
     printf '\033[0J'
+    draw_close_button "$cols"
     last_frame="$frame"
   fi
 
@@ -4738,7 +4851,9 @@ case "$CLAUDE_TTY" in ''|'??') CLAUDE_TTY="" ;; esac
 # that will never exist. 10 and 12 are the panel's own defaults for refresh
 # and turn-table rows, so an argument-free launch is identical to the old
 # pinned one minus the pin.
-PANEL_CMD="~/.local/bin/ccusage-panel.sh"
+# CLAUDE_PANEL_SPLIT=1 tells the panel this pane is the launcher's split, so
+# its [X] closes the split as well as the panel.
+PANEL_CMD="CLAUDE_PANEL_SPLIT=1 ~/.local/bin/ccusage-panel.sh"
 
 # How much of the window the panel gets, as a whole percent. Ghostty makes
 # splits 50/50, so the launcher shrinks the new pane with N presses of
@@ -5183,6 +5298,7 @@ CLAUDE_PANEL_REMOTE_CONTROL|false|start interactive claude sessions with --remot
 CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a panel runs
 CLAUDE_PANEL_SESSION_TITLE|true|name new sessions after their folder
 CLAUDE_PANEL_LOADING_OVERLAY|true|float a "wait to type" notice while the panel split opens
+CLAUDE_PANEL_CLOSE_BUTTON|true|an [X] in the panel's top-right corner closes it (and its split); while on, Shift+drag selects text in the panel
 CLAUDE_PANEL_RESTART_TOKENS|400000|context size that shows a red restart warning (0 = off)
 CLAUDE_PANEL_COST_ALERTS|true|warn in the chat when a session or the day costs far more than usual
 CLAUDE_PANEL_ALERT_MIN_USD|5.00|a session below this many dollars never raises a cost alert
