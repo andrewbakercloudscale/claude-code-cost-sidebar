@@ -111,14 +111,23 @@ fi
 
 # --- ~/.local/bin/ghostty-claude-launcher patch --------------------------
 GCL="$BIN/ghostty-claude-launcher"
-if [ -f "$GCL" ] && grep -qE 'claude-panel-launch\.sh|PANEL_RC_ARGS|--session-id "\$PIN_SID"' "$GCL"; then
+if [ -f "$GCL" ] && grep -qE 'claude-panel-launch\.sh|PANEL_RC_ARGS|PANEL_BYPASS_ARGS|--session-id "\$PIN_SID"' "$GCL"; then
   new="$(mktemp)"
   # 1. setup's comment block, from its marker through the launch line, and
   #    the blank line setup put before it; 2. the Remote Control snippet;
-  #    3. the arguments setup added to the "$CLAUDE" line.
+  #    3. the bypass snippet, from its marker through its esac, remembering
+  #    whether the launcher had --dangerously-skip-permissions before setup
+  #    made it an option; 4. the arguments setup added to the "$CLAUDE" line,
+  #    putting that flag back where it was.
   awk '
     index($0, "# Auto-open the live ccusage stats panel") == 1 { skip = 1; held = 0; next }
     skip { if (index($0, "claude-panel-launch.sh\" \"$PIN_SID\" &") > 0) skip = 0; next }
+    $0 == "# CLAUDE_PANEL_BYPASS_PERMISSIONS (claude-panel options)" { inbp = 1; next }
+    inbp {
+      if ($0 == "PANEL_BYPASS_ARGS=(--dangerously-skip-permissions)") bpflag = 1
+      if ($0 == "esac") inbp = 0
+      next
+    }
     $0 == "# CLAUDE_PANEL_REMOTE_CONTROL (claude-panel options)" { next }
     $0 == "PANEL_RC_ARGS=()" { next }
     index($0, "rc_opt=\"$(grep -E '"'"'^CLAUDE_PANEL_REMOTE_CONTROL='"'"'") == 1 { next }
@@ -126,6 +135,7 @@ if [ -f "$GCL" ] && grep -qE 'claude-panel-launch\.sh|PANEL_RC_ARGS|--session-id
     index($0, "case \"$rc_opt\" in true|1|yes|on) PANEL_RC_ARGS=(--remote-control) ;; esac") == 1 { next }
     {
       gsub(/ "\$\{PANEL_RC_ARGS\[@\]\}"/, "")
+      gsub(/ "\$\{PANEL_BYPASS_ARGS\[@\]\}"/, bpflag ? " --dangerously-skip-permissions" : "")
       gsub(/ --session-id "\$PIN_SID"/, "")
       if (held) print ""
       held = 0
@@ -134,7 +144,7 @@ if [ -f "$GCL" ] && grep -qE 'claude-panel-launch\.sh|PANEL_RC_ARGS|--session-id
     { print }
     END { if (held) print "" }
   ' "$GCL" > "$new"
-  if grep -qE 'PIN_SID|PANEL_RC_ARGS|claude-panel|rc_opt' "$new"; then
+  if grep -qE 'PIN_SID|PANEL_RC_ARGS|PANEL_BYPASS_ARGS|claude-panel|rc_opt|bp_opt' "$new"; then
     warn "~/.local/bin/ghostty-claude-launcher does not match the shape setup patched (hand-edited?); left as-is"
   else
     CHANGED=1

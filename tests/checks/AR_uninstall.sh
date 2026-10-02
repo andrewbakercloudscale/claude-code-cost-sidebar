@@ -37,8 +37,11 @@ check_AR_uninstall() {
       "rc_opt=\"\$(grep -E '^CLAUDE_PANEL_REMOTE_CONTROL=' \"\$HOME/.config/claude-panel/options\" 2>/dev/null | tail -1)\"" \
       "rc_opt=\"\$(printf '%s' \"\${rc_opt#*=}\" | tr -d \"\\\"' \" | tr '[:upper:]' '[:lower:]')\"" \
       'case "$rc_opt" in true|1|yes|on) PANEL_RC_ARGS=(--remote-control) ;; esac' \
+      '# CLAUDE_PANEL_BYPASS_PERMISSIONS (claude-panel options)' 'PANEL_BYPASS_ARGS=(--dangerously-skip-permissions)' \
+      "bp_opt=\"\$(grep -E '^CLAUDE_PANEL_BYPASS_PERMISSIONS=' \"\$HOME/.config/claude-panel/options\" 2>/dev/null | tail -1)\"" \
+      'case "$bp_opt" in' '  true|1|yes|on) PANEL_BYPASS_ARGS=(--dangerously-skip-permissions) ;;' '  false|0|no|off) PANEL_BYPASS_ARGS=() ;;' 'esac' \
       '# caffeinate -i keeps the Mac awake.' \
-      'caffeinate -i "$CLAUDE" --session-id "$PIN_SID" "${PANEL_RC_ARGS[@]}" --dangerously-skip-permissions'
+      'caffeinate -i "$CLAUDE" --session-id "$PIN_SID" "${PANEL_BYPASS_ARGS[@]}" "${PANEL_RC_ARGS[@]}"'
   } > "$bin/ghostty-claude-launcher"
 
   # sandbox_new SYMLINKS the real claude-day-projection.sh into the sandbox
