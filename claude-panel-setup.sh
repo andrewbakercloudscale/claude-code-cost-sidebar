@@ -5464,6 +5464,49 @@ GCL_RC_EOF
   chmod +x "$GCL"
 fi
 
+# CLAUDE_PANEL_BYPASS_PERMISSIONS for the Finder launch path. Some launchers
+# hard-code --dangerously-skip-permissions on the launch line, which made the
+# dashboard's "Start with bypass permissions" checkbox untrue for those
+# windows. The flag becomes an array the options file controls: true adds it,
+# false drops it, and with the key absent the launcher keeps doing what it
+# did before (flag or no flag), so upgrading changes nothing by itself.
+# Typed sessions follow permissions.defaultMode in ~/.claude/settings.json,
+# which the dashboard sets alongside this key.
+GCL_BP_MARKER="# CLAUDE_PANEL_BYPASS_PERMISSIONS (claude-panel options)"
+if [ -f "$GCL" ] && grep -qF "$GCL_PIN_LINE" "$GCL" && ! grep -qF "$GCL_BP_MARKER" "$GCL"; then
+  echo "Adding the bypass permissions option to ~/.local/bin/ghostty-claude-launcher ..."
+  pin_n=$(grep -nF "$GCL_PIN_LINE" "$GCL" | head -1 | cut -d: -f1)
+  bp_default="()"
+  sed -n "${pin_n}p" "$GCL" | grep -q -- '--dangerously-skip-permissions' && bp_default="(--dangerously-skip-permissions)"
+  bp_snip=$(mktemp)
+  {
+    echo "$GCL_BP_MARKER"
+    echo "PANEL_BYPASS_ARGS=$bp_default"
+    cat <<'GCL_BP_EOF'
+bp_opt="$(grep -E '^CLAUDE_PANEL_BYPASS_PERMISSIONS=' "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)"
+bp_opt="$(printf '%s' "${bp_opt#*=}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]')"
+case "$bp_opt" in
+  true|1|yes|on) PANEL_BYPASS_ARGS=(--dangerously-skip-permissions) ;;
+  false|0|no|off) PANEL_BYPASS_ARGS=() ;;
+esac
+GCL_BP_EOF
+  } > "$bp_snip"
+  at_n=$pin_n
+  case "$(sed -n "$((pin_n - 1))p" "$GCL" | sed 's/^[[:space:]]*//')" in '#'*) at_n=$((pin_n - 1)) ;; esac
+  tmp=$(mktemp)
+  awk -v at="$at_n" -v pin_n="$pin_n" -v snip="$bp_snip" '
+    NR == at { while ((getline l < snip) > 0) print l }
+    NR == pin_n {
+      gsub(/ --dangerously-skip-permissions/, "")
+      sub(/"\$CLAUDE" --session-id "\$PIN_SID"/, "\"$CLAUDE\" --session-id \"$PIN_SID\" \"${PANEL_BYPASS_ARGS[@]}\"")
+    }
+    { print }
+  ' "$GCL" > "$tmp"
+  rm -f "$bp_snip"
+  mv "$tmp" "$GCL"
+  chmod +x "$GCL"
+fi
+
 # The launcher drives Ghostty through its DEFAULT bindings (cmd+d,
 # cmd+opt+left, cmd+ctrl+right), so nothing is added to ~/.config/ghostty.
 # It used to append ctrl+shift+h/l resize keybinds and rely on a ctrl+h focus
