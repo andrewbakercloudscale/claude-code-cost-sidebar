@@ -2336,9 +2336,16 @@ if [ -t 0 ]; then
   ORIG_STTY=$(stty -g 2>/dev/null || true)
   if [ -n "$ORIG_STTY" ]; then
     stty -echo -icanon min 0 time 0 2>/dev/null
+    # Draw on the alternate screen, as less and top do, so the pane goes back
+    # to its shell history when the panel stops. On the main screen the last
+    # frame stayed in the scrollback above the prompt, and a pane reused for
+    # `claude` after its panel ended showed a dead panel that looked live.
+    # The re-exec on a deploy enters it again, which is harmless.
+    [ -t 1 ] && printf '\033[?1049h'
     restore_tty() {
       rm -f "$PANEL_ERR_FILE"
       drain_stdin
+      [ -t 1 ] && printf '\033[?1049l'
       stty "$ORIG_STTY" 2>/dev/null
     }
     # INT/TERM need a handler that EXITS, not just one that tidies up. A
