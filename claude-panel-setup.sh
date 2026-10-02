@@ -16,6 +16,10 @@
 #                                           keystrokes, so accidental typing
 #                                           during window setup can't land
 #                                           in the new split
+#   ~/.local/bin/claude-panel-overlay    - compiled helper (clang) that
+#                                           floats a "wait to type" notice
+#                                           over the Ghostty window until
+#                                           focus is back on the claude pane
 #   ~/.zshrc (appended, idempotent)      - a preexec hook that runs the
 #                                           launcher once per terminal
 #                                           window, the first time a
@@ -4059,6 +4063,198 @@ else
 fi
 rm -f "$KEYBLOCK_SRC"
 
+echo "Installing claude-panel-overlay (floating 'wait to type' notice for the auto-split) ..."
+# While the launcher opens the panel split, keyboard focus is on the NEW
+# split and the keyboard guard above swallows real input, so for a few
+# seconds typing goes nowhere and nothing on screen said so. This shows a
+# small floating notice over the Ghostty window until the launcher signals
+# that focus is back on the claude pane. CLAUDE_PANEL_LOADING_OVERLAY=false
+# in ~/.config/claude-panel/options turns it off. Compiled like the keyboard
+# guard; no clang means no notice and the launcher runs exactly as before.
+OVERLAY_SRC="$(mktemp -t claude-panel-overlay).m"
+cat > "$OVERLAY_SRC" <<'OVERLAY_EOF'
+#import <Cocoa/Cocoa.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+/* claude-panel-overlay <ghostty-pid> [timeout-seconds] [message]
+ *
+ * A borderless, click-through, NON-ACTIVATING notice near the top centre of
+ * the given process's front window, shown while claude-panel-launch.sh opens
+ * the panel split. Focus is on the new split (and the keyboard guard is
+ * swallowing input) for those few seconds, so typing goes nowhere, and
+ * without this nothing said so.
+ *
+ * It must never take focus itself, or it would cause the very problem it
+ * reports: the app is an Accessory (no Dock icon, no menu bar) and is never
+ * activated, the panel cannot become key or main, it is shown with
+ * orderFrontRegardless, and it ignores the mouse.
+ *
+ * Exits on: SIGTERM/SIGINT/SIGHUP (now), SIGUSR1 (shows "Ready: start
+ * typing" for 0.8s, then exits), its timeout (default 10s, capped at 15s),
+ * or its parent exiting before SIGUSR1. A SIGALRM backstop 2s past the
+ * timeout exits even if the event loop wedges. */
+
+@interface OverlayPanel : NSPanel
+@end
+@implementation OverlayPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+static volatile sig_atomic_t g_ready = 0, g_quit = 0;
+static void on_usr1(int s) { (void)s; g_ready = 1; }
+static void on_term(int s) { (void)s; g_quit = 1; }
+static void on_alarm(int s) { (void)s; _exit(0); }
+
+/* Front window bounds of pid, in CoreGraphics global coordinates (top-left
+ * origin of the primary display). Window list is front to back, so the first
+ * normal-layer window that is big enough is the one in front. */
+static BOOL front_window_of(pid_t pid, CGRect *out) {
+    CFArrayRef list = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    if (!list) return NO;
+    BOOL found = NO;
+    for (CFIndex i = 0; i < CFArrayGetCount(list) && !found; i++) {
+        NSDictionary *w = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, i);
+        if ([w[(id)kCGWindowOwnerPID] intValue] != pid) continue;
+        if ([w[(id)kCGWindowLayer] intValue] != 0) continue;
+        CGRect r;
+        if (!CGRectMakeWithDictionaryRepresentation(
+                (__bridge CFDictionaryRef)w[(id)kCGWindowBounds], &r)) continue;
+        if (r.size.width < 200 || r.size.height < 100) continue;
+        *out = r; found = YES;
+    }
+    CFRelease(list);
+    return found;
+}
+
+int main(int argc, char **argv) {
+    @autoreleasepool {
+        pid_t target = argc > 1 ? (pid_t)atoi(argv[1]) : 0;
+        double timeout = argc > 2 ? atof(argv[2]) : 10;
+        if (timeout <= 0 || timeout > 15) timeout = 10;
+        NSString *msg = argc > 3 ? [NSString stringWithUTF8String:argv[3]]
+                                 : @"Loading usage panel... wait to type";
+
+        signal(SIGALRM, on_alarm);
+        alarm((unsigned int)timeout + 2);
+        signal(SIGUSR1, on_usr1);
+        signal(SIGTERM, on_term);
+        signal(SIGINT, on_term);
+        signal(SIGHUP, on_term);
+        pid_t parent = getppid();
+
+        NSApplication *app = [NSApplication sharedApplication];
+        /* Accessory: no Dock icon, no menu bar, and never activated below. */
+        [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
+
+        NSFont *font = [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold];
+        NSTextField *label = [NSTextField labelWithString:msg];
+        label.font = font;
+        label.textColor = [NSColor whiteColor];
+        label.alignment = NSTextAlignmentCenter;
+        [label sizeToFit];
+        CGFloat padX = 22, padY = 11;
+        CGFloat w = label.frame.size.width + 2 * padX + 40;
+        CGFloat h = label.frame.size.height + 2 * padY;
+
+        /* Placement: top centre of the target window, 48pt below its top edge
+         * (clears the title bar and tab bar). Without a window, top centre of
+         * the main screen. Cocoa's y axis runs up from the primary display's
+         * bottom edge; CoreGraphics' runs down from its top. */
+        NSScreen *primary = [NSScreen screens].firstObject;
+        CGFloat primaryH = primary ? primary.frame.size.height : 900;
+        CGRect wr;
+        NSPoint origin;
+        if (target > 0 && front_window_of(target, &wr)) {
+            origin.x = wr.origin.x + (wr.size.width - w) / 2;
+            origin.y = primaryH - (wr.origin.y + 48) - h;
+        } else {
+            NSRect vf = [NSScreen mainScreen].visibleFrame;
+            origin.x = vf.origin.x + (vf.size.width - w) / 2;
+            origin.y = vf.origin.y + vf.size.height - 48 - h;
+        }
+
+        OverlayPanel *panel = [[OverlayPanel alloc]
+            initWithContentRect:NSMakeRect(origin.x, origin.y, w, h)
+                      styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                        backing:NSBackingStoreBuffered
+                          defer:NO];
+        panel.level = NSStatusWindowLevel;
+        panel.opaque = NO;
+        panel.backgroundColor = [NSColor clearColor];
+        panel.hasShadow = YES;
+        panel.ignoresMouseEvents = YES;
+        panel.hidesOnDeactivate = NO;
+        panel.becomesKeyOnlyIfNeeded = YES;
+        panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces
+                                 | NSWindowCollectionBehaviorStationary
+                                 | NSWindowCollectionBehaviorFullScreenAuxiliary
+                                 | NSWindowCollectionBehaviorIgnoresCycle;
+
+        NSView *bg = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, w, h)];
+        bg.wantsLayer = YES;
+        bg.layer.backgroundColor = [[NSColor colorWithCalibratedRed:0.10 green:0.11 blue:0.14 alpha:0.94] CGColor];
+        bg.layer.cornerRadius = h / 2;
+        bg.layer.borderWidth = 1;
+        bg.layer.borderColor = [[NSColor colorWithCalibratedRed:0.96 green:0.62 blue:0.04 alpha:1] CGColor];
+        label.frame = NSMakeRect(padX, (h - label.frame.size.height) / 2,
+                                 w - 2 * padX, label.frame.size.height);
+        [bg addSubview:label];
+        panel.contentView = bg;
+        /* orderFrontRegardless shows the window without activating this app
+         * or making the panel key: focus does not move. */
+        [panel orderFrontRegardless];
+
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+        NSDate *readyUntil = nil;
+        while (!g_quit) {
+            @autoreleasepool {
+                NSEvent *ev = [app nextEventMatchingMask:NSEventMaskAny
+                                               untilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]
+                                                  inMode:NSDefaultRunLoopMode
+                                                 dequeue:YES];
+                if (ev) [app sendEvent:ev];
+            }
+            /* Launcher gone before saying "ready": nobody is left to close
+             * us, so go now. After "ready" the launcher exits straight away
+             * by design, and the 0.8s ready notice must outlive it. */
+            if (!readyUntil && getppid() != parent) break;
+            NSDate *now = [NSDate date];
+            if (g_ready && !readyUntil) {
+                label.stringValue = @"Ready: start typing";
+                bg.layer.borderColor = [[NSColor colorWithCalibratedRed:0.20 green:0.78 blue:0.35 alpha:1] CGColor];
+                [bg display];
+                readyUntil = [now dateByAddingTimeInterval:0.8];
+            }
+            if (readyUntil && [now compare:readyUntil] != NSOrderedAscending) break;
+            if ([now compare:deadline] != NSOrderedAscending) break;
+        }
+        [panel orderOut:nil];
+    }
+    return 0;
+}
+OVERLAY_EOF
+if command -v clang >/dev/null 2>&1; then
+  # Build to a temp name and rename: a launcher starting mid-install must
+  # never exec a half-written binary.
+  if clang -O2 -Wall -fobjc-arc -framework Cocoa \
+      -o "$BIN_DIR/.claude-panel-overlay.new" "$OVERLAY_SRC" 2>/tmp/claude-panel-overlay-build.log; then
+    chmod +x "$BIN_DIR/.claude-panel-overlay.new"
+    mv -f "$BIN_DIR/.claude-panel-overlay.new" "$BIN_DIR/claude-panel-overlay"
+    echo "Built ~/.local/bin/claude-panel-overlay."
+  else
+    rm -f "$BIN_DIR/.claude-panel-overlay.new"
+    echo "WARNING: failed to build claude-panel-overlay (see /tmp/claude-panel-overlay-build.log)."
+    echo "The auto-split launcher will still work, just without the 'wait to type' notice."
+  fi
+else
+  echo "WARNING: no clang found, skipping claude-panel-overlay ('wait to type' notice)."
+fi
+rm -f "$OVERLAY_SRC" "${OVERLAY_SRC%.m}"
+
 echo "Installing claude-panel-session-hook.sh ..."
 cat > "$BIN_DIR/claude-panel-session-hook.sh" <<'SESSHOOK_EOF'
 #!/usr/bin/env bash
@@ -4455,11 +4651,71 @@ write_pane_pairing() { # $1 = newline-separated new panel pids
 # are in flight, so anything typed during window setup cannot be woven into
 # the command being typed into the new split. Best-effort: a missing binary
 # or an ungranted permission just means no guard.
+KEYBLOCK_PID=""
 start_keyboard_guard() { # $1 = seconds
   [ -x "$HOME/.local/bin/claude-panel-keyblock" ] || return 0
   "$HOME/.local/bin/claude-panel-keyblock" "$1" >>"$LOG" 2>&1 &
-  log "attempt $attempt: keyboard guard started (pid $!, $1s)"
+  KEYBLOCK_PID=$!
+  log "attempt $attempt: keyboard guard started (pid $KEYBLOCK_PID, $1s)"
 }
+
+# End the guard as soon as the key sequence has been sent. Its duration is a
+# ceiling sized for the slowest sequence (a wide window's resize loop), not
+# for the usual one: the launch log shows the targeted send finishing in
+# about 2.5s of a 5s guard, so the user sat for another 2.5s with keystrokes
+# silently swallowed after focus was already back on the claude pane. Once
+# the last synthetic event is posted there is nothing left to protect. The
+# short settle lets Ghostty drain the posted events before real typing
+# queues behind them.
+release_keyboard_guard() {
+  [ -n "$KEYBLOCK_PID" ] || return 0
+  sleep 0.2
+  if kill "$KEYBLOCK_PID" 2>/dev/null; then
+    log "attempt $attempt: keyboard guard released (key sequence sent)"
+  fi
+  KEYBLOCK_PID=""
+}
+
+# The floating "wait to type" notice (claude-panel-overlay). While this
+# script works, focus is on the NEW split and the guard swallows input, so
+# typing goes nowhere and, before this, nothing said so. Shown when an
+# attempt begins, switched to "Ready" the moment focus is back on the claude
+# pane and the guard is gone, and closed by the EXIT trap on every other way
+# out. The helper also closes itself after 10s and when this script dies, so
+# it cannot be left on screen. It never takes focus (see its own comments).
+#
+# CLAUDE_PANEL_LOADING_OVERLAY in ~/.config/claude-panel/options, default
+# ON: only an explicit false/0/no/off turns it off. The environment wins
+# over the file, so one launch can override it.
+OVERLAY_PID=""
+overlay_enabled() {
+  local v
+  v=$(grep -E '^CLAUDE_PANEL_LOADING_OVERLAY=' "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
+  v="${CLAUDE_PANEL_LOADING_OVERLAY:-${v#*=}}"
+  v=$(printf '%s' "$v" | tr -d "\"' " | tr '[:upper:]' '[:lower:]')
+  case "$v" in false|0|no|off) return 1 ;; esac
+  return 0
+}
+show_overlay() {
+  [ -n "$OVERLAY_PID" ] && kill -0 "$OVERLAY_PID" 2>/dev/null && return 0
+  OVERLAY_PID=""
+  overlay_enabled || return 0
+  [ -x "$HOME/.local/bin/claude-panel-overlay" ] || return 0
+  "$HOME/.local/bin/claude-panel-overlay" "${ghostty_pid:-0}" 10 >>"$LOG" 2>&1 &
+  OVERLAY_PID=$!
+  log "attempt $attempt: overlay shown (pid $OVERLAY_PID, closes itself after 10s at most)"
+}
+overlay_ready() {
+  [ -n "$OVERLAY_PID" ] || return 0
+  kill -USR1 "$OVERLAY_PID" 2>/dev/null && log "attempt $attempt: overlay: focus is back, told the user to start typing"
+  OVERLAY_PID=""
+}
+overlay_close() {
+  [ -n "$OVERLAY_PID" ] || return 0
+  kill "$OVERLAY_PID" 2>/dev/null
+  OVERLAY_PID=""
+}
+trap overlay_close EXIT
 
 # Passed by the autolaunch hook only for a bare `claude` invocation, which
 # it forces to run with this same ID via --session-id, lets the panel open
@@ -4638,6 +4894,7 @@ success=0
 while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
   attempt=$((attempt + 1))
   log "attempt $attempt/$max_attempts: begin"
+  show_overlay
 
   before_pids=$(panel_pids)
 
@@ -4694,6 +4951,10 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
         # events per character at 12ms + the resize repeats).
         start_keyboard_guard 5
         if "$panel_python" "$BIN_DIR_KEYSEND" "$ghostty_pid" "$PANEL_CMD" "$presses" >>"$LOG" 2>&1; then
+          # The sequence ends by moving focus back to the claude pane, so the
+          # user can type from here, before the 1s wait to verify the panel.
+          release_keyboard_guard
+          overlay_ready
           sleep 1
           after_pids=$(panel_pids)
           new_pids=$(comm -13 <(echo "$before_pids") <(echo "$after_pids") 2>/dev/null)
@@ -4707,6 +4968,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
           log "attempt $attempt: targeted send reported success but no panel appeared, falling through"
         else
           log "attempt $attempt: targeted send failed (exit $?), falling through to the AppleScript path"
+          release_keyboard_guard
         fi
         ;;
     esac
@@ -4758,6 +5020,7 @@ while [ "$attempt" -lt "$max_attempts" ] && [ "$success" -eq 0 ]; do
   # script dies first, see claude-panel-keyblock's own comments for the
   # safety valves. Best-effort: missing binary or ungranted permissions
   # just mean no guard, same as before this existed.
+  show_overlay
   start_keyboard_guard 6
 
   # Settle delay: frontmost can flip true right as a cold `open -na` launch
@@ -4856,6 +5119,11 @@ APPLESCRIPT
   )
   osa_status=$?
   log "attempt $attempt: osascript exit=$osa_status result=$result"
+  # No more keystrokes from this attempt either way. Only an "ok" sent the
+  # sequence that ends with focus back on the claude pane; a skip typed
+  # nothing, and the notice stays up through the retry.
+  release_keyboard_guard
+  case "$result" in ok:*) overlay_ready ;; esac
 
   # Ground truth: did an actual new panel process appear? Don't trust the
   # AppleScript's own report of success, verify it.
@@ -4914,6 +5182,7 @@ done <<OPTIONS_EOF
 CLAUDE_PANEL_REMOTE_CONTROL|false|start interactive claude sessions with --remote-control
 CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a panel runs
 CLAUDE_PANEL_SESSION_TITLE|true|name new sessions after their folder
+CLAUDE_PANEL_LOADING_OVERLAY|true|float a "wait to type" notice while the panel split opens
 CLAUDE_PANEL_RESTART_TOKENS|400000|context size that shows a red restart warning (0 = off)
 CLAUDE_PANEL_COST_ALERTS|true|warn in the chat when a session or the day costs far more than usual
 CLAUDE_PANEL_ALERT_MIN_USD|5.00|a session below this many dollars never raises a cost alert

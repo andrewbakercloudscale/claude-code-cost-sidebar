@@ -46,7 +46,7 @@ check_AR_uninstall() {
   # overwrite the developer's real file. It did, once. Unlink first; the
   # uninstaller then removes a plain file, as it would on a real install.
   local f
-  for f in ccusage-panel.sh claude-panel-launch.sh claude-panel-keyblock claude-panel-keysend \
+  for f in ccusage-panel.sh claude-panel-launch.sh claude-panel-keyblock claude-panel-overlay claude-panel-keysend \
            claude-panel-session-hook.sh claude-cost-alert-check.sh claude-day-projection.sh; do
     rm -f "$bin/$f"
     printf 'x\n' > "$bin/$f"
@@ -67,7 +67,7 @@ check_AR_uninstall() {
 
   out=$(bash "$u" 2>&1); rc=$?
   assert_eq "uninstall exits 0" "0" "$rc"
-  for f in ccusage-panel.sh claude-panel-launch.sh claude-panel-keyblock claude-panel-keysend \
+  for f in ccusage-panel.sh claude-panel-launch.sh claude-panel-keyblock claude-panel-overlay claude-panel-keysend \
            claude-panel-session-hook.sh claude-cost-alert-check.sh claude-day-projection.sh; do
     assert_eq "$f removed" "gone" "$([ -e "$bin/$f" ] && echo present || echo gone)"
   done

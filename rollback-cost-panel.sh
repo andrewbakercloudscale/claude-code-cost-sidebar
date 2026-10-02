@@ -11,7 +11,7 @@
 #
 # What this deliberately leaves alone:
 #   - the generated scripts in ~/.local/bin (ccusage-panel.sh,
-#     claude-panel-launch.sh, claude-panel-keyblock,
+#     claude-panel-launch.sh, claude-panel-keyblock, claude-panel-overlay,
 #     claude-cost-alert-check.sh) -- inert on disk with nothing left to
 #     invoke them, and install-cost-panel.sh overwrites them again on the
 #     next install anyway
@@ -38,6 +38,7 @@ main() {
   stop_process '/ccusage-panel\.sh' "ccusage-panel.sh"
   stop_process '/claude-panel-launch\.sh' "claude-panel-launch.sh"
   stop_process '/claude-panel-keyblock' "claude-panel-keyblock"
+  stop_process '/claude-panel-overlay' "claude-panel-overlay"
 
   echo
   echo "== 2. removing the ~/.zshrc autolaunch hook =="

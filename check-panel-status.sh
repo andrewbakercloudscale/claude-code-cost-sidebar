@@ -21,6 +21,7 @@ main() {
   check_file "ccusage-panel.sh"
   check_file "claude-panel-launch.sh"
   check_file "claude-panel-keyblock"
+  check_file "claude-panel-overlay"
   check_file "claude-cost-alert-check.sh"
 
   echo
@@ -90,6 +91,7 @@ main() {
   check_process "ccusage-panel.sh"
   check_process "claude-panel-launch.sh"
   check_process "claude-panel-keyblock"
+  check_process "claude-panel-overlay"
 
   echo
   echo "== recent launch log (last 5 lines, if any) =="
