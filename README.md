@@ -127,6 +127,7 @@ You can also run the panel manually at any time, in any terminal:
 |---|---|
 | `CLAUDE_PANEL_REMOTE_CONTROL` | Interactive `claude` launches (the `~/.zshrc` wrapper and `ghostty-claude-launcher`) start with `--remote-control`. Skipped for subcommands, a positional prompt, `-p`, `--help`/`--version`, or when you pass `--remote-control` yourself. |
 | `CLAUDE_PANEL_CAFFEINATE` | Each panel runs `caffeinate -i -w <panel pid>`, keeping the Mac awake while the panel is open. |
+| `CLAUDE_PANEL_LOADING_OVERLAY` | Default `true`. While the launcher opens the panel split, focus is on the new split and typing is blocked for a few seconds. A small floating notice ("Loading usage panel... wait to type") sits over the top of the Ghostty window and turns to "Ready: start typing" the moment focus is back on the claude pane. It never takes focus, ignores the mouse, and closes itself after 10s at most. Set `false` to turn it off. Built by the installer as `~/.local/bin/claude-panel-overlay` (needs clang). |
 
 ### Refresh tiers
 
