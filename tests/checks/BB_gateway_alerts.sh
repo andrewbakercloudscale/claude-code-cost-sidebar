@@ -94,6 +94,23 @@ STUB
   assert_contains "and it says when it is back" "|Burst gateway back|ok|" "$(cat "$log")"
   unset -f curl
 
+  # An event about a session goes to its own panel, a handover to the
+  # others, and an event another panel claimed is left to it.
+  : > "$log"
+  mkdir -p "$HOME/.config/claude-panel/alerts-claimed/11"
+  write_notices \
+    "{\"id\":\"7\",\"kind\":\"context\",\"severity\":\"info\",\"title\":\"Context other\",\"session\":\"other\",\"ts\":$now}" \
+    "{\"id\":\"8\",\"kind\":\"context\",\"severity\":\"info\",\"title\":\"Context mine\",\"session\":\"me\",\"ts\":$now}" \
+    "{\"id\":\"9\",\"kind\":\"handover\",\"severity\":\"info\",\"title\":\"Handover mine\",\"session\":\"me\",\"ts\":$now}" \
+    "{\"id\":\"10\",\"kind\":\"handover\",\"severity\":\"info\",\"title\":\"Handover other\",\"session\":\"other\",\"ts\":$now}" \
+    "{\"id\":\"11\",\"kind\":\"test\",\"severity\":\"info\",\"title\":\"Claimed elsewhere\",\"ts\":$now}"
+  local n
+  for n in 1 2 3; do gateway_alerts_tick me; bb_settle; done
+  assert_eq "own context, others' handover, nothing claimed elsewhere" \
+    "Context mine|Handover other" "$(cut -d'|' -f2 "$log" | paste -sd'|' -)"
+  assert_eq "and this panel claimed what it showed" yes \
+    "$([ -d "$HOME/.config/claude-panel/alerts-claimed/8" ] && echo yes || echo no)"
+
   : > "$log"
   write_notices \
     "{\"id\":\"6\",\"kind\":\"test\",\"severity\":\"info\",\"title\":\"Test alert\",\"ts\":$now}"
