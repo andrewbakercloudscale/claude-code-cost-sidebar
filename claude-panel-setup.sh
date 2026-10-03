@@ -2350,8 +2350,15 @@ if [ -t 0 ]; then
     # to its shell history when the panel stops. On the main screen the last
     # frame stayed in the scrollback above the prompt, and a pane reused for
     # `claude` after its panel ended showed a dead panel that looked live.
-    # The re-exec on a deploy enters it again, which is harmless.
-    [ -t 1 ] && printf '\033[?1049h'
+    # Not again on a re-exec: entering the alternate screen clears it, and
+    # the pane then sat blank until the new version's first frame, which
+    # waits on ccusage (seconds). Already there, the old frame stays up
+    # until the new one overwrites it.
+    if [ -n "${CLAUDE_PANEL_REEXEC:-}" ]; then
+      unset CLAUDE_PANEL_REEXEC
+    else
+      [ -t 1 ] && printf '\033[?1049h'
+    fi
     restore_tty() {
       rm -f "$PANEL_ERR_FILE"
       drain_stdin
@@ -2421,6 +2428,7 @@ restart_if_changed() {
   [ -n "${ORIG_STTY:-}" ] && stty "$ORIG_STTY" 2>/dev/null
   # The new version turns mouse reporting back on if it still wants it.
   [ -t 1 ] && printf '\033[?1000l\033[?1006l\033[?1004l'
+  export CLAUDE_PANEL_REEXEC=1
   exec bash "$PANEL_SELF" "$@"
 }
 
@@ -4382,7 +4390,14 @@ PANEL_EOF
 # becomes ccusage-panel.sh, or a panel re-exec'ing in that window finds one
 # it cannot run.
 chmod +x "$BIN_DIR/.ccusage-panel.sh.new"
-mv -f "$BIN_DIR/.ccusage-panel.sh.new" "$BIN_DIR/ccusage-panel.sh"
+# Only a real change replaces it: every open panel re-execs when the file's
+# mtime moves, so rewriting identical bytes on each Burst deploy restarted
+# every panel for nothing.
+if cmp -s "$BIN_DIR/.ccusage-panel.sh.new" "$BIN_DIR/ccusage-panel.sh"; then
+  rm -f "$BIN_DIR/.ccusage-panel.sh.new"
+else
+  mv -f "$BIN_DIR/.ccusage-panel.sh.new" "$BIN_DIR/ccusage-panel.sh"
+fi
 
 echo "Installing claude-panel-keyblock (keyboard and click guard for the auto-split) ..."
 # Swallows real keyboard input system-wide for a few seconds while
