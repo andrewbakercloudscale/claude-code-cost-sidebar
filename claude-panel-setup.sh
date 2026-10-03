@@ -3892,21 +3892,29 @@ alert_health_tick() {
   now=$(panel_now)
   (( now - ALERT_HEALTH_AT < 10 )) && return 0
   ALERT_HEALTH_AT=$now
+  # Every panel notices on its own and holds the news like any other event
+  # for no one session, so it shows over the Ghostty window in front, once.
+  local item keep=()
   if curl -s -o /dev/null -m 2 "$url" 2>/dev/null; then
     ALERT_HEALTH_MISSES=0
     if (( ALERT_GW_DOWN )); then
       ALERT_GW_DOWN=0
       rmdir "$ALERT_CLAIMS/panel-gateway-down" 2>/dev/null
-      alert_take ok panel-gateway "Burst gateway back" "Its dashboard answers again." panel-gateway
+      for item in ${ALERT_HELD[@]+"${ALERT_HELD[@]}"}; do
+        [ "${item%%$'\x1f'*}" = panel-gateway-down ] || keep+=("$item")
+      done
+      ALERT_HELD=(${keep[@]+"${keep[@]}"})
+      alert_resolve panel-gateway
+      ALERT_HELD+=("$(printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' panel-gateway-back "$now" ok panel-gateway "Burst gateway back" "Its dashboard answers again." panel-gateway)")
     fi
   else
     ALERT_HEALTH_MISSES=$(( ALERT_HEALTH_MISSES + 1 ))
-    # Every panel notices; the first to claim the outage says so. A claim
-    # left by a panel that closed mid-outage lapses after 15 minutes.
+    # A claim left by a panel that closed mid-outage lapses after 15 minutes.
     find "$ALERT_CLAIMS" -maxdepth 1 -name panel-gateway-down -mmin +15 -exec rmdir {} + 2>/dev/null
-    if (( ALERT_HEALTH_MISSES == 3 )) && alert_claim panel-gateway-down; then
+    if (( ALERT_HEALTH_MISSES == 3 )); then
       ALERT_GW_DOWN=1
-      alert_take error panel-gateway "Burst gateway not responding" "Its dashboard has not answered for 30 seconds. Requests through Burst fail until it is back." ""
+      rmdir "$ALERT_CLAIMS/panel-gateway-back" 2>/dev/null
+      ALERT_HELD+=("$(printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' panel-gateway-down "$now" error panel-gateway "Burst gateway not responding" "Its dashboard has not answered for 30 seconds. Requests through Burst fail until it is back." "")")
     fi
   fi
 }
@@ -3963,8 +3971,8 @@ gateway_alerts_tick() { # $1 = this panel's session id
     [ "$kind" = handover ] && [ "$session" = "$own" ] && continue
     ALERT_HELD+=("$(printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' "$id" "$now" "$sev" "$kind" "$title" "$detail" "$resolves")")
   done < <(alert_new_events)
-  alert_held_tick "$now"
   alert_health_tick
+  alert_held_tick "$now"
 
   if alert_alive; then
     # A sticky error steps aside for anything queued, then comes back.

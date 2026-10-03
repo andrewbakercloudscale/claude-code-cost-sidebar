@@ -88,9 +88,14 @@ STUB
   for i in 1 2; do ALERT_HEALTH_AT=0; gateway_alerts_tick; done
   bb_settle
   assert_eq "two misses are not an outage" "" "$(cat "$log")"
+  BB_FRONT=4242
   ALERT_HEALTH_AT=0; gateway_alerts_tick
   bb_settle
-  assert_contains "three are" "|Burst gateway not responding|error|" "$(cat "$log")"
+  assert_eq "three are, held while another window is in front" "" "$(cat "$log")"
+  BB_FRONT=0
+  gateway_alerts_tick
+  bb_settle
+  assert_contains "and shown once this window is" "|Burst gateway not responding|error|" "$(cat "$log")"
   curl() { return 0; }
   ALERT_HEALTH_AT=0; gateway_alerts_tick
   bb_settle
