@@ -3711,6 +3711,69 @@ panel_option_off() { # $1 = KEY
   return 1
 }
 
+# ---- the floating "Async Compaction In Progress" notice ----
+# While Claude Burst summarises this session in the background (pauseless
+# compaction), the same floating notice the launcher uses sits over the top
+# of the Ghostty window, and turns to "Async Compaction Finished" when the
+# summary is done. Burst saves each session's state, with "pending" true
+# for the length of the summary call, to compaction-state.json on every
+# transition, so the file is re-read only when its mtime moves. A pending
+# left behind by a gateway that died mid-summary is ignored once the file
+# is 15 minutes old. CLAUDE_PANEL_COMPACTION_OVERLAY=false turns it off.
+COMPACT_STATE_FILE="$HOME/.config/claude-burst/compaction-state.json"
+COMPACT_STATE_MTIME=""
+COMPACT_PENDING=0
+COMPACT_SHOWN=0
+COMPACT_OVERLAY_PID=""
+PANEL_GHOSTTY_PID=""
+compaction_pending() { # $1 = session id
+  local m
+  [ -n "$1" ] && [ -f "$COMPACT_STATE_FILE" ] || return 1
+  m=$(stat -f %m "$COMPACT_STATE_FILE" 2>/dev/null) || return 1
+  (( $(panel_now) - m > 900 )) && return 1
+  if [ "$m|$1" != "$COMPACT_STATE_MTIME" ]; then
+    COMPACT_STATE_MTIME="$m|$1"
+    COMPACT_PENDING=$(jq -r --arg p "$1|" \
+      '[to_entries[] | select(.key | startswith($p)) | select(.value.pending == true)] | length' \
+      "$COMPACT_STATE_FILE" 2>/dev/null)
+  fi
+  (( ${COMPACT_PENDING:-0} > 0 ))
+}
+# The Ghostty process this panel runs in, so the notice sits over its window.
+panel_ghostty_pid() {
+  if [ -z "$PANEL_GHOSTTY_PID" ]; then
+    local walk=$$ depth=0
+    PANEL_GHOSTTY_PID=0
+    while [ -n "$walk" ] && [ "$walk" -gt 1 ] && [ "$depth" -lt 12 ]; do
+      if [ "$(ps -o comm= -p "$walk" 2>/dev/null | sed 's|.*/||')" = ghostty ]; then
+        PANEL_GHOSTTY_PID=$walk
+        break
+      fi
+      walk=$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')
+      depth=$(( depth + 1 ))
+    done
+  fi
+  printf '%s' "$PANEL_GHOSTTY_PID"
+}
+compaction_overlay_tick() { # $1 = session id
+  panel_option_off CLAUDE_PANEL_COMPACTION_OVERLAY && return 0
+  [ -x "$HOME/.local/bin/claude-panel-overlay" ] || return 0
+  if compaction_pending "$1"; then
+    # Once per compaction: one that outlives the notice's own 10 minutes
+    # does not bring it back.
+    (( COMPACT_SHOWN )) && return 0
+    COMPACT_SHOWN=1
+    "$HOME/.local/bin/claude-panel-overlay" "$(panel_ghostty_pid)" 600 \
+      "Async Compaction In Progress" "Async Compaction Finished" >/dev/null 2>&1 &
+    COMPACT_OVERLAY_PID=$!
+  elif (( COMPACT_SHOWN )); then
+    COMPACT_SHOWN=0
+    [ -n "$COMPACT_OVERLAY_PID" ] && kill -USR1 "$COMPACT_OVERLAY_PID" 2>/dev/null
+    COMPACT_OVERLAY_PID=""
+  fi
+  return 0
+}
+
 # Numeric options from the same file, same precedence. Prints the value when
 # it is a plain non-negative integer, else the default ($2). A typo must not
 # silently disable a warning, so anything unparseable falls back.
@@ -4019,6 +4082,7 @@ while true; do
   now_epoch=$(panel_now)
   resolve_session
   remember_panel_width "$cols"
+  compaction_overlay_tick "$(basename "${latest:-}" .jsonl)"
   # Before either builder: the slow-tier summary and the fast-tier table
   # must read the same session from the same parse, or they can disagree
   # on screen about what this session has cost.
@@ -4250,7 +4314,7 @@ cat > "$OVERLAY_SRC" <<'OVERLAY_EOF'
 #include <stdlib.h>
 #include <unistd.h>
 
-/* claude-panel-overlay <ghostty-pid> [timeout-seconds] [message]
+/* claude-panel-overlay <ghostty-pid> [timeout-seconds] [message] [ready-message]
  *
  * A borderless, click-through, NON-ACTIVATING notice near the top centre of
  * the given process's front window, shown while claude-panel-launch.sh opens
@@ -4263,10 +4327,15 @@ cat > "$OVERLAY_SRC" <<'OVERLAY_EOF'
  * activated, the panel cannot become key or main, it is shown with
  * orderFrontRegardless, and it ignores the mouse.
  *
- * Exits on: SIGTERM/SIGINT/SIGHUP (now), SIGUSR1 (shows "Ready: start
- * typing" for 0.8s, then exits), its timeout (default 10s, capped at 15s),
- * or its parent exiting before SIGUSR1. A SIGALRM backstop 2s past the
- * timeout exits even if the event loop wedges. */
+ * Exits on: SIGTERM/SIGINT/SIGHUP (now), SIGUSR1 (shows the ready message,
+ * "Ready: start typing" unless given, for 0.8s, then exits), its timeout
+ * (default 10s, at most 900s), or its parent exiting before SIGUSR1. A
+ * SIGALRM backstop 2s past the timeout exits even if the event loop wedges.
+ *
+ * A notice longer than 15s (the usage panel's "Async Compaction In
+ * Progress") is a status, not a warning about typing: it hides while
+ * another app is in front, so it never floats over the user's other work,
+ * and its ready message stays for 2s. */
 
 @interface OverlayPanel : NSPanel
 @end
@@ -4306,9 +4375,12 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         pid_t target = argc > 1 ? (pid_t)atoi(argv[1]) : 0;
         double timeout = argc > 2 ? atof(argv[2]) : 10;
-        if (timeout <= 0 || timeout > 15) timeout = 10;
+        if (timeout <= 0 || timeout > 900) timeout = 10;
+        BOOL status = timeout > 15;
         NSString *msg = argc > 3 ? [NSString stringWithUTF8String:argv[3]]
                                  : @"Loading usage panel... wait to type";
+        NSString *readyMsg = argc > 4 ? [NSString stringWithUTF8String:argv[4]]
+                                      : @"Ready: start typing";
 
         signal(SIGALRM, on_alarm);
         alarm((unsigned int)timeout + 2);
@@ -4325,11 +4397,16 @@ int main(int argc, char **argv) {
         NSFont *font = [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold];
         NSTextField *label = [NSTextField labelWithString:msg];
         label.font = font;
+        /* Sized for the longer of the two messages, so the switch to
+         * the ready one is not clipped. */
+        NSTextField *probe = [NSTextField labelWithString:readyMsg];
+        probe.font = font;
+        [probe sizeToFit];
         label.textColor = [NSColor whiteColor];
         label.alignment = NSTextAlignmentCenter;
         [label sizeToFit];
         CGFloat padX = 22, padY = 11;
-        CGFloat w = label.frame.size.width + 2 * padX + 40;
+        CGFloat w = MAX(label.frame.size.width, probe.frame.size.width) + 2 * padX + 40;
         CGFloat h = label.frame.size.height + 2 * padY;
 
         /* Placement: top centre of the target window, 48pt below its top edge
@@ -4395,11 +4472,16 @@ int main(int argc, char **argv) {
              * by design, and the 0.8s ready notice must outlive it. */
             if (!readyUntil && getppid() != parent) break;
             NSDate *now = [NSDate date];
+            if (status && target > 0) {
+                BOOL front = [NSWorkspace sharedWorkspace].frontmostApplication.processIdentifier == target;
+                if (front && !panel.visible) [panel orderFrontRegardless];
+                else if (!front && panel.visible) [panel orderOut:nil];
+            }
             if (g_ready && !readyUntil) {
-                label.stringValue = @"Ready: start typing";
+                label.stringValue = readyMsg;
                 bg.layer.borderColor = [[NSColor colorWithCalibratedRed:0.20 green:0.78 blue:0.35 alpha:1] CGColor];
                 [bg display];
-                readyUntil = [now dateByAddingTimeInterval:0.8];
+                readyUntil = [now dateByAddingTimeInterval:status ? 2.0 : 0.8];
             }
             if (readyUntil && [now compare:readyUntil] != NSOrderedAscending) break;
             if ([now compare:deadline] != NSOrderedAscending) break;
@@ -5357,6 +5439,7 @@ CLAUDE_PANEL_REMOTE_CONTROL|false|start interactive claude sessions with --remot
 CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a panel runs
 CLAUDE_PANEL_SESSION_TITLE|true|name new sessions after their folder
 CLAUDE_PANEL_LOADING_OVERLAY|true|float a "wait to type" notice while the panel split opens
+CLAUDE_PANEL_COMPACTION_OVERLAY|true|float "Async Compaction In Progress" while Claude Burst compacts this session
 CLAUDE_PANEL_CLOSE_BUTTON|true|an [X] in the panel's top-right corner closes it (and its split), and [View] on the Proxy State line opens Claude Burst's dashboard when Burst is installed; while on, Shift+drag selects text in the panel
 CLAUDE_PANEL_RESTART_TOKENS|400000|context size that shows a red restart warning (0 = off)
 CLAUDE_PANEL_COST_ALERTS|true|warn in the chat when a session or the day costs far more than usual
