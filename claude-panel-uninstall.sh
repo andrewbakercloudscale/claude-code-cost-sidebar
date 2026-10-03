@@ -42,7 +42,7 @@ remove_path() { # path, label
 # --- scripts and helpers in ~/.local/bin ---------------------------------
 for f in ccusage-panel.sh .ccusage-panel.sh.new claude-panel-launch.sh claude-panel-keyblock claude-panel-overlay \
          claude-panel-keysend claude-panel-session-hook.sh claude-cost-alert-check.sh \
-         claude-day-projection.sh; do
+         claude-day-projection.sh claude-panel-rc-name; do
   remove_path "$BIN/$f" "~/.local/bin/$f"
 done
 
