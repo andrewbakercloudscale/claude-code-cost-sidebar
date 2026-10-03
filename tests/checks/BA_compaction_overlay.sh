@@ -32,13 +32,18 @@ STUB
 
   compaction_overlay_tick aaa
   compaction_overlay_tick aaa
-  sleep 0.5
+  # Waits for the stub to have started, not a fixed time: under load bash
+  # took over half a second to start it, and the signal below then killed it
+  # before its trap was set.
+  ba_wait() { local i; for i in $(seq 1 50); do grep -q "$1" "$log" 2>/dev/null && return 0; sleep 0.1; done; }
+  ba_wait start
+  sleep 0.2
   assert_eq "shown once, with both messages" "start 600 Async Compaction In Progress|Async Compaction Finished" "$(cat "$log")"
 
   printf '{"aaa|claude-opus-5-5|x":{"pending":false}}\n' > "$f"
   touch -t "$(date -v+1M +%Y%m%d%H%M.%S)" "$f"
   compaction_overlay_tick aaa
-  sleep 0.5
+  ba_wait ready
   assert_contains "told it finished" "ready" "$(cat "$log")"
   assert_eq "ready for the next one" 0 "$COMPACT_SHOWN"
 
