@@ -3790,6 +3790,10 @@ compaction_overlay_tick() { # $1 = session id
 # the panel started (2 minutes of grace) are not replayed. The gateway
 # cannot report its own death, so the panel checks the dashboard answers
 # every 10s and says so after 3 misses in a row.
+# Every panel reads the same file and floats over the same Ghostty, so each
+# event is claimed (mkdir, atomic) and only the panel that claims it shows
+# it. An event about one session goes to that session's panel, except a
+# handover, which is news for the others.
 # CLAUDE_PANEL_ALERTS=false turns all of it off.
 ALERT_FILE="$HOME/.config/claude-burst/notices.json"
 ALERT_MTIME=""
@@ -3803,8 +3807,19 @@ ALERT_STICKY_UNTIL=0
 ALERT_HEALTH_AT=0
 ALERT_HEALTH_MISSES=0
 ALERT_GW_DOWN=0
+ALERT_CLAIMS="$HOME/.config/claude-panel/alerts-claimed"
+ALERT_CLAIMS_SWEPT=0
+# Claims an event for this panel; fails when another panel already has it.
+alert_claim() { # $1 = event id
+  if (( ! ALERT_CLAIMS_SWEPT )); then
+    ALERT_CLAIMS_SWEPT=1
+    mkdir -p "$ALERT_CLAIMS" 2>/dev/null
+    find "$ALERT_CLAIMS" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rmdir {} + 2>/dev/null
+  fi
+  mkdir "$ALERT_CLAIMS/$1" 2>/dev/null
+}
 # New events from notices.json since the last read, one per line:
-# severity, kind, title, detail, resolves, id, separated by \x1f (a tab
+# severity, kind, title, detail, resolves, id, session, separated by \x1f (a tab
 # is whitespace to read, so an empty detail would shift the fields).
 alert_new_events() {
   local m
@@ -3816,7 +3831,7 @@ alert_new_events() {
     (.events // []) as $e
     | ($e | map(.id) | index($last)) as $i
     | (if ($last != "" and $i != null) then $e[$i+1:] else [$e[] | select(.ts > $since)] end)[]
-    | [.severity, .kind, .title, (.detail // ""), (.resolves // ""), .id]
+    | [.severity, .kind, .title, (.detail // ""), (.resolves // ""), .id, (.session // "")]
     | map(gsub("[\u001f\n]"; " ")) | join("\u001f")' "$ALERT_FILE" 2>/dev/null
 }
 # Takes one event in: an ok that resolves the sticky error ends it; an
@@ -3868,25 +3883,38 @@ alert_health_tick() {
     ALERT_HEALTH_MISSES=0
     if (( ALERT_GW_DOWN )); then
       ALERT_GW_DOWN=0
+      rmdir "$ALERT_CLAIMS/panel-gateway-down" 2>/dev/null
       alert_take ok panel-gateway "Burst gateway back" "Its dashboard answers again." panel-gateway
     fi
   else
     ALERT_HEALTH_MISSES=$(( ALERT_HEALTH_MISSES + 1 ))
-    if (( ALERT_HEALTH_MISSES == 3 )); then
+    # Every panel notices; the first to claim the outage says so. A claim
+    # left by a panel that closed mid-outage lapses after 15 minutes.
+    find "$ALERT_CLAIMS" -maxdepth 1 -name panel-gateway-down -mmin +15 -exec rmdir {} + 2>/dev/null
+    if (( ALERT_HEALTH_MISSES == 3 )) && alert_claim panel-gateway-down; then
       ALERT_GW_DOWN=1
       alert_take error panel-gateway "Burst gateway not responding" "Its dashboard has not answered for 30 seconds. Requests through Burst fail until it is back." ""
     fi
   fi
 }
-gateway_alerts_tick() {
+gateway_alerts_tick() { # $1 = this panel's session id
+  local own="${1:-}"
   panel_option_off CLAUDE_PANEL_ALERTS && return 0
   [ -x "$HOME/.local/bin/claude-panel-overlay" ] || return 0
-  local now sev kind title detail resolves id item secs
+  local now sev kind title detail resolves id session item secs
   now=$(panel_now)
   [ -n "$ALERT_SINCE" ] || ALERT_SINCE=$(( now - 120 ))
-  while IFS=$'\x1f' read -r sev kind title detail resolves id; do
+  while IFS=$'\x1f' read -r sev kind title detail resolves id session; do
     [ -n "$id" ] || continue
     ALERT_LAST_ID="$id"
+    if [ -n "$session" ]; then
+      if [ "$kind" = handover ]; then
+        [ "$session" = "$own" ] && continue
+      else
+        [ "$session" = "$own" ] || continue
+      fi
+    fi
+    alert_claim "$id" || continue
     alert_take "$sev" "$kind" "$title" "$detail" "$resolves"
   done < <(alert_new_events)
   alert_health_tick
@@ -4228,7 +4256,7 @@ while true; do
   resolve_session
   remember_panel_width "$cols"
   compaction_overlay_tick "$(basename "${latest:-}" .jsonl)"
-  gateway_alerts_tick
+  gateway_alerts_tick "$(basename "${latest:-}" .jsonl)"
   # Before either builder: the slow-tier summary and the fast-tier table
   # must read the same session from the same parse, or they can disagree
   # on screen about what this session has cost.
