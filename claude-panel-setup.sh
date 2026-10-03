@@ -2358,7 +2358,7 @@ if [ -t 0 ]; then
       # Mouse reporting off (the close button turns it on) before leaving the
       # alternate screen, or the shell left in this pane receives every click
       # as escape codes. Harmless when it was never on.
-      [ -t 1 ] && printf '\033[?1000l\033[?1006l\033[?1049l'
+      [ -t 1 ] && printf '\033[?1000l\033[?1006l\033[?1004l\033[?1049l'
       stty "$ORIG_STTY" 2>/dev/null
     }
     # INT/TERM need a handler that EXITS, not just one that tidies up. A
@@ -2420,7 +2420,7 @@ restart_if_changed() {
   bash -n "$PANEL_SELF" 2>/dev/null || return 0
   [ -n "${ORIG_STTY:-}" ] && stty "$ORIG_STTY" 2>/dev/null
   # The new version turns mouse reporting back on if it still wants it.
-  [ -t 1 ] && printf '\033[?1000l\033[?1006l'
+  [ -t 1 ] && printf '\033[?1000l\033[?1006l\033[?1004l'
   exec bash "$PANEL_SELF" "$@"
 }
 
@@ -3932,7 +3932,8 @@ gateway_alerts_tick() { # $1 = this panel's session id
     item="${ALERT_QUEUE[0]}"
     ALERT_QUEUE=("${ALERT_QUEUE[@]:1}")
     IFS=$'\x1f' read -r sev title detail <<< "$item"
-    case "$sev" in warn) secs=8 ;; *) secs=3 ;; esac
+    # At least 10 seconds on screen: 3 read as a flash.
+    case "$sev" in warn) secs=15 ;; *) secs=10 ;; esac
     ALERT_IS_STICKY=0
     alert_show "$sev" "$secs" "$title" "$detail"
   elif [ -n "$ALERT_STICKY" ]; then
@@ -4018,6 +4019,7 @@ flash_restart_banner() { # $1 = seconds to wait, $2 = frame on screen
     printf '\033[%d;1H%s\033[K' "$row" "$(restart_banner_line "$state")"
     [ "$state" = on ] && state=off || state=on
     panel_sleep 1
+    (( PANEL_REDRAW )) && break
   done
 }
 
@@ -4122,6 +4124,14 @@ panel_read_clicks() { # $1 = pane columns
   local re=$'\e\\[<([0-9]+);([0-9]+);([0-9]+)([Mm])' rest="$PANEL_INBUF" col c r
   col=$(panel_close_col "$1")
   PANEL_CLICK=""
+  # Focus in (ESC [ I, reporting turned on beside the mouse) asks for a
+  # redraw: back from a minimised window, Ghostty could show this pane
+  # blank until a frame that differed from the last was written, which with
+  # nothing new could be most of a tick. Focus out means nothing here. Both
+  # come out before the mouse reports are read.
+  [[ $rest == *$'\e[I'* ]] && PANEL_REDRAW=1
+  rest=${rest//$'\e[I'/}
+  rest=${rest//$'\e[O'/}
   while [[ $rest =~ $re ]]; do
     if [ "${BASH_REMATCH[4]}" = M ] && (( BASH_REMATCH[1] == 0 )); then
       c=${BASH_REMATCH[2]} r=${BASH_REMATCH[3]}
@@ -4192,7 +4202,7 @@ panel_sleep() { # $1 = whole seconds
     return 0
   fi
   local end=$(( SECONDS + $1 ))
-  while (( SECONDS < end )); do
+  while (( SECONDS < end && ! PANEL_REDRAW )); do
     panel_poll_input 0.2
   done
 }
@@ -4219,10 +4229,17 @@ fi
 
 if [ -n "${ORIG_STTY:-}" ] && [ -t 1 ] && ! panel_option_off CLAUDE_PANEL_CLOSE_BUTTON; then
   PANEL_CLOSE=1
-  printf '\033[?1000h\033[?1006h'
+  # 1004 is focus reporting: the terminal sends ESC [ I when this pane is
+  # focused again, see panel_read_clicks.
+  printf '\033[?1000h\033[?1006h\033[?1004h'
 fi
 
+# A resize redraws at once rather than at the next tick.
+trap 'PANEL_REDRAW=1' WINCH
+
 last_frame=""
+last_size=""
+PANEL_REDRAW=0
 
 while true; do
   restart_if_changed
@@ -4246,6 +4263,13 @@ while true; do
   (( cols < 40 )) && cols=40
   (( rows < 10 )) && rows=10
   export COLS="$cols"
+  # Back in focus or resized: write the frame even if it matches the last,
+  # since what is on screen may not be it any more.
+  if (( PANEL_REDRAW )) || [ "$rows $cols" != "$last_size" ]; then
+    last_frame=""
+    PANEL_REDRAW=0
+    last_size="$rows $cols"
+  fi
 
   # Discard anything typed into this read-only pane since the last tick, so
   # it cannot land on the shell prompt when the panel exits; a click on the
@@ -4573,7 +4597,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(sev, "error")) border = [NSColor colorWithCalibratedRed:0.94 green:0.22 blue:0.22 alpha:1];
 
         signal(SIGALRM, on_alarm);
-        alarm((unsigned int)timeout + 2);
+        /* An alert's time only runs while it can be seen (below), so its
+         * backstop allows for Ghostty being in the background a while. */
+        alarm((unsigned int)timeout + (sev[0] ? 900 : 2));
         signal(SIGUSR1, on_usr1);
         signal(SIGTERM, on_term);
         signal(SIGINT, on_term);
@@ -4666,6 +4692,7 @@ int main(int argc, char **argv) {
 
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
         NSDate *readyUntil = nil;
+        NSDate *lastTick = [NSDate date];
         while (!g_quit) {
             @autoreleasepool {
                 NSEvent *ev = [app nextEventMatchingMask:NSEventMaskAny
@@ -4683,7 +4710,13 @@ int main(int argc, char **argv) {
                 BOOL front = [NSWorkspace sharedWorkspace].frontmostApplication.processIdentifier == target;
                 if (front && !panel.visible) [panel orderFrontRegardless];
                 else if (!front && panel.visible) [panel orderOut:nil];
+                /* A gateway alert's seconds count only while it is on
+                 * screen: one that arrived while another app was in front
+                 * used to spend its time hidden and then flash for a moment
+                 * when Ghostty came back. */
+                if (sev[0] && !front) deadline = [deadline dateByAddingTimeInterval:[now timeIntervalSinceDate:lastTick]];
             }
+            lastTick = now;
             if (g_ready && !readyUntil) {
                 label.stringValue = readyMsg;
                 bg.layer.borderColor = [[NSColor colorWithCalibratedRed:0.20 green:0.78 blue:0.35 alpha:1] CGColor];
