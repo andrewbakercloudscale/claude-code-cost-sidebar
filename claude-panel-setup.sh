@@ -3780,6 +3780,145 @@ compaction_overlay_tick() { # $1 = session id
   return 0
 }
 
+# ---- gateway alerts: the same floating notice for what Burst runs into ----
+# Claude Burst writes what it wants on screen (failed over, network down,
+# restarting, ...) to notices.json, newest last. Each new event is shown
+# once, one at a time, coloured by severity: info blue, ok green, warn
+# amber, error red. Info and ok show for 3s, warnings for 8s. An error is
+# sticky: it comes back after any notice that interrupts it, until an ok
+# that resolves its kind arrives, or 10 minutes pass. Events from before
+# the panel started (2 minutes of grace) are not replayed. The gateway
+# cannot report its own death, so the panel checks the dashboard answers
+# every 10s and says so after 3 misses in a row.
+# CLAUDE_PANEL_ALERTS=false turns all of it off.
+ALERT_FILE="$HOME/.config/claude-burst/notices.json"
+ALERT_MTIME=""
+ALERT_LAST_ID=""
+ALERT_SINCE=""
+ALERT_QUEUE=()
+ALERT_PID=""
+ALERT_IS_STICKY=0
+ALERT_STICKY=""        # severity, title, detail, kind (\x1f separated)
+ALERT_STICKY_UNTIL=0
+ALERT_HEALTH_AT=0
+ALERT_HEALTH_MISSES=0
+ALERT_GW_DOWN=0
+# New events from notices.json since the last read, one per line:
+# severity, kind, title, detail, resolves, id, separated by \x1f (a tab
+# is whitespace to read, so an empty detail would shift the fields).
+alert_new_events() {
+  local m
+  [ -f "$ALERT_FILE" ] || return 0
+  m=$(stat -f %m "$ALERT_FILE" 2>/dev/null) || return 0
+  [ "$m" = "$ALERT_MTIME" ] && return 0
+  ALERT_MTIME="$m"
+  jq -r --arg last "$ALERT_LAST_ID" --argjson since "${ALERT_SINCE:-0}" '
+    (.events // []) as $e
+    | ($e | map(.id) | index($last)) as $i
+    | (if ($last != "" and $i != null) then $e[$i+1:] else [$e[] | select(.ts > $since)] end)[]
+    | [.severity, .kind, .title, (.detail // ""), (.resolves // ""), .id]
+    | map(gsub("[\u001f\n]"; " ")) | join("\u001f")' "$ALERT_FILE" 2>/dev/null
+}
+# Takes one event in: an ok that resolves the sticky error ends it; an
+# error becomes the sticky one; everything else joins the queue.
+alert_take() { # severity kind title detail resolves
+  local sev="$1" kind="$2" title="$3" detail="$4" resolves="$5"
+  if [ -n "$resolves" ] && [ -n "$ALERT_STICKY" ] && [ "$resolves" = "$(printf '%s' "$ALERT_STICKY" | cut -d $'\x1f' -f4)" ]; then
+    ALERT_STICKY=""
+    if (( ALERT_IS_STICKY )) && [ -n "$ALERT_PID" ]; then
+      kill "$ALERT_PID" 2>/dev/null
+      ALERT_PID=""
+    fi
+  fi
+  if [ "$sev" = error ]; then
+    ALERT_STICKY=$(printf '%s\037%s\037%s\037%s' "$sev" "$title" "$detail" "$kind")
+    ALERT_STICKY_UNTIL=$(( $(panel_now) + 600 ))
+    # Shown now, not after the queue: an error outranks what is waiting.
+    if alert_alive; then
+      kill "$ALERT_PID" 2>/dev/null
+    fi
+    ALERT_PID=""
+    return 0
+  fi
+  ALERT_QUEUE+=("$(printf '%s\037%s\037%s' "$sev" "$title" "$detail")")
+}
+alert_show() { # severity seconds title detail
+  "$HOME/.local/bin/claude-panel-overlay" "$(panel_ghostty_pid)" "$2" "$3" "" "$1" "$4" >/dev/null 2>&1 &
+  ALERT_PID=$!
+}
+# Whether the notice on screen is still up. Not kill -0 alone: a notice that
+# has exited but not yet been reaped answers it, and the queue would wait on
+# a zombie.
+alert_alive() {
+  local st
+  [ -n "$ALERT_PID" ] || return 1
+  st=$(ps -o stat= -p "$ALERT_PID" 2>/dev/null) || return 1
+  case "$st" in ''|Z*) return 1 ;; esac
+  return 0
+}
+# The panel's own check that the gateway answers: its dashboard, every 10s.
+alert_health_tick() {
+  local url now
+  url=$(panel_gateway_url)
+  [ -n "$url" ] || return 0
+  now=$(panel_now)
+  (( now - ALERT_HEALTH_AT < 10 )) && return 0
+  ALERT_HEALTH_AT=$now
+  if curl -s -o /dev/null -m 2 "$url" 2>/dev/null; then
+    ALERT_HEALTH_MISSES=0
+    if (( ALERT_GW_DOWN )); then
+      ALERT_GW_DOWN=0
+      alert_take ok panel-gateway "Burst gateway back" "Its dashboard answers again." panel-gateway
+    fi
+  else
+    ALERT_HEALTH_MISSES=$(( ALERT_HEALTH_MISSES + 1 ))
+    if (( ALERT_HEALTH_MISSES == 3 )); then
+      ALERT_GW_DOWN=1
+      alert_take error panel-gateway "Burst gateway not responding" "Its dashboard has not answered for 30 seconds. Requests through Burst fail until it is back." ""
+    fi
+  fi
+}
+gateway_alerts_tick() {
+  panel_option_off CLAUDE_PANEL_ALERTS && return 0
+  [ -x "$HOME/.local/bin/claude-panel-overlay" ] || return 0
+  local now sev kind title detail resolves id item secs
+  now=$(panel_now)
+  [ -n "$ALERT_SINCE" ] || ALERT_SINCE=$(( now - 120 ))
+  while IFS=$'\x1f' read -r sev kind title detail resolves id; do
+    [ -n "$id" ] || continue
+    ALERT_LAST_ID="$id"
+    alert_take "$sev" "$kind" "$title" "$detail" "$resolves"
+  done < <(alert_new_events)
+  alert_health_tick
+
+  if alert_alive; then
+    # A sticky error steps aside for anything queued, then comes back.
+    if (( ALERT_IS_STICKY )) && (( ${#ALERT_QUEUE[@]} > 0 )); then
+      kill "$ALERT_PID" 2>/dev/null
+    else
+      return 0
+    fi
+  fi
+  ALERT_PID=""
+  if (( ${#ALERT_QUEUE[@]} > 0 )); then
+    item="${ALERT_QUEUE[0]}"
+    ALERT_QUEUE=("${ALERT_QUEUE[@]:1}")
+    IFS=$'\x1f' read -r sev title detail <<< "$item"
+    case "$sev" in warn) secs=8 ;; *) secs=3 ;; esac
+    ALERT_IS_STICKY=0
+    alert_show "$sev" "$secs" "$title" "$detail"
+  elif [ -n "$ALERT_STICKY" ]; then
+    if (( now >= ALERT_STICKY_UNTIL )); then
+      ALERT_STICKY=""
+      return 0
+    fi
+    IFS=$'\x1f' read -r sev title detail kind <<< "$ALERT_STICKY"
+    ALERT_IS_STICKY=1
+    alert_show error "$(( ALERT_STICKY_UNTIL - now ))" "$title" "$detail"
+  fi
+  return 0
+}
+
 # Numeric options from the same file, same precedence. Prints the value when
 # it is a plain non-negative integer, else the default ($2). A typo must not
 # silently disable a warning, so anything unparseable falls back.
@@ -4089,6 +4228,7 @@ while true; do
   resolve_session
   remember_panel_width "$cols"
   compaction_overlay_tick "$(basename "${latest:-}" .jsonl)"
+  gateway_alerts_tick
   # Before either builder: the slow-tier summary and the fast-tier table
   # must read the same session from the same parse, or they can disagree
   # on screen about what this session has cost.
@@ -4318,9 +4458,10 @@ cat > "$OVERLAY_SRC" <<'OVERLAY_EOF'
 #import <Cocoa/Cocoa.h>
 #include <signal.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
-/* claude-panel-overlay <ghostty-pid> [timeout-seconds] [message] [ready-message]
+/* claude-panel-overlay <ghostty-pid> [timeout-seconds] [message] [ready-message] [severity] [detail]
  *
  * A borderless, click-through, NON-ACTIVATING notice near the top centre of
  * the given process's front window, shown while claude-panel-launch.sh opens
@@ -4341,7 +4482,11 @@ cat > "$OVERLAY_SRC" <<'OVERLAY_EOF'
  * A notice longer than 15s (the usage panel's "Async Compaction In
  * Progress") is a status, not a warning about typing: it hides while
  * another app is in front, so it never floats over the user's other work,
- * and its ready message stays for 2s. */
+ * and its ready message stays for 2s.
+ *
+ * Gateway alerts add [severity] [detail]: info, ok, warn or error colours
+ * the border (blue, green, amber, red) and makes it a status at any
+ * length; detail is a smaller second line, truncated to fit. */
 
 @interface OverlayPanel : NSPanel
 @end
@@ -4385,8 +4530,19 @@ int main(int argc, char **argv) {
         BOOL status = timeout > 15;
         NSString *msg = argc > 3 ? [NSString stringWithUTF8String:argv[3]]
                                  : @"Loading usage panel... wait to type";
-        NSString *readyMsg = argc > 4 ? [NSString stringWithUTF8String:argv[4]]
-                                      : @"Ready: start typing";
+        NSString *readyMsg = argc > 4 && argv[4][0] ? [NSString stringWithUTF8String:argv[4]]
+                                                    : @"Ready: start typing";
+        /* A gateway alert names its severity (info, ok, warn, error), which
+         * sets the border colour, and may carry a second, smaller line. It
+         * is a status whatever its length: hidden while Ghostty is not in
+         * front. */
+        const char *sev = argc > 5 ? argv[5] : "";
+        NSString *detail = argc > 6 && argv[6][0] ? [NSString stringWithUTF8String:argv[6]] : nil;
+        if (sev[0]) status = YES;
+        NSColor *border = [NSColor colorWithCalibratedRed:0.96 green:0.62 blue:0.04 alpha:1];
+        if (!strcmp(sev, "info")) border = [NSColor colorWithCalibratedRed:0.49 green:0.98 blue:1.00 alpha:1];
+        else if (!strcmp(sev, "ok")) border = [NSColor colorWithCalibratedRed:0.20 green:0.78 blue:0.35 alpha:1];
+        else if (!strcmp(sev, "error")) border = [NSColor colorWithCalibratedRed:0.94 green:0.22 blue:0.22 alpha:1];
 
         signal(SIGALRM, on_alarm);
         alarm((unsigned int)timeout + 2);
@@ -4411,9 +4567,22 @@ int main(int argc, char **argv) {
         label.textColor = [NSColor whiteColor];
         label.alignment = NSTextAlignmentCenter;
         [label sizeToFit];
+        NSTextField *sub = nil;
+        if (detail) {
+            sub = [NSTextField labelWithString:detail];
+            sub.font = [NSFont systemFontOfSize:12];
+            sub.textColor = [NSColor colorWithCalibratedWhite:0.80 alpha:1];
+            sub.alignment = NSTextAlignmentCenter;
+            sub.lineBreakMode = NSLineBreakByTruncatingTail;
+            [sub sizeToFit];
+        }
         CGFloat padX = 22, padY = 11;
-        CGFloat w = MAX(label.frame.size.width, probe.frame.size.width) + 2 * padX + 40;
-        CGFloat h = label.frame.size.height + 2 * padY;
+        CGFloat textW = MAX(label.frame.size.width, sub ? sub.frame.size.width : 0);
+        if (!sev[0]) textW = MAX(textW, probe.frame.size.width);
+        if (textW > 620) textW = 620;
+        CGFloat w = textW + 2 * padX + 40;
+        CGFloat subH = sub ? sub.frame.size.height + 2 : 0;
+        CGFloat h = label.frame.size.height + subH + 2 * padY;
 
         /* Placement: top centre of the target window, 48pt below its top edge
          * (clears the title bar and tab bar). Without a window, top centre of
@@ -4452,12 +4621,16 @@ int main(int argc, char **argv) {
         NSView *bg = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, w, h)];
         bg.wantsLayer = YES;
         bg.layer.backgroundColor = [[NSColor colorWithCalibratedRed:0.10 green:0.11 blue:0.14 alpha:0.94] CGColor];
-        bg.layer.cornerRadius = h / 2;
-        bg.layer.borderWidth = 1;
-        bg.layer.borderColor = [[NSColor colorWithCalibratedRed:0.96 green:0.62 blue:0.04 alpha:1] CGColor];
-        label.frame = NSMakeRect(padX, (h - label.frame.size.height) / 2,
+        bg.layer.cornerRadius = sub ? 14 : h / 2;
+        bg.layer.borderWidth = sev[0] ? 2 : 1;
+        bg.layer.borderColor = [border CGColor];
+        label.frame = NSMakeRect(padX, h - padY - label.frame.size.height,
                                  w - 2 * padX, label.frame.size.height);
         [bg addSubview:label];
+        if (sub) {
+            sub.frame = NSMakeRect(padX, padY, w - 2 * padX, sub.frame.size.height);
+            [bg addSubview:sub];
+        }
         panel.contentView = bg;
         /* orderFrontRegardless shows the window without activating this app
          * or making the panel key: focus does not move. */
@@ -5446,6 +5619,7 @@ CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a panel r
 CLAUDE_PANEL_SESSION_TITLE|true|name new sessions after their folder
 CLAUDE_PANEL_LOADING_OVERLAY|true|float a "wait to type" notice while the panel split opens
 CLAUDE_PANEL_COMPACTION_OVERLAY|true|float "Async Compaction In Progress" while Claude Burst compacts this session
+CLAUDE_PANEL_ALERTS|true|float Claude Burst's alerts (failover, network down, restart, gateway not answering) over Ghostty
 CLAUDE_PANEL_CLOSE_BUTTON|true|an [X] in the panel's top-right corner closes it (and its split), and [View] on the Proxy State line opens Claude Burst's dashboard when Burst is installed; while on, Shift+drag selects text in the panel
 CLAUDE_PANEL_RESTART_TOKENS|400000|context size that shows a red restart warning (0 = off)
 CLAUDE_PANEL_COST_ALERTS|true|warn in the chat when a session or the day costs far more than usual
