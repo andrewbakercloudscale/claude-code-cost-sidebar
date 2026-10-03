@@ -31,6 +31,29 @@ check_AZ_close_button() {
   PANEL_INBUF+=$'9;1M'
   assert_eq "and completes on the next read" 0 "$(panel_clicked_close 40; echo $?)"
 
+  # [Gateway] sits left of the [X] when Claude Burst is here: 40 columns
+  # puts it at 28-36.
+  _gw() { PANEL_INBUF=$1; panel_read_clicks 40; echo "${PANEL_CLICK:-none}"; }
+  PANEL_GW_URL=""
+  assert_eq "no Burst, no gateway button" none "$(_gw $'\e[<0;30;1M')"
+  PANEL_GW_URL="http://127.0.0.1:7788/"
+  assert_eq "gateway button, first column" gateway "$(_gw $'\e[<0;28;1M')"
+  assert_eq "gateway button, last column" gateway "$(_gw $'\e[<0;36;1M')"
+  assert_eq "the gap between the buttons" none "$(_gw $'\e[<0;37;1M')"
+  assert_eq "left of the gateway button" none "$(_gw $'\e[<0;27;1M')"
+  assert_eq "close wins over gateway in one read" close "$(_gw $'\e[<0;39;1M\e[<0;30;1M')"
+
+  local stub="$SBX/bin" cfg="$HOME/.config/claude-burst/config.json"
+  mkdir -p "$stub" "$(dirname "$cfg")"
+  assert_eq "no claude-burst, no URL" "" "$(PATH="/usr/bin:/bin" panel_gateway_url)"
+  printf '#!/bin/sh\n' > "$stub/claude-burst"; chmod +x "$stub/claude-burst"
+  printf '{}\n' > "$cfg"
+  assert_eq "the default dashboard address" "http://127.0.0.1:7788/" "$(PATH="$stub:$PATH" panel_gateway_url)"
+  printf '{"admin_listen":"127.0.0.1:9999"}\n' > "$cfg"
+  assert_eq "admin_listen from config.json" "http://127.0.0.1:9999/" "$(PATH="$stub:$PATH" panel_gateway_url)"
+  printf '{"admin_listen":"off"}\n' > "$cfg"
+  assert_eq "a dashboard turned off has no button" "" "$(PATH="$stub:$PATH" panel_gateway_url)"
+
   local f="$HOME/.config/claude-panel/options"
   mkdir -p "$(dirname "$f")"
   rm -f "$f"

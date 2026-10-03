@@ -3826,31 +3826,68 @@ remember_panel_width() { # $1 = this pane's columns
 # Ghostty. CLAUDE_PANEL_CLOSE_BUTTON=false turns the button and the mouse
 # reporting off. Clicks are read while the panel waits between refreshes,
 # in 0.2s slices, so one lands within a fifth of a second, not a refresh.
+#
+# With Claude Burst installed a [Gateway] button sits left of the [X] and
+# opens Burst's dashboard (admin_listen in its config.json, 127.0.0.1:7788
+# unless changed; none when it is "off").
 PANEL_CLOSE=0
 PANEL_INBUF=""
+PANEL_CLICK=""
+PANEL_GW_URL=""
+PANEL_GW_LABEL="[Gateway]"
 panel_close_col() { # $1 = pane columns; first column of the [X]
   printf '%s' "$(( $1 - 2 ))"
 }
+panel_gateway_col() { # $1 = pane columns; first column of [Gateway]
+  printf '%s' "$(( $1 - 3 - ${#PANEL_GW_LABEL} ))"
+}
+# Burst's dashboard URL, or nothing when Burst is not installed here.
+panel_gateway_url() {
+  command -v claude-burst >/dev/null 2>&1 || return 0
+  local cfg="$HOME/.config/claude-burst/config.json" a
+  [ -f "$cfg" ] || return 0
+  a=$(jq -r '.admin_listen // "127.0.0.1:7788"' "$cfg" 2>/dev/null)
+  case "$a" in ''|off|null) return 0 ;; esac
+  printf 'http://%s/' "$a"
+}
 draw_close_button() { # $1 = pane columns
   (( PANEL_CLOSE )) || return 0
+  PANEL_GW_URL=$(panel_gateway_url)
+  if [ -n "$PANEL_GW_URL" ]; then
+    printf '\033[1;%dH%s%s%s' "$(panel_gateway_col "$1")" "$C_BOLD$C_CYAN" "$PANEL_GW_LABEL" "$C_RESET"
+  fi
   printf '\033[1;%dH%s[X]%s' "$(panel_close_col "$1")" "$C_BOLD" "$C_RESET"
 }
-# Is there a left-button press on the [X] in PANEL_INBUF? Consumes the
-# buffer either way, keeping only an incomplete trailing sequence.
-panel_clicked_close() { # $1 = pane columns
+# Which button, if any, a left-button press in PANEL_INBUF landed on:
+# sets PANEL_CLICK to close, gateway or nothing. Consumes the buffer
+# either way, keeping only an incomplete trailing sequence.
+panel_read_clicks() { # $1 = pane columns
   # Every complete mouse report is consumed (releases, other buttons);
-  # only a left-button press (0 ... M) on row 1 at the [X] counts.
-  local re=$'\e\\[<([0-9]+);([0-9]+);([0-9]+)([Mm])' rest="$PANEL_INBUF" hit=1 col
+  # only a left-button press (0 ... M) on row 1 at a button counts, and a
+  # close in the same read wins over a gateway.
+  local re=$'\e\\[<([0-9]+);([0-9]+);([0-9]+)([Mm])' rest="$PANEL_INBUF" col gcol c
   col=$(panel_close_col "$1")
+  gcol=$(panel_gateway_col "$1")
+  PANEL_CLICK=""
   while [[ $rest =~ $re ]]; do
-    if [ "${BASH_REMATCH[4]}" = M ] && (( BASH_REMATCH[1] == 0 && BASH_REMATCH[3] == 1 && BASH_REMATCH[2] >= col )); then
-      hit=0
+    if [ "${BASH_REMATCH[4]}" = M ] && (( BASH_REMATCH[1] == 0 && BASH_REMATCH[3] == 1 )); then
+      c=${BASH_REMATCH[2]}
+      if (( c >= col )); then
+        PANEL_CLICK=close
+      elif [ "$PANEL_CLICK" != close ] && [ -n "$PANEL_GW_URL" ] && (( c >= gcol && c < gcol + ${#PANEL_GW_LABEL} )); then
+        PANEL_CLICK=gateway
+      fi
     fi
     rest=${rest#*"${BASH_REMATCH[0]}"}
   done
   case "$rest" in *$'\e'*) PANEL_INBUF=$'\e'"${rest##*$'\e'}" ;; *) PANEL_INBUF="" ;; esac
   (( ${#PANEL_INBUF} > 32 )) && PANEL_INBUF=""
-  return "$hit"
+  return 0
+}
+# Was there a left-button press on the [X]?
+panel_clicked_close() { # $1 = pane columns
+  panel_read_clicks "$1"
+  [ "$PANEL_CLICK" = close ]
 }
 # Close the panel, and in the launcher's split the split as well, by
 # hanging up the pane's own shell. Only a shell on this same terminal: under
@@ -3886,7 +3923,11 @@ panel_poll_input() { # $1 = seconds
   c=""
   read -r -s -t "$t" -n 64 c 2>/dev/null
   PANEL_INBUF+="$c"
-  panel_clicked_close "${COLS:-80}" && panel_close
+  panel_read_clicks "${COLS:-80}"
+  case "$PANEL_CLICK" in
+    close) panel_close ;;
+    gateway) open "$PANEL_GW_URL" >/dev/null 2>&1 & ;;
+  esac
   return 0
 }
 # sleep $1, answering clicks meanwhile. Without the button it is the old
@@ -5298,7 +5339,7 @@ CLAUDE_PANEL_REMOTE_CONTROL|false|start interactive claude sessions with --remot
 CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a panel runs
 CLAUDE_PANEL_SESSION_TITLE|true|name new sessions after their folder
 CLAUDE_PANEL_LOADING_OVERLAY|true|float a "wait to type" notice while the panel split opens
-CLAUDE_PANEL_CLOSE_BUTTON|true|an [X] in the panel's top-right corner closes it (and its split); while on, Shift+drag selects text in the panel
+CLAUDE_PANEL_CLOSE_BUTTON|true|an [X] in the panel's top-right corner closes it (and its split), and [Gateway] opens Claude Burst's dashboard when Burst is installed; while on, Shift+drag selects text in the panel
 CLAUDE_PANEL_RESTART_TOKENS|400000|context size that shows a red restart warning (0 = off)
 CLAUDE_PANEL_COST_ALERTS|true|warn in the chat when a session or the day costs far more than usual
 CLAUDE_PANEL_ALERT_MIN_USD|5.00|a session below this many dollars never raises a cost alert
