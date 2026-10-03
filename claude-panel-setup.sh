@@ -3694,6 +3694,19 @@ last_cols=0
 summary_block=""
 trailing_raw=""
 
+# The summary rows (Model to Proxy State) for the Claude Code mod in
+# claude-burst's mods/burst-band, which shows them inside the session: the
+# same numbers and colours as this pane, with no second ccusage run. One file
+# per session, with the ANSI colours left in; files older than two days go.
+BAND_DIR="$HOME/.cache/ccusage-panel-cache/band"
+band_write() { # $1 = session id, $2 = summary block
+  [ -n "$1" ] && [ -n "$2" ] || return 0
+  mkdir -p "$BAND_DIR" 2>/dev/null || return 0
+  printf '%s\n' "$2" > "$BAND_DIR/$1.ansi.$$" && mv -f "$BAND_DIR/$1.ansi.$$" "$BAND_DIR/$1.ansi"
+  find "$BAND_DIR" -name '*.ansi' -mtime +2 -delete 2>/dev/null
+  return 0
+}
+
 # Install-time options, one KEY=value per line in
 # ~/.config/claude-panel/options (written with every option false by
 # claude-panel-setup.sh; an environment variable of the same name wins).
@@ -4361,6 +4374,7 @@ while true; do
     # not need to know what broke to report that something did.
     summary_block=$(build_summary 2>>"$PANEL_ERR_FILE")
     trailing_raw=$(build_trailing 2>>"$PANEL_ERR_FILE")
+    band_write "$(basename "${latest:-}" .jsonl)" "$summary_block"
     last_slow=$now_epoch
     last_cols=$cols
     last_model_label="${model_label:-}"
