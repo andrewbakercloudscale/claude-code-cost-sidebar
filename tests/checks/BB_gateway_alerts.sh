@@ -42,11 +42,11 @@ STUB
   gateway_alerts_tick
   bb_settle
   assert_eq "the old event is not replayed; the first new one shows alone" \
-    "show 8|Failed over to together|warn|until 10:00" "$(cat "$log")"
+    "show 15|Failed over to together|warn|until 10:00" "$(cat "$log")"
   gateway_alerts_tick
   bb_settle
   assert_eq "then the next, with an empty detail kept empty" \
-    "show 3|Gateway ready|info|" "$(sed -n 2p "$log")"
+    "show 10|Gateway ready|info|" "$(sed -n 2p "$log")"
   gateway_alerts_tick
   bb_settle
   assert_eq "each shown once" 2 "$(wc -l < "$log" | tr -d ' ')"
@@ -71,7 +71,7 @@ STUB
   gateway_alerts_tick
   bb_settle
   assert_eq "the ok that resolves it ends it" "" "$ALERT_STICKY"
-  assert_contains "and shows in green" "show 3|Network back|ok|" "$(cat "$log")"
+  assert_contains "and shows in green" "show 10|Network back|ok|" "$(cat "$log")"
   : > "$log"
   gateway_alerts_tick
   bb_settle
