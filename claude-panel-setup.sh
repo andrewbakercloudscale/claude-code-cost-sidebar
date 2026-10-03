@@ -404,9 +404,11 @@ C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
 # accounting is unaffected.
 C_ELECTRIC=$'\033[38;2;125;249;255m'
 # The clickable buttons are filled chips, so they read as buttons rather
-# than text: [View] black on the electric blue, [X] white on red.
+# than text: [View] black on the electric blue, [X] white on bright red.
+# Both 24-bit: the theme's basic red (41) renders as a muted pink, and its
+# white (97) on that was barely readable.
 C_BTN_VIEW=$'\033[1;38;2;0;0;0;48;2;125;249;255m'
-C_BTN_CLOSE=$'\033[1;97;41m'
+C_BTN_CLOSE=$'\033[1;38;2;255;255;255;48;2;230;0;0m'
 
 fmt_num() {
   awk -v n="$1" 'BEGIN{
