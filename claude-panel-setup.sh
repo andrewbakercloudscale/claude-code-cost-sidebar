@@ -520,8 +520,8 @@ proxy_state_line() {
   # Which slot the proxy would choose only matters if it is in the path at
   # all, so this outranks PRIMARY/SECONDARY rather than sitting beside it.
   if ! why=$(proxy_in_path "$cfg"); then
-    printf '  🔀 Proxy State: %sNOT IN USE%s %s(%s)%s\n' \
-      "$C_RED" "$C_RESET" "$C_YELLOW" "$why" "$C_RESET"
+    printf '  🔀 Proxy State: %sNOT IN USE%s %s(%s)%s%s\n' \
+      "$C_RED" "$C_RESET" "$C_YELLOW" "$why" "$C_RESET" "$(panel_view_tag)"
     return
   fi
 
@@ -533,7 +533,7 @@ proxy_state_line() {
   else
     route_label="PRIMARY ($primary)"; route_color="$C_GREEN"
   fi
-  printf '  🔀 Proxy State: %s%s%s\n' "$route_color" "$route_label" "$C_RESET"
+  printf '  🔀 Proxy State: %s%s%s%s\n' "$route_color" "$route_label" "$C_RESET" "$(panel_view_tag)"
 }
 
 # There's no Anthropic API call for "what plan is this account on", the
@@ -3827,19 +3827,18 @@ remember_panel_width() { # $1 = this pane's columns
 # reporting off. Clicks are read while the panel waits between refreshes,
 # in 0.2s slices, so one lands within a fifth of a second, not a refresh.
 #
-# With Claude Burst installed a [Gateway] button sits left of the [X] and
+# With Claude Burst installed a [View] button ends the Proxy State line and
 # opens Burst's dashboard (admin_listen in its config.json, 127.0.0.1:7788
 # unless changed; none when it is "off").
 PANEL_CLOSE=0
 PANEL_INBUF=""
 PANEL_CLICK=""
 PANEL_GW_URL=""
-PANEL_GW_LABEL="[Gateway]"
+PANEL_GW_LABEL="[View]"
+PANEL_GW_ROW=0
+PANEL_GW_COL=0
 panel_close_col() { # $1 = pane columns; first column of the [X]
   printf '%s' "$(( $1 - 2 ))"
-}
-panel_gateway_col() { # $1 = pane columns; first column of [Gateway]
-  printf '%s' "$(( $1 - 3 - ${#PANEL_GW_LABEL} ))"
 }
 # Burst's dashboard URL, or nothing when Burst is not installed here.
 panel_gateway_url() {
@@ -3850,12 +3849,31 @@ panel_gateway_url() {
   case "$a" in ''|off|null) return 0 ;; esac
   printf 'http://%s/' "$a"
 }
+# " [View]" for the end of the Proxy State line, when there is a dashboard.
+panel_view_tag() {
+  (( PANEL_CLOSE )) || return 0
+  [ -n "$(panel_gateway_url)" ] || return 0
+  printf ' %s%s%s' "$C_BOLD$C_CYAN" "$PANEL_GW_LABEL" "$C_RESET"
+}
+# Where [View] landed in a frame drawn from row 1: sets PANEL_GW_ROW and
+# PANEL_GW_COL, 0 when it is not there. The line's one emoji is two
+# columns wide, hence the +1.
+panel_locate_view() { # $1 = the frame text
+  local LC_ALL=en_US.UTF-8 n=0 line pre
+  PANEL_GW_ROW=0 PANEL_GW_COL=0
+  while IFS= read -r line; do
+    n=$(( n + 1 ))
+    case "$line" in *"Proxy State:"*) ;; *) continue ;; esac
+    line=$(printf '%s' "$line" | sed $'s/\e\\[[0-9;]*m//g')
+    case "$line" in *"$PANEL_GW_LABEL"*) ;; *) return 0 ;; esac
+    pre=${line%%"$PANEL_GW_LABEL"*}
+    PANEL_GW_ROW=$n PANEL_GW_COL=$(( ${#pre} + 2 ))
+    return 0
+  done <<< "$1"
+}
 draw_close_button() { # $1 = pane columns
   (( PANEL_CLOSE )) || return 0
   PANEL_GW_URL=$(panel_gateway_url)
-  if [ -n "$PANEL_GW_URL" ]; then
-    printf '\033[1;%dH%s%s%s' "$(panel_gateway_col "$1")" "$C_BOLD$C_CYAN" "$PANEL_GW_LABEL" "$C_RESET"
-  fi
   printf '\033[1;%dH%s[X]%s' "$(panel_close_col "$1")" "$C_BOLD" "$C_RESET"
 }
 # Which button, if any, a left-button press in PANEL_INBUF landed on:
@@ -3863,18 +3881,17 @@ draw_close_button() { # $1 = pane columns
 # either way, keeping only an incomplete trailing sequence.
 panel_read_clicks() { # $1 = pane columns
   # Every complete mouse report is consumed (releases, other buttons);
-  # only a left-button press (0 ... M) on row 1 at a button counts, and a
-  # close in the same read wins over a gateway.
-  local re=$'\e\\[<([0-9]+);([0-9]+);([0-9]+)([Mm])' rest="$PANEL_INBUF" col gcol c
+  # only a left-button press (0 ... M) on a button counts: the [X] on row 1,
+  # [View] where panel_locate_view found it. A close in the same read wins.
+  local re=$'\e\\[<([0-9]+);([0-9]+);([0-9]+)([Mm])' rest="$PANEL_INBUF" col c r
   col=$(panel_close_col "$1")
-  gcol=$(panel_gateway_col "$1")
   PANEL_CLICK=""
   while [[ $rest =~ $re ]]; do
-    if [ "${BASH_REMATCH[4]}" = M ] && (( BASH_REMATCH[1] == 0 && BASH_REMATCH[3] == 1 )); then
-      c=${BASH_REMATCH[2]}
-      if (( c >= col )); then
+    if [ "${BASH_REMATCH[4]}" = M ] && (( BASH_REMATCH[1] == 0 )); then
+      c=${BASH_REMATCH[2]} r=${BASH_REMATCH[3]}
+      if (( r == 1 && c >= col )); then
         PANEL_CLICK=close
-      elif [ "$PANEL_CLICK" != close ] && [ -n "$PANEL_GW_URL" ] && (( c >= gcol && c < gcol + ${#PANEL_GW_LABEL} )); then
+      elif [ "$PANEL_CLICK" != close ] && [ -n "$PANEL_GW_URL" ] && (( PANEL_GW_ROW > 0 && r == PANEL_GW_ROW && c >= PANEL_GW_COL && c < PANEL_GW_COL + ${#PANEL_GW_LABEL} )); then
         PANEL_CLICK=gateway
       fi
     fi
@@ -4086,6 +4103,7 @@ while true; do
     [ -n "$trailing" ] && printf '%s\n' "$trailing" | clear_eol
     printf '\033[0J'
     draw_close_button "$cols"
+    panel_locate_view "$guaranteed"
     last_frame="$frame"
   fi
 
@@ -5339,7 +5357,7 @@ CLAUDE_PANEL_REMOTE_CONTROL|false|start interactive claude sessions with --remot
 CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a panel runs
 CLAUDE_PANEL_SESSION_TITLE|true|name new sessions after their folder
 CLAUDE_PANEL_LOADING_OVERLAY|true|float a "wait to type" notice while the panel split opens
-CLAUDE_PANEL_CLOSE_BUTTON|true|an [X] in the panel's top-right corner closes it (and its split), and [Gateway] opens Claude Burst's dashboard when Burst is installed; while on, Shift+drag selects text in the panel
+CLAUDE_PANEL_CLOSE_BUTTON|true|an [X] in the panel's top-right corner closes it (and its split), and [View] on the Proxy State line opens Claude Burst's dashboard when Burst is installed; while on, Shift+drag selects text in the panel
 CLAUDE_PANEL_RESTART_TOKENS|400000|context size that shows a red restart warning (0 = off)
 CLAUDE_PANEL_COST_ALERTS|true|warn in the chat when a session or the day costs far more than usual
 CLAUDE_PANEL_ALERT_MIN_USD|5.00|a session below this many dollars never raises a cost alert
