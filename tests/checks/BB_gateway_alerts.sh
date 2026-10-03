@@ -126,7 +126,7 @@ STUB
   BB_FRONT=4242
   write_notices \
     "{\"id\":\"12\",\"kind\":\"test\",\"severity\":\"info\",\"title\":\"Held\",\"ts\":$now}" \
-    "{\"id\":\"13\",\"kind\":\"test\",\"severity\":\"info\",\"title\":\"Taken elsewhere\",\"ts\":$now}"
+    "{\"id\":\"13\",\"kind\":\"other\",\"severity\":\"info\",\"title\":\"Taken elsewhere\",\"ts\":$now}"
   gateway_alerts_tick me; bb_settle
   assert_eq "another app in front: nothing shown yet" "" "$(cat "$log")"
   mkdir -p "$HOME/.config/claude-panel/alerts-claimed/13"
@@ -144,6 +144,22 @@ STUB
   gateway_alerts_tick me; bb_settle
   ALERT_HELD_FOR=600
   assert_eq "held past its time: dropped" "" "$(cat "$log")"
+
+  # Flapping while held: a newer event of a kind replaces the held one,
+  # and an ok resolving events nobody saw cancels them and itself.
+  : > "$log"
+  BB_FRONT=4242
+  write_notices \
+    "{\"id\":\"20\",\"kind\":\"failover\",\"severity\":\"warn\",\"title\":\"Failed over\",\"ts\":$now}" \
+    "{\"id\":\"21\",\"kind\":\"failover\",\"severity\":\"ok\",\"title\":\"Back\",\"resolves\":\"failover\",\"ts\":$now}" \
+    "{\"id\":\"22\",\"kind\":\"failover\",\"severity\":\"warn\",\"title\":\"Failed over again\",\"ts\":$now}" \
+    "{\"id\":\"23\",\"kind\":\"network\",\"severity\":\"warn\",\"title\":\"Net 1\",\"ts\":$now}" \
+    "{\"id\":\"24\",\"kind\":\"network\",\"severity\":\"warn\",\"title\":\"Net 2\",\"ts\":$now}"
+  gateway_alerts_tick me; bb_settle
+  BB_FRONT=0
+  for n in 1 2 3 4; do gateway_alerts_tick me; bb_settle; done
+  assert_eq "held flapping: only the latest of each kind shows" \
+    "Failed over again|Net 2" "$(cut -d'|' -f2 "$log" | paste -sd'|' -)"
 
   : > "$log"
   write_notices \
