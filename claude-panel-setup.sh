@@ -3963,6 +3963,22 @@ alert_held_tick() { # $1 = now
   done
   ALERT_HELD=(${keep[@]+"${keep[@]}"})
 }
+# Drops the held events of a kind no panel has shown yet; true when it
+# dropped any.
+alert_held_drop_kind() { # $1 = kind
+  (( ${#ALERT_HELD[@]} )) || return 1
+  local item id at sev kind rest keep=() dropped=1
+  for item in "${ALERT_HELD[@]}"; do
+    IFS=$'\x1f' read -r id at sev kind rest <<< "$item"
+    if [ "$kind" = "$1" ] && [ ! -d "$ALERT_CLAIMS/$id" ]; then
+      dropped=0
+      continue
+    fi
+    keep+=("$item")
+  done
+  ALERT_HELD=(${keep[@]+"${keep[@]}"})
+  return $dropped
+}
 gateway_alerts_tick() { # $1 = this panel's session id
   local own="${1:-}"
   panel_option_off CLAUDE_PANEL_ALERTS && return 0
@@ -3982,6 +3998,15 @@ gateway_alerts_tick() { # $1 = this panel's session id
       continue
     fi
     [ "$kind" = handover ] && [ "$session" = "$own" ] && continue
+    # A newer event of a kind replaces a held one of that kind, and an ok
+    # that resolves held events nobody saw cancels them and itself: on
+    # 4 Oct 2026 a phone out of data made five failover and back pairs in
+    # four minutes, all held, then shown ten minutes later as a flapping
+    # failover that was long over.
+    alert_held_drop_kind "$kind" && [ -n "$resolves" ] && [ "$resolves" = "$kind" ] && continue
+    if [ -n "$resolves" ] && [ "$resolves" != "$kind" ]; then
+      alert_held_drop_kind "$resolves" && continue
+    fi
     ALERT_HELD+=("$(printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' "$id" "$now" "$sev" "$kind" "$title" "$detail" "$resolves")")
   done < <(alert_new_events)
   alert_health_tick
