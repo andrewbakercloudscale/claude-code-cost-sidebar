@@ -3798,16 +3798,21 @@ compaction_overlay_tick() { # $1 = session id
 # the panel started (2 minutes of grace) are not replayed. The gateway
 # cannot report its own death, so the panel checks the dashboard answers
 # every 10s and says so after 3 misses in a row.
-# Every panel reads the same file and floats over the same Ghostty, so each
-# event is claimed (mkdir, atomic) and only the panel that claims it shows
-# it. An event about one session goes to that session's panel, except a
-# handover, which is news for the others.
+# Every panel reads the same file, so each event is claimed (mkdir, atomic)
+# and only the panel that claims it shows it. An event about one session
+# goes to that session's panel, except a handover, which is news for the
+# others. Any other event is held until this panel's Ghostty is the app in
+# front: each window can be its own Ghostty process, and a notice only shows
+# over its own, so the first panel to claim one used to show it later over
+# whichever window it lived in, often a session nobody was looking at.
 # CLAUDE_PANEL_ALERTS=false turns all of it off.
 ALERT_FILE="$HOME/.config/claude-burst/notices.json"
 ALERT_MTIME=""
 ALERT_LAST_ID=""
 ALERT_SINCE=""
 ALERT_QUEUE=()
+ALERT_HELD=()          # events for whichever panel is in front: id, at, then the alert_take fields
+ALERT_HELD_FOR=600     # seconds an event waits for a Ghostty to come to the front
 ALERT_PID=""
 ALERT_IS_STICKY=0
 ALERT_STICKY=""        # severity, title, detail, kind (\x1f separated)
@@ -3905,6 +3910,38 @@ alert_health_tick() {
     fi
   fi
 }
+# The frontmost app's pid. A function so the tests can say who is in front.
+panel_front_pid() {
+  "$HOME/.local/bin/claude-panel-overlay" --front-pid 2>/dev/null
+}
+# Ends this panel's sticky error when $1 names its kind.
+alert_resolve() { # $1 = kind an ok resolves
+  [ -n "$1" ] && [ -n "$ALERT_STICKY" ] || return 0
+  [ "$1" = "$(printf '%s' "$ALERT_STICKY" | cut -d $'\x1f' -f4)" ] || return 0
+  ALERT_STICKY=""
+  if (( ALERT_IS_STICKY )) && [ -n "$ALERT_PID" ]; then
+    kill "$ALERT_PID" 2>/dev/null
+    ALERT_PID=""
+  fi
+}
+# Held events: shown here only while this panel's Ghostty is in front, and
+# only if no other panel took them first; dropped after ALERT_HELD_FOR.
+alert_held_tick() { # $1 = now
+  (( ${#ALERT_HELD[@]} )) || return 0
+  local front item id at sev kind title detail resolves keep=()
+  front=$(panel_front_pid)
+  for item in "${ALERT_HELD[@]}"; do
+    IFS=$'\x1f' read -r id at sev kind title detail resolves <<< "$item"
+    [ -d "$ALERT_CLAIMS/$id" ] && continue
+    (( $1 - at < ALERT_HELD_FOR )) || continue
+    if [ -n "$front" ] && [ "$front" = "$(panel_ghostty_pid)" ]; then
+      alert_claim "$id" && alert_take "$sev" "$kind" "$title" "$detail" "$resolves"
+      continue
+    fi
+    keep+=("$item")
+  done
+  ALERT_HELD=(${keep[@]+"${keep[@]}"})
+}
 gateway_alerts_tick() { # $1 = this panel's session id
   local own="${1:-}"
   panel_option_off CLAUDE_PANEL_ALERTS && return 0
@@ -3915,16 +3952,18 @@ gateway_alerts_tick() { # $1 = this panel's session id
   while IFS=$'\x1f' read -r sev kind title detail resolves id session; do
     [ -n "$id" ] || continue
     ALERT_LAST_ID="$id"
-    if [ -n "$session" ]; then
-      if [ "$kind" = handover ]; then
-        [ "$session" = "$own" ] && continue
-      else
-        [ "$session" = "$own" ] || continue
-      fi
+    # An ok ends this panel's own sticky error whoever shows the ok.
+    alert_resolve "$resolves"
+    if [ -n "$session" ] && [ "$kind" != handover ]; then
+      [ "$session" = "$own" ] || continue
+      alert_claim "$id" || continue
+      alert_take "$sev" "$kind" "$title" "$detail" "$resolves"
+      continue
     fi
-    alert_claim "$id" || continue
-    alert_take "$sev" "$kind" "$title" "$detail" "$resolves"
+    [ "$kind" = handover ] && [ "$session" = "$own" ] && continue
+    ALERT_HELD+=("$(printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' "$id" "$now" "$sev" "$kind" "$title" "$detail" "$resolves")")
   done < <(alert_new_events)
+  alert_held_tick "$now"
   alert_health_tick
 
   if alert_alive; then
@@ -4591,6 +4630,13 @@ static BOOL front_window_of(pid_t pid, CGRect *out) {
 
 int main(int argc, char **argv) {
     @autoreleasepool {
+        /* --front-pid: print the frontmost app's pid and exit. The panels
+         * ask it which Ghostty is in front, since each window can be its own
+         * Ghostty process; lsappinfo took over two seconds. */
+        if (argc > 1 && strcmp(argv[1], "--front-pid") == 0) {
+            printf("%d\n", [NSWorkspace sharedWorkspace].frontmostApplication.processIdentifier);
+            return 0;
+        }
         pid_t target = argc > 1 ? (pid_t)atoi(argv[1]) : 0;
         double timeout = argc > 2 ? atof(argv[2]) : 10;
         if (timeout <= 0 || timeout > 900) timeout = 10;
