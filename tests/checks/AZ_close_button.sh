@@ -31,17 +31,23 @@ check_AZ_close_button() {
   PANEL_INBUF+=$'9;1M'
   assert_eq "and completes on the next read" 0 "$(panel_clicked_close 40; echo $?)"
 
-  # [Gateway] sits left of the [X] when Claude Burst is here: 40 columns
-  # puts it at 28-36.
+  # [View] ends the Proxy State line; the frame below puts it on row 3
+  # at columns 35-40 (the emoji is two columns wide).
   _gw() { PANEL_INBUF=$1; panel_read_clicks 40; echo "${PANEL_CLICK:-none}"; }
+  panel_locate_view $'Claude Code Usage: 07:37:20\n  x\n  \U1F500 Proxy State: \e[32mPRIMARY (oauth)\e[0m \e[1m[View]\e[0m\n  License: Max'
+  assert_eq "View row found" 3 "$PANEL_GW_ROW"
+  assert_eq "View column found" 35 "$PANEL_GW_COL"
   PANEL_GW_URL=""
-  assert_eq "no Burst, no gateway button" none "$(_gw $'\e[<0;30;1M')"
+  assert_eq "no Burst, no View button" none "$(_gw $'\e[<0;36;3M')"
   PANEL_GW_URL="http://127.0.0.1:7788/"
-  assert_eq "gateway button, first column" gateway "$(_gw $'\e[<0;28;1M')"
-  assert_eq "gateway button, last column" gateway "$(_gw $'\e[<0;36;1M')"
-  assert_eq "the gap between the buttons" none "$(_gw $'\e[<0;37;1M')"
-  assert_eq "left of the gateway button" none "$(_gw $'\e[<0;27;1M')"
-  assert_eq "close wins over gateway in one read" close "$(_gw $'\e[<0;39;1M\e[<0;30;1M')"
+  assert_eq "View, first column" gateway "$(_gw $'\e[<0;35;3M')"
+  assert_eq "View, last column" gateway "$(_gw $'\e[<0;40;3M')"
+  assert_eq "right of View" none "$(_gw $'\e[<0;41;3M')"
+  assert_eq "left of View" none "$(_gw $'\e[<0;34;3M')"
+  assert_eq "View's columns on another row" none "$(_gw $'\e[<0;36;2M')"
+  assert_eq "close wins over View in one read" close "$(_gw $'\e[<0;39;1M\e[<0;36;3M')"
+  panel_locate_view $'Claude Code Usage\n  \U1F500 Proxy State: PRIMARY'
+  assert_eq "no [View] on the line, no button" 0 "$PANEL_GW_ROW"
 
   local stub="$SBX/bin" cfg="$HOME/.config/claude-burst/config.json"
   mkdir -p "$stub" "$(dirname "$cfg")"
