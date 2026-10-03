@@ -5775,7 +5775,11 @@ claude() {
     args=(--session-id "$CLAUDE_PANEL_PIN_SID")
     unset CLAUDE_PANEL_PIN_SID
   fi
-  _ccusage_want_rc "$@" && args+=(--remote-control "${PWD:t}")
+  if _ccusage_want_rc "$@"; then
+    local rc_name
+    rc_name=$("$HOME/.local/bin/claude-panel-rc-name" 2>/dev/null) || rc_name="${PWD:t}"
+    args+=(--remote-control "${rc_name:-${PWD:t}}")
+  fi
   if (( $+functions[_ccusage_claude_orig] )); then
     _ccusage_claude_orig "${args[@]}" "$@"
   else
@@ -5958,7 +5962,7 @@ if [ -f "$GCL" ] && grep -qF "$GCL_PIN_LINE" "$GCL" && ! grep -qF "$GCL_RC_MARKE
 PANEL_RC_ARGS=()
 rc_opt="$(grep -E '^CLAUDE_PANEL_REMOTE_CONTROL=' "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)"
 rc_opt="$(printf '%s' "${rc_opt#*=}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]')"
-case "$rc_opt" in true|1|yes|on) PANEL_RC_ARGS=(--remote-control "$(basename "$PWD")") ;; esac
+case "$rc_opt" in true|1|yes|on) PANEL_RC_ARGS=(--remote-control "$("$HOME/.local/bin/claude-panel-rc-name" 2>/dev/null || basename "$PWD")") ;; esac
 GCL_RC_EOF
   # Above the comment that sits on the launch line, if there is one, so the
   # comment stays attached to the line it describes.
@@ -5983,6 +5987,14 @@ fi
 if [ -f "$GCL" ] && grep -qF 'PANEL_RC_ARGS=(--remote-control) ;;' "$GCL"; then
   tmp=$(mktemp)
   sed 's|PANEL_RC_ARGS=(--remote-control) ;;|PANEL_RC_ARGS=(--remote-control "$(basename "$PWD")") ;;|' "$GCL" > "$tmp"
+  mv "$tmp" "$GCL"
+  chmod +x "$GCL"
+fi
+# Launchers that name the session after its folder only: two sessions in
+# one repository then share a name on the phone. Use claude-panel-rc-name.
+if [ -f "$GCL" ] && grep -qF 'PANEL_RC_ARGS=(--remote-control "$(basename "$PWD")") ;;' "$GCL"; then
+  tmp=$(mktemp)
+  sed 's#PANEL_RC_ARGS=(--remote-control "$(basename "$PWD")") ;;#PANEL_RC_ARGS=(--remote-control "$("$HOME/.local/bin/claude-panel-rc-name" 2>/dev/null || basename "$PWD")") ;;#' "$GCL" > "$tmp"
   mv "$tmp" "$GCL"
   chmod +x "$GCL"
 fi
@@ -6048,6 +6060,28 @@ if [ -f "$GHOSTTY_CONF" ]; then
     printf '    %s\n' "$rebound"
   fi
 fi
+
+echo "Installing claude-panel-rc-name ..."
+# The Remote Control session name: the folder, plus " 2", " 3" ... when a
+# running claude already uses that name, so two sessions in one repository
+# are told apart on the phone. Shared by the ~/.zshrc wrapper and the Finder
+# launcher; both fall back to the bare folder name without it.
+cat > "$BIN_DIR/claude-panel-rc-name" <<'RCNAME_EOF'
+#!/bin/bash
+base="$(basename "$PWD")"
+used=$(ps -axo args= 2>/dev/null | awk '
+  /(^| |\/)claude( |$)/ && / --remote-control / {
+    s = $0; sub(/.* --remote-control /, "", s); sub(/ --?[a-z].*$/, "", s); sub(/  .*$/, "", s); sub(/ +$/, "", s); print s
+  }')
+name="$base"
+n=1
+while printf '%s\n' "$used" | grep -qxF -- "$name"; do
+  n=$((n + 1))
+  name="$base $n"
+done
+printf '%s\n' "$name"
+RCNAME_EOF
+chmod +x "$BIN_DIR/claude-panel-rc-name"
 
 echo "Installing claude-day-projection.sh ..."
 cat > "$BIN_DIR/claude-day-projection.sh" <<'PROJ_EOF'
