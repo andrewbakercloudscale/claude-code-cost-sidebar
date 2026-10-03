@@ -60,6 +60,13 @@ check_AZ_close_button() {
   printf '{"admin_listen":"off"}\n' > "$cfg"
   assert_eq "a dashboard turned off has no button" "" "$(PATH="$stub:$PATH" panel_gateway_url)"
 
+  # Focus in (ESC [ I) asks for a redraw and never reads as a click; focus
+  # out does neither; a click beside them still counts.
+  _focus() { PANEL_REDRAW=0; PANEL_INBUF=$1; panel_read_clicks 40; echo "$PANEL_REDRAW ${PANEL_CLICK:-none} ${#PANEL_INBUF}"; }
+  assert_eq "focus in redraws" "1 none 0" "$(_focus $'\e[I')"
+  assert_eq "focus out does not" "0 none 0" "$(_focus $'\e[O')"
+  assert_eq "focus in beside a close click" "1 close 0" "$(_focus $'\e[I\e[<0;40;1M\e[O')"
+
   local f="$HOME/.config/claude-panel/options"
   mkdir -p "$(dirname "$f")"
   rm -f "$f"
