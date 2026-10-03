@@ -19,6 +19,9 @@ sleep 0.2
 STUB
   chmod +x "$HOME/.local/bin/claude-panel-overlay"
   PANEL_GHOSTTY_PID=0
+  # Which app is in front: this panel's Ghostty (0) unless a step says not.
+  BB_FRONT=0
+  panel_front_pid() { echo "$BB_FRONT"; }
   # No dashboard to check here: the health check is driven by hand below.
   panel_gateway_url() { :; }
   : > "$log"
@@ -110,6 +113,32 @@ STUB
     "Context mine|Handover other" "$(cut -d'|' -f2 "$log" | paste -sd'|' -)"
   assert_eq "and this panel claimed what it showed" yes \
     "$([ -d "$HOME/.config/claude-panel/alerts-claimed/8" ] && echo yes || echo no)"
+
+  # Each window can be its own Ghostty: an event for no one in particular
+  # waits for this panel's Ghostty to be in front, is left to another panel
+  # that showed it first, and is dropped once it is old.
+  : > "$log"
+  BB_FRONT=4242
+  write_notices \
+    "{\"id\":\"12\",\"kind\":\"test\",\"severity\":\"info\",\"title\":\"Held\",\"ts\":$now}" \
+    "{\"id\":\"13\",\"kind\":\"test\",\"severity\":\"info\",\"title\":\"Taken elsewhere\",\"ts\":$now}"
+  gateway_alerts_tick me; bb_settle
+  assert_eq "another app in front: nothing shown yet" "" "$(cat "$log")"
+  mkdir -p "$HOME/.config/claude-panel/alerts-claimed/13"
+  BB_FRONT=0
+  for n in 1 2 3; do gateway_alerts_tick me; bb_settle; done
+  assert_eq "in front: the held one shows, not the one another panel showed" \
+    "Held" "$(cut -d'|' -f2 "$log" | paste -sd'|' -)"
+  : > "$log"
+  BB_FRONT=4242
+  write_notices \
+    "{\"id\":\"14\",\"kind\":\"test\",\"severity\":\"info\",\"title\":\"Stale\",\"ts\":$now}"
+  gateway_alerts_tick me; bb_settle
+  ALERT_HELD_FOR=0
+  BB_FRONT=0
+  gateway_alerts_tick me; bb_settle
+  ALERT_HELD_FOR=600
+  assert_eq "held past its time: dropped" "" "$(cat "$log")"
 
   : > "$log"
   write_notices \
