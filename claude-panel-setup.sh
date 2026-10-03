@@ -403,6 +403,10 @@ C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
 # \033[<digits and semicolons>m, which covers this form too, so width
 # accounting is unaffected.
 C_ELECTRIC=$'\033[38;2;125;249;255m'
+# The clickable buttons are filled chips, so they read as buttons rather
+# than text: [View] black on the electric blue, [X] white on red.
+C_BTN_VIEW=$'\033[1;38;2;0;0;0;48;2;125;249;255m'
+C_BTN_CLOSE=$'\033[1;97;41m'
 
 fmt_num() {
   awk -v n="$1" 'BEGIN{
@@ -3916,7 +3920,7 @@ panel_gateway_url() {
 panel_view_tag() {
   (( PANEL_CLOSE )) || return 0
   [ -n "$(panel_gateway_url)" ] || return 0
-  printf ' %s%s%s' "$C_BOLD$C_CYAN" "$PANEL_GW_LABEL" "$C_RESET"
+  printf ' %s%s%s' "$C_BTN_VIEW" "$PANEL_GW_LABEL" "$C_RESET"
 }
 # Where [View] landed in a frame drawn from row 1: sets PANEL_GW_ROW and
 # PANEL_GW_COL, 0 when it is not there. The line's one emoji is two
@@ -3937,7 +3941,7 @@ panel_locate_view() { # $1 = the frame text
 draw_close_button() { # $1 = pane columns
   (( PANEL_CLOSE )) || return 0
   PANEL_GW_URL=$(panel_gateway_url)
-  printf '\033[1;%dH%s[X]%s' "$(panel_close_col "$1")" "$C_BOLD" "$C_RESET"
+  printf '\033[1;%dH%s[X]%s' "$(panel_close_col "$1")" "$C_BTN_CLOSE" "$C_RESET"
 }
 # Which button, if any, a left-button press in PANEL_INBUF landed on:
 # sets PANEL_CLICK to close, gateway or nothing. Consumes the buffer
