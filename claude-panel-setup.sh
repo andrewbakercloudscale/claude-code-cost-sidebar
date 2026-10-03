@@ -5727,7 +5727,7 @@ claude() {
     args=(--session-id "$CLAUDE_PANEL_PIN_SID")
     unset CLAUDE_PANEL_PIN_SID
   fi
-  _ccusage_want_rc "$@" && args+=(--remote-control)
+  _ccusage_want_rc "$@" && args+=(--remote-control "${PWD:t}")
   if (( $+functions[_ccusage_claude_orig] )); then
     _ccusage_claude_orig "${args[@]}" "$@"
   else
@@ -5910,7 +5910,7 @@ if [ -f "$GCL" ] && grep -qF "$GCL_PIN_LINE" "$GCL" && ! grep -qF "$GCL_RC_MARKE
 PANEL_RC_ARGS=()
 rc_opt="$(grep -E '^CLAUDE_PANEL_REMOTE_CONTROL=' "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)"
 rc_opt="$(printf '%s' "${rc_opt#*=}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]')"
-case "$rc_opt" in true|1|yes|on) PANEL_RC_ARGS=(--remote-control) ;; esac
+case "$rc_opt" in true|1|yes|on) PANEL_RC_ARGS=(--remote-control "$(basename "$PWD")") ;; esac
 GCL_RC_EOF
   # Above the comment that sits on the launch line, if there is one, so the
   # comment stays attached to the line it describes.
@@ -5926,6 +5926,15 @@ GCL_RC_EOF
     { print }
   ' "$GCL" > "$tmp"
   rm -f "$rc_snip"
+  mv "$tmp" "$GCL"
+  chmod +x "$GCL"
+fi
+# Launchers patched before sessions were named: a bare --remote-control lets
+# Claude Code invent "<hostname>-<adjective>-<noun>", which says nothing on
+# the phone. Name the session after its folder instead.
+if [ -f "$GCL" ] && grep -qF 'PANEL_RC_ARGS=(--remote-control) ;;' "$GCL"; then
+  tmp=$(mktemp)
+  sed 's|PANEL_RC_ARGS=(--remote-control) ;;|PANEL_RC_ARGS=(--remote-control "$(basename "$PWD")") ;;|' "$GCL" > "$tmp"
   mv "$tmp" "$GCL"
   chmod +x "$GCL"
 fi
