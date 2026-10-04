@@ -1892,6 +1892,13 @@ def load_secondary_events():
                     continue
                 if e.get("slot") != "secondary":
                     continue
+                # Only a hop that answered served a turn. A failed or
+                # cancelled one (499, no tokens) used to match whatever
+                # primary turn ended within 3s and relabel it "GLM ... ?"
+                # (2026-10-04 17:16, an Opus turn shown as GLM-5.3).
+                st = e.get("http_status") or 0
+                if st >= 400 or e.get("output_tokens") is None:
+                    continue
                 ts = parse_iso(e.get("time"))
                 if ts is None or not e.get("model"):
                     continue
