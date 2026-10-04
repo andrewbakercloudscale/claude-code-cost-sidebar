@@ -3941,7 +3941,7 @@ alert_health_tick() {
     if (( ALERT_HEALTH_MISSES == 3 )); then
       ALERT_GW_DOWN=1
       rmdir "$ALERT_CLAIMS/panel-gateway-back" 2>/dev/null
-      ALERT_HELD+=("$(printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' panel-gateway-down "$now" error panel-gateway "Burst gateway not responding" "Its dashboard has not answered for 30 seconds. Requests through Burst fail until it is back." "")")
+      ALERT_HELD+=("$(printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' panel-gateway-down "$now" error panel-gateway "Burst gateway not responding" "Its dashboard has not answered for 30 seconds. Click [View] for the support console: what happened and a Restart button." "")")
     fi
   fi
 }
@@ -4194,6 +4194,19 @@ panel_gateway_url() {
   case "$a" in ''|off|null) return 0 ;; esac
   printf 'http://%s/' "$a"
 }
+# Where [View] goes: the dashboard when it answers, else Burst's support
+# console (its own process, up when the gateway is not: audit, log,
+# Restart and Repair). console_listen in config.json, 127.0.0.1:7789
+# unless changed.
+panel_view_target() {
+  local cfg="$HOME/.config/claude-burst/config.json" c
+  if curl -s -o /dev/null -m 1 "$PANEL_GW_URL" 2>/dev/null; then
+    printf '%s' "$PANEL_GW_URL"
+    return
+  fi
+  c=$(jq -r '.console_listen // "127.0.0.1:7789"' "$cfg" 2>/dev/null)
+  case "$c" in ''|off|null) printf '%s' "$PANEL_GW_URL" ;; *) printf 'http://%s/' "$c" ;; esac
+}
 # " [View]" for the end of the Proxy State line, when there is a dashboard.
 panel_view_tag() {
   (( PANEL_CLOSE )) || return 0
@@ -4296,7 +4309,7 @@ panel_poll_input() { # $1 = seconds
   panel_read_clicks "${COLS:-80}"
   case "$PANEL_CLICK" in
     close) panel_close ;;
-    gateway) open "$PANEL_GW_URL" >/dev/null 2>&1 & ;;
+    gateway) open "$(panel_view_target)" >/dev/null 2>&1 & ;;
   esac
   return 0
 }
