@@ -403,6 +403,9 @@ C_BLUE=$'\033[34m'; C_MAGENTA=$'\033[35m'
 # \033[<digits and semicolons>m, which covers this form too, so width
 # accounting is unaffected.
 C_ELECTRIC=$'\033[38;2;125;249;255m'
+# A true red for the one state that means the panel's numbers are not being
+# acted on (Proxy State: NOT IN USE): the theme's basic red is a muted pink.
+C_ALARM=$'\033[1;38;2;255;60;60m'
 # The clickable buttons are filled chips, so they read as buttons rather
 # than text: [View] black on the electric blue, [X] white on bright red.
 # Both 24-bit: the theme's basic red (41) renders as a muted pink, and its
@@ -526,8 +529,12 @@ proxy_state_line() {
   # Which slot the proxy would choose only matters if it is in the path at
   # all, so this outranks PRIMARY/SECONDARY rather than sitting beside it.
   if ! why=$(proxy_in_path "$cfg"); then
-    printf '  🔀 Proxy State: %sNOT IN USE%s %s(%s)%s%s\n' \
-      "$C_RED" "$C_RESET" "$C_YELLOW" "$why" "$C_RESET" "$(panel_view_tag)"
+    # The whole line in a true red: Burst is out of the path, so nothing it
+    # promises (failover, compaction, masking) is happening. 24-bit because
+    # the theme's basic red renders as a muted pink, and the reason was in
+    # yellow inside brackets, which read as a footnote rather than the alarm.
+    printf '  🔀 %sProxy State: NOT IN USE, %s%s%s\n' \
+      "$C_ALARM" "$why" "$C_RESET" "$(panel_view_tag)"
     return
   fi
 
