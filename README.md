@@ -2,6 +2,16 @@
 
 **A live cost and usage panel for Claude Code.**
 
+**Install.** Paste this into a terminal on a Mac:
+
+```bash
+D="$HOME/claude-code-cost-sidebar"
+if [ -d "$D/.git" ]; then git -C "$D" pull --ff-only; else git clone https://github.com/andrewbakercloudscale/claude-code-cost-sidebar.git "$D"; fi \
+  && bash "$D/claude-panel-setup.sh"
+```
+
+Then start a new Claude Code session and the sidebar opens by itself. It needs Claude Code 2.1.287 or later, `git`, `jq` and Node.js ([Requirements](#requirements)). Keep the `~/claude-code-cost-sidebar` folder: the sidebar is installed from it. Pasting the same lines again updates it, and [Uninstall](#uninstall) removes it.
+
 Live, always-visible cost and token tracking for **[Claude Code](https://claude.com/claude-code)**, as a **mod**: a sidebar Claude Code itself draws beside the transcript, so you can watch what a coding agent is actually costing you, turn by turn, instead of finding out at the end of the month.
 
 <table>
@@ -334,6 +344,8 @@ The installer lays down a **panel script** (the thing that renders live stats in
 - Accessibility permission granted to Ghostty (macOS will prompt the first time the launcher tries to drive it via System Events), not needed for the tmux path
 
 ## Install
+
+The lines at the [top of this page](#claude-code-cost-sidebar) clone the repo and run setup in one paste. From a checkout you already have:
 
 ```bash
 bash claude-panel-setup.sh
