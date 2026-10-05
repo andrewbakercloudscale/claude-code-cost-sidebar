@@ -142,6 +142,14 @@ test('a session with no reply yet says so instead of drawing zeros', async ($, o
   expect(await ui.find({ type: 'Text', text: /^model unknown/ })).toBeUndefined()
 })
 
+test('before the first reply, "Unknown" and $0.00 are not drawn as readings', async ($, on) => {
+  stubs(on, [doc({ session: { ...doc().session, model: 'Unknown', cost: 0, rate: 0, ctx: null }, turns: { turns: [], markers: [], avg_delta: 0 } })])
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: 'No reply yet: the figures start with the first one.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Unknown$/ })).toBeUndefined()
+})
+
 test('a feed that has stopped says so', async ($, on) => {
   stubs(on, [doc({ at: NOW - 600 })])
   await start($)

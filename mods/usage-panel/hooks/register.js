@@ -167,7 +167,10 @@ function heading(T, title, note) {
 function sessionSection(Box, T, d, W) {
   const s = d.session || {}
   const out = [heading(T, 'This session', d.sid ? '*' + d.sid.slice(-5) : '')]
-  if (!s.model && s.cost == null && !(s.ctx > 0)) {
+  // Before the first reply the panel knows no model ("Unknown") and prices
+  // nothing ($0): say so rather than draw that as a reading.
+  const turnsSoFar = (d.turns && d.turns.turns) || []
+  if (turnsSoFar.length === 0 && !(s.ctx > 0)) {
     out.push(T('No reply yet: the figures start with the first one.', { dimColor: true, wrap: 'wrap' }))
     return out
   }
