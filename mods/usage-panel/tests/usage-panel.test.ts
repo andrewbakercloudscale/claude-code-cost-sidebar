@@ -276,7 +276,10 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(at('Free 230k')).toBeGreaterThan(at('System prompt 6k'))
   // A part with nothing in it takes no room in the legend.
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^Claude Code holds 620k/, color: 'yellow' })).toBeDefined()
+  // What Claude Code holds beyond that is the tool working: one line, never a warning.
+  const holds = await ui.find({ type: 'Text', text: 'Claude Code holds 620k, Burst sends 70k' })
+  expect(holds.props.dimColor).toBe(true)
+  expect(holds.props.color).toBeUndefined()
   // The bar is in the session card; a standing problem is with Proxy State.
   expect(drawn.indexOf('70k/300k 23%')).toBeLessThan(drawn.indexOf('"Turns"'))
   expect(await ui.find({ type: 'Text', text: 'Keep-awake turned off', color: 'yellow' })).toBeDefined()

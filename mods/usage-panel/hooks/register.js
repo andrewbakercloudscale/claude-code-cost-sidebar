@@ -443,10 +443,11 @@ function sentBar(Box, T, s, W) {
         T([T('■ ', { color: c }), T(text, { dimColor: true })])),
     }))
   }
-  // Claude Code's own history, which Burst's compaction never shrinks: what
-  // goes, uncached, if Burst drops out. Said only once the two have parted.
+  // Claude Code's own history, which Burst's compaction never shrinks. The
+  // gap is the tool working, so it is one dim line and never a warning. Said
+  // only once the two have parted.
   if (s.raw > s.context * 1.1) {
-    out.push(T('Claude Code holds ' + k(s.raw) + ': sent whole if Burst drops out', { color: s.raw >= 800000 ? 'red' : s.raw >= 500000 ? 'yellow' : undefined, dimColor: s.raw < 500000, wrap: 'wrap' }))
+    out.push(T('Claude Code holds ' + k(s.raw) + ', Burst sends ' + k(s.context), { dimColor: true, wrap: 'wrap' }))
   }
   return out
 }
