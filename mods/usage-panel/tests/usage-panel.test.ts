@@ -294,7 +294,7 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   // is not cut into bands.
   expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["▕"]')
   expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["◀"]')
-  expect(drawn).toContain('"Burst compacts at 300k"')
+  expect(drawn).toContain('"Auto Compact at 300k"')
   expect(drawn).not.toContain('warns at')
   // A part with nothing in it takes no room in the legend.
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
@@ -391,7 +391,7 @@ test('close to the limit, the session says what Burst will do, not "warning"', a
   on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(mod({ session: { ...mod().session, context: 287_000, state: 'warning' } })) } }))
   await start($)
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Burst compacts at 300k.', color: 'yellow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Auto Compact at 300k.', color: 'yellow' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /warning/ })).toBeUndefined()
 })
 
