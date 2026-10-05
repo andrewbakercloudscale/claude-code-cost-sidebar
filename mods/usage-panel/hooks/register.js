@@ -980,7 +980,7 @@ export function insights(d, now, limits = null, extra = null, burst = null) {
   if (sent) {
     if (grow > 500 && sent.compact_at > sent.context) {
       const left = Math.round((sent.compact_at - sent.context) / grow)
-      out.push({ scope: 'session', tier: 'cyan', icon: '↗', text: 'Grows ' + k(grow) + '/turn: Burst compacts in ~' + left + ' turns.' })
+      out.push({ scope: 'session', tier: 'cyan', icon: '↗', text: 'Grows ' + k(grow) + '/turn: Auto Compact in ~' + left + ' turns.' })
     }
   } else if (s.ctx > 0 && s.win > 0) {
     if (s.ctx >= s.win * CTX_RED) {
