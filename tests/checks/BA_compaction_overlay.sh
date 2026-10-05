@@ -56,6 +56,23 @@ STUB
   CLAUDE_PANEL_COMPACTION_OVERLAY=false compaction_overlay_tick aaa
   sleep 0.3
   assert_eq "option off, no notice" "" "$(cat "$log")"
+
+  # Claude Burst's mod toasting this session: the toast is the notice.
+  mkdir -p "$HOME/.config/claude-panel/mod-toasts"
+  touch "$HOME/.config/claude-panel/mod-toasts/aaa"
+  compaction_overlay_tick aaa
+  sleep 0.3
+  assert_eq "toasted in the session, no notice" "" "$(cat "$log")"
+  assert_eq "and nothing counted as shown" 0 "$COMPACT_SHOWN"
+  # Another session's mark, or one a gone mod left, changes nothing.
+  compaction_toasted bbb && r=yes || r=no
+  assert_eq "another session's mark is not this one's" no "$r"
+  touch -t "$(date -v-5M +%Y%m%d%H%M.%S)" "$HOME/.config/claude-panel/mod-toasts/aaa"
+  compaction_toasted aaa && r=yes || r=no
+  assert_eq "a mark 5 minutes old is ignored" no "$r"
+  compaction_overlay_tick aaa
+  ba_wait start
+  assert_contains "so the notice is shown" "start 600 Async Compaction In Progress" "$(cat "$log")"
   pkill -f "$HOME/.local/bin/claude-panel-overlay" 2>/dev/null
   return 0
 }

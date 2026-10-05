@@ -3815,6 +3815,8 @@ panel_option_off() { # $1 = KEY
 # transition, so the file is re-read only when its mtime moves. A pending
 # left behind by a gateway that died mid-summary is ignored once the file
 # is 15 minutes old. CLAUDE_PANEL_COMPACTION_OVERLAY=false turns it off.
+# Where Claude Burst's mod shows compaction as toasts in the session, the
+# toasts are the notice and this one is not shown.
 COMPACT_STATE_FILE="$HOME/.config/claude-burst/compaction-state.json"
 COMPACT_STATE_MTIME=""
 COMPACT_PENDING=0
@@ -3852,8 +3854,21 @@ panel_ghostty_pid() {
   fi
   printf '%s' "$PANEL_GHOSTTY_PID"
 }
+# True when Claude Burst's mod is toasting this session's compaction news
+# inside Claude Code: it touches a file named for the session once a minute
+# while it does. One three minutes old is a mod that has gone.
+MOD_TOASTS_DIR="$HOME/.config/claude-panel/mod-toasts"
+compaction_toasted() { # $1 = session id
+  local m
+  [ -n "$1" ] || return 1
+  m=$(stat -f %m "$MOD_TOASTS_DIR/$1" 2>/dev/null) || return 1
+  (( $(panel_now) - m <= 180 ))
+}
 compaction_overlay_tick() { # $1 = session id
   panel_option_off CLAUDE_PANEL_COMPACTION_OVERLAY && return 0
+  # The toast says it, in the session it is about: no notice over it too.
+  # One already up is still told when the summary finishes.
+  if (( ! COMPACT_SHOWN )) && compaction_toasted "$1"; then return 0; fi
   [ -x "$HOME/.local/bin/claude-panel-overlay" ] || return 0
   if compaction_pending "$1"; then
     # Once per compaction: one that outlives the notice's own 10 minutes
