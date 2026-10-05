@@ -1,5 +1,7 @@
 # ccusage-panel.sh: idle-cost optimization plan
 
+> **Note, 2026-10-05.** Since this was written the panel has become a Claude Code mod (a sidebar Claude Code draws, 2.1.287 and later) and the repo has been renamed `claude-code-cost-sidebar`. The panel script it measures still runs, headless, behind the sidebar. The rest is left as written: it is a record.
+
 > **Superseded 2026-09-05 by [`SLOW-TIER-PLAN.md`](SLOW-TIER-PLAN.md).**
 > The cost this document identified is real and reproduces (~49 CPU-min/day,
 > measured). The attribution is wrong: ~90% of it is the 120s slow tier, not
