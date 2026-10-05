@@ -453,7 +453,7 @@ test('the compaction limit is the one GetAutoCompactionThreshold gives for this 
   on('http.fetch', ($, e) => {
     urls.push(e.url)
     const body = e.url.includes('/api/GetAutoCompactionThreshold')
-      ? { folder: '/work', repo: 'work', threshold: 130_000, source: 'learned', intelligent: true, enabled: true, fixed: 300_000, floor: 100_000, target: 130_000, failures: { unpaid: 2, attempts: 28 } }
+      ? { folder: '/work', repo: 'work', threshold: 155_000, source: 'learned', intelligent: true, enabled: true, fixed: 300_000, floor: 100_000, target: 155_000, delay_minutes: 30, buffer_percent: 20, failures: { unpaid: 2, attempts: 28 } }
       : e.url.includes('/api/state') || e.url.includes('/api/responses') || e.url.includes('/api/usage') ? {}
         : mod({ session: { ...mod().session, context: 110_000, state: 'warning' } })
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
@@ -464,9 +464,12 @@ test('the compaction limit is the one GetAutoCompactionThreshold gives for this 
   const ui = await $.ui.mount(PANE)
   const drawn = JSON.stringify(await ui.drawn())
   // The gateway's answer for the folder, not the 300k the session's own figures carry.
-  expect(drawn).toContain('"Burst compacts at 130k (learned)"')
-  expect(drawn).not.toContain('Burst compacts at 300k')
-  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Burst compacts at 130k (learned).', color: 'yellow' })).toBeDefined()
+  // A learned limit reads as automatic, in its own colour, with where it
+  // comes from and how often a session may be compacted beside it.
+  expect(await ui.find({ type: 'Text', text: 'Auto compacts at 155k', color: 'cyan' })).toBeDefined()
+  expect(drawn).toContain('"learned for this repo, 20% buffer · max 1 per 30 min"')
+  expect(drawn).not.toContain('compacts at 300k')
+  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Auto compacts at 155k.', color: 'yellow' })).toBeDefined()
 })
 
 test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, and this session\'s share', async ($, on) => {

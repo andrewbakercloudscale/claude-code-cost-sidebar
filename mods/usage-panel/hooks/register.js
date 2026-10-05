@@ -328,7 +328,7 @@ async function readExtras($) {
   const at = cwd ? await get('/api/GetAutoCompactionThreshold?folder=' + encodeURIComponent(cwd)) : null
   if (at && typeof at.threshold === 'number' && typeof at.source === 'string') {
     const f = at.failures || {}
-    next.auto = { at: at.threshold, source: at.source, target: at.target || 0, lost: (f.unpaid || 0) + (f.summary_failed || 0) + (f.unused || 0), attempts: f.attempts || 0 }
+    next.auto = { at: at.threshold, source: at.source, target: at.target || 0, delay: at.delay_minutes || 0, buffer: at.buffer_percent || 0, lost: (f.unpaid || 0) + (f.summary_failed || 0) + (f.unused || 0), attempts: f.attempts || 0 }
   }
   const cfg = state && state.context && state.context.compaction
   if (cfg && cfg.warn_at_percent > 0) next.warn = cfg.warn_at_percent
@@ -527,7 +527,7 @@ function sessionSection(Box, T, d, W, burst, warnPct) {
   if (sent) {
     out.push(...sentBar(Box, T, sent, W, s.win || 0, warnPct))
     if (s.compacting) out.push(T('  ⟳ a summary is ready: the next prompt compacts', { color: 'cyan' }))
-    else if (sent.state === 'warning') out.push(T('! Close to the limit: Burst compacts at ' + k(compactAt(sent)) + learnedNote() + '.', { color: 'yellow', wrap: 'wrap' }))
+    else if (sent.state === 'warning') out.push(T('! Close to the limit: ' + limitLabel(sent) + '.', { color: 'yellow', wrap: 'wrap' }))
     // "compacted" is not said: it stays for the rest of the session and the
     // bar, the growth chart and the turn table already show it.
     else if (sent.state && sent.state !== 'ok' && sent.state !== 'compacted') out.push(T('⟳ ' + sent.state, { color: 'cyan', wrap: 'wrap' }))
@@ -620,9 +620,31 @@ function compactAt(s) {
   return s && s.compact_at > 0 ? s.compact_at : 0
 }
 
-// "learned" where the limit is the one Intelligent Compaction Mode chose.
-function learnedNote() {
-  return extra && extra.auto && extra.auto.source === 'learned' && extra.auto.at > 0 ? ' (learned)' : ''
+// Whether the limit is one Intelligent Compaction Mode learned for this
+// repository, not the fixed setting: by GetAutoCompactionThreshold, and
+// until it has answered, by the session's own figures.
+function learnedLimit(s) {
+  const a = extra && extra.auto
+  if (a) return a.source === 'learned' && a.at > 0
+  return !!(s && s.learned)
+}
+
+// "Auto compacts at 155k" for a learned limit, "Burst compacts at 300k" for
+// the fixed one.
+function limitLabel(s) {
+  return (learnedLimit(s) ? 'Auto compacts at ' : 'Burst compacts at ') + k(compactAt(s))
+}
+
+// What stands beside the limit: where it comes from when it is learned, and
+// how often a session may be compacted. '' when Burst has said neither.
+function limitNote(s) {
+  const a = (extra && extra.auto) || {}
+  const delay = a.delay || (s && s.delay_minutes) || 0
+  const buffer = a.buffer || (s && s.buffer_percent) || 0
+  const parts = []
+  if (learnedLimit(s)) parts.push('learned for this repo' + (buffer > 0 ? ', ' + buffer + '% buffer' : ''))
+  if (delay > 0) parts.push('max 1 per ' + delay + ' min')
+  return parts.join(' · ')
 }
 
 // The context Burst sends for this session as a stacked bar against the
@@ -691,7 +713,8 @@ function sentBar(Box, T, s, W, win, warnPct) {
   if (whole) {
     out.push(Box({
       flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [
-        T([T('▕◀ ', { color: 'red' }), T('Burst compacts at ' + k(limit) + learnedNote(), { dimColor: true })]),
+        T([T('▕◀ ', { color: 'red' }), T(limitLabel(s), learnedLimit(s) ? { color: 'cyan' } : { dimColor: true })]),
+        ...(limitNote(s) ? [T(limitNote(s), { dimColor: true })] : []),
       ],
     }))
   }
