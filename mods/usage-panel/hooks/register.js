@@ -23,9 +23,10 @@ const FEED_MS = 30000 // keeps the headless panel alive; it stops after 90s with
 const STALE_S = 180 // older than this, the feed has stopped
 const PIN_KEY = 'pinned'
 const LAYOUT_KEY = 'layout'
-// The sidebar's sections, most specific first. The footer (proxy state,
-// licence) always stays at the bottom.
-export const SECTIONS = ['session', 'turns', 'today', 'sessions', 'days', 'projects']
+// The sidebar's sections, most specific first. This Mac (proxy state,
+// licence, Burst's standing problems, its dashboard button) is second: a
+// problem there must not sit below a screen of charts.
+export const SECTIONS = ['session', 'mac', 'turns', 'today', 'sessions', 'days', 'projects']
 
 let sid = ''
 let home = ''
@@ -266,6 +267,10 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
   const IW = Math.max(26, W - 4)
   const draw = {
     session: () => [...sessionSection(Box, T, d, IW, burst), ...notes('session')],
+    mac: () => {
+      const foot = [...footer(Box, T, d), ...burstRows(Box, T, burst), ...extras]
+      return foot.length > 0 ? [heading(T, 'This Mac'), ...foot] : []
+    },
     turns: () => turnsTable(T, d),
     today: () => [...todaySection(Box, T, d, IW, now), ...notes('today')],
     sessions: () => topSection(Box, T, d, IW),
@@ -279,8 +284,6 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
     if (body.length > 0) rows.push(card(Box, id, body))
   }
   if (lay.hidden.length > 0) rows.push(T('Hidden: ' + lay.hidden.join(', ') + ' (/' + 'usage-panel show <name>)', { dimColor: true, wrap: 'wrap' }))
-  const foot = [...footer(Box, T, d), ...burstRows(Box, T, burst), ...extras]
-  if (foot.length > 0) rows.push(card(Box, 'setup', [heading(T, 'This Mac'), ...foot]))
   return rows
 }
 
@@ -620,7 +623,7 @@ export function insights(d, now) {
     const grow = (recent[recent.length - 1][1] - recent[0][1]) / (recent.length - 1)
     if (grow > 500 && s.restart_tokens > 0) {
       const left = Math.round((s.restart_tokens - s.ctx) / grow)
-      out.push({ scope: 'session', tier: left < 30 ? 'yellow' : 'cyan', icon: '↗', text: 'Context grows ' + k(grow) + '/turn: restart line in ~' + left + ' turns.' })
+      out.push({ scope: 'session', tier: left < 30 ? 'yellow' : 'cyan', icon: '↗', text: 'Grows ' + k(grow) + '/turn: restart in ~' + left + ' turns.' })
     }
   }
 

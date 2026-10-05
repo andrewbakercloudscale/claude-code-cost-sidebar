@@ -126,16 +126,18 @@ test('the sidebar draws the session, today, 30 days, projects, top sessions and 
   const drawn = JSON.stringify(await ui.drawn())
   expect(drawn.indexOf('1039 Opus 5.5')).toBeGreaterThan(drawn.indexOf('This session'))
   expect(drawn.indexOf('1039 Opus 5.5')).toBeLessThan(drawn.indexOf('"Today"'))
-  // Most specific first: session, today, 30 days, projects, set-up.
+  // Most specific first: session, this Mac, today, 30 days, projects.
   const at = (x: string) => drawn.indexOf(x)
-  expect(at('Context grows')).toBeGreaterThan(at('This session'))
-  expect(at('Context grows')).toBeLessThan(at('"Today"'))
+  expect(at('Grows 2k/turn')).toBeGreaterThan(at('This session'))
+  expect(at('Grows 2k/turn')).toBeLessThan(at('"Today"'))
   expect(at('Quiet:')).toBeGreaterThan(at('"Today"'))
   expect(at('"Sessions today"')).toBeGreaterThan(at('Quiet:'))
   expect(at('"Last 30 days"')).toBeGreaterThan(at('"Sessions today"'))
   expect(at('"Projects"')).toBeGreaterThan(at('"Last 30 days"'))
   expect(at('Busiest hour')).toBeGreaterThan(at('"Projects"'))
-  expect(at('Proxy State')).toBeGreaterThan(at('Busiest hour'))
+  // This Mac is second, above the turn table, so a problem there is seen.
+  expect(at('Proxy State')).toBeGreaterThan(at('Grows 2k/turn'))
+  expect(at('Proxy State')).toBeLessThan(at('"Turns"'))
   expect(await ui.find({ type: 'Text', text: /^178k$/ })).toBeDefined()
   // Graphs: the 30-day bars mark the outlier day red.
   expect(await ui.find({ type: 'Text', text: /█/, color: 'red' })).toBeDefined()
@@ -185,7 +187,7 @@ test('the feed is kept alive every 30 seconds and the file re-read every 5', asy
 
 test('insights say what matters and nothing when there is nothing', () => {
   const tips = insights(doc(), NOW).map((t) => t.text)
-  expect(tips.some((t) => t.startsWith('Context grows 2k/turn'))).toBe(true)
+  expect(tips.some((t) => t.startsWith('Grows 2k/turn: restart in ~'))).toBe(true)
   expect(tips.some((t) => t.startsWith('32× your average session'))).toBe(true)
   expect(tips.some((t) => t.startsWith('Quiet: 8%'))).toBe(true)
   expect(tips.some((t) => t.startsWith('Burning $7.28/hr (high)'))).toBe(true)
@@ -276,7 +278,7 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Claude Code holds 620k/, color: 'yellow' })).toBeDefined()
   // The bar is in the session card; a standing problem is with Proxy State.
-  expect(drawn.indexOf('70k/300k 23%')).toBeLessThan(drawn.indexOf('"Turns"'))
+  expect(drawn.indexOf('70k/300k 23%')).toBeLessThan(drawn.indexOf('"This Mac"'))
   expect(await ui.find({ type: 'Text', text: 'Keep-awake turned off', color: 'yellow' })).toBeDefined()
   expect(drawn.indexOf('Keep-awake turned off')).toBeGreaterThan(drawn.indexOf('Proxy State'))
 })
@@ -324,11 +326,11 @@ test('sections can be hidden, shown and moved, and the layout is kept', async ($
 test('a stored layout is made whole: unknown names go, new sections come back', () => {
   expect(layoutOf({ order: ['days', 'gone', 'session'], hidden: ['gone', 'turns'] })).toEqual({
     // A returning section goes back beside its default neighbour.
-    order: ['days', 'projects', 'session', 'turns', 'today', 'sessions'],
+    order: ['days', 'projects', 'session', 'mac', 'turns', 'today', 'sessions'],
     hidden: ['turns'],
   })
   expect(relayout(null, 'hide', 'nope')).toContain('Sections: session')
-  expect((relayout(null, 'down', 'session') as any).order.slice(0, 2)).toEqual(['turns', 'session'])
+  expect((relayout(null, 'down', 'session') as any).order.slice(0, 2)).toEqual(['mac', 'session'])
 })
 
 test('formatting', () => {
