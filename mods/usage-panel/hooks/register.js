@@ -248,7 +248,7 @@ async function read($) {
 
 // Burst's own account of this session, from its dashboard. True when what
 // the sidebar draws of it changed. Alerts are not asked for (since = now):
-// they are the burst mod's to show.
+// they are the burst-session mod's to show.
 async function readBurst($) {
   const b = data && data.burst
   if (!b || !b.dashboard || !sid) {
