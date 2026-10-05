@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { axis, insights, k, layoutOf, modelName, money, relayout } from '../hooks/register.js'
+import { axis, insights, k, layoutOf, modelName, money, relayout, share } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'usage-panel',
@@ -290,7 +290,7 @@ test('over the limit the bar is red, a compaction under way is named, and a sile
   await start($)
   let ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Text', text: '310k/300k 100%', color: 'red' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '  ⟳ summarising' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '⟳ summarising' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Free/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Claude Code holds/ })).toBeUndefined()
   await ui.unmount()
@@ -331,6 +331,27 @@ test('a stored layout is made whole: unknown names go, new sections come back', 
   })
   expect(relayout(null, 'hide', 'nope')).toContain('Sections: session')
   expect((relayout(null, 'down', 'session') as any).order.slice(0, 2)).toEqual(['mac', 'session'])
+})
+
+test('every part and the room left keep a cell on the bar, however small', () => {
+  // 287k of 300k: 13k free is 1.5 cells of 34, and 1k of system prompt none.
+  const w = share([151_000, 127_000, 5_000, 2_000, 1_000, 13_000], 34)
+  expect(w.reduce((a, b) => a + b, 0)).toBe(34)
+  expect(w.every((x) => x >= 1)).toBe(true)
+  expect(w[5]).toBeGreaterThanOrEqual(1)
+  expect(w[0]).toBeGreaterThan(w[1])
+  // Nothing of a kind takes no cell; nothing at all draws nothing.
+  expect(share([10, 0, 10], 4)).toEqual([2, 0, 2])
+  expect(share([0, 0], 10)).toEqual([0, 0])
+})
+
+test('close to the limit, the session says what Burst will do, not "warning"', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(mod({ session: { ...mod().session, context: 287_000, state: 'warning' } })) } }))
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Burst compacts at 300k.', color: 'yellow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /warning/ })).toBeUndefined()
 })
 
 test('formatting', () => {
