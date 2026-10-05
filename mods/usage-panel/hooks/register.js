@@ -562,10 +562,12 @@ function sessionSection(Box, T, d, W, burst, warnPct) {
     const med = median(costs.filter((c) => c > 0))
     // A row's bars reach the cell's foot and the next row's reach its head,
     // so stacked directly they read as one shape: a blank row between each.
+    // The turn after a compaction writes the new context to the cache once,
+    // so it costs more by design: cyan like its drop above, never red.
     out.push(Box({
       flexDirection: 'row', columnGap: 1, marginTop: 1, children: [
         T('$/turn', { dimColor: true }),
-        spark(T, costs, (v) => (med > 0 && v > med * 4 ? 'red' : med > 0 && v > med * 2 ? 'yellow' : 'green'), 0),
+        spark(T, costs, (v, i) => (drops.has(i) ? 'cyan' : med > 0 && v > med * 4 ? 'red' : med > 0 && v > med * 2 ? 'yellow' : 'green'), 0),
       ],
     }))
     const cache = turns.slice(-20).filter((t) => !t[6]).map((t) => t[3])
@@ -1013,7 +1015,10 @@ export function insights(d, now, limits = null, extra = null, burst = null) {
     }
     const all = turns.slice(-50).filter((x) => x[4] != null)
     const med = median(all.map((x) => x[4]))
-    const worst = all.reduce((a, x) => (a == null || x[4] > a[4] ? x : a), null)
+    // Not the turn after a compaction: its one cache rewrite is expected.
+    const compacted = new Set()
+    for (let i = 1; i < turns.length; i++) if (turns[i][1] < turns[i - 1][1] * 0.6) compacted.add(turns[i][0])
+    const worst = all.filter((x) => !compacted.has(x[0])).reduce((a, x) => (a == null || x[4] > a[4] ? x : a), null)
     if (worst && worst[0] !== gapTurn && med > 0 && worst[4] > med * 4 && worst[4] >= 0.05) {
       out.push({ scope: 'session', tier: 'yellow', icon: '▲', text: 'Turn ' + worst[0] + ': ' + money(worst[4], 2) + ', ' + Math.round(worst[4] / med) + '× median, +' + k(worst[2]) + ' context.' })
     }

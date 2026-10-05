@@ -567,6 +567,23 @@ test('a turn made dear by a pause that let the cache go is named as that', () =>
   expect(insights(doc({ turns: { turns: quick, markers: [], avg_delta: 3000 } }), NOW).some((t) => t.text.includes('pause'))).toBe(false)
 })
 
+test('the turn after a compaction is cyan on the cost chart and is not reported as a costly turn', async ($, on) => {
+  // Turn 1035: the context falls from 168k to 60k and the turn costs 8x the median.
+  const ts = turns(40).map((x, i) => (i >= 35 ? [x[0], 60_000 + (i - 35) * 2_000, i === 35 ? -108_000 : 2_000, i === 35 ? 19 : 98.5, i === 35 ? 0.4 : 0.05, x[5], false] : x))
+  const d = doc({ turns: { turns: ts, markers: [], avg_delta: 3000 } })
+  expect(insights(d, NOW).some((t) => t.text.includes('1035'))).toBe(false)
+  // The same cost with no drop in context is still named.
+  const plain = turns(40).map((x, i) => (i === 35 ? [x[0], x[1], x[2], x[3], 0.4, x[5], false] : x))
+  expect(insights(doc({ turns: { turns: plain, markers: [], avg_delta: 3000 } }), NOW).some((t) => t.text.startsWith('Turn 1035: $0.40, 8× median'))).toBe(true)
+  stubs(on, [d])
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  const chart = drawn.slice(drawn.indexOf('"$/turn"'), drawn.indexOf('"cache "'))
+  expect(chart).toContain('"color":"cyan"')
+  expect(chart).not.toContain('"color":"red"')
+})
+
 test('the costliest turns today are listed under the top sessions, from any session', async ($, on) => {
   stubs(on, [doc({ top_turns: [
     { sid: 'ffffffff-0000-1111-2222-333333312345', folder: 'wordpress-cyber-devtools', turn: 212, cost: 6.81, ctx: 849_740, at: NOW - 3600 },
