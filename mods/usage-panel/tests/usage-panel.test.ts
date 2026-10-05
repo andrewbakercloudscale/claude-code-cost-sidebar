@@ -124,11 +124,11 @@ test('the sidebar draws the session, today, 30 days, projects, top sessions and 
   expect(await ui.find({ type: 'Text', text: /^  1039 Opus 5\.5/ })).toBeDefined()
   // Directly under the session's graphs, above Today, so it is on screen.
   const drawn = JSON.stringify(await ui.drawn())
-  expect(drawn.indexOf('1039 Opus 5.5')).toBeGreaterThan(drawn.indexOf('This session'))
+  expect(drawn.indexOf('1039 Opus 5.5')).toBeGreaterThan(drawn.indexOf('"Session:"'))
   expect(drawn.indexOf('1039 Opus 5.5')).toBeLessThan(drawn.indexOf('"This Mac"'))
   // Most specific first: session, this Mac, today, 30 days, projects.
   const at = (x: string) => drawn.indexOf(x)
-  expect(at('Grows 2k/turn')).toBeGreaterThan(at('This session'))
+  expect(at('Grows 2k/turn')).toBeGreaterThan(at('"Session:"'))
   expect(at('Grows 2k/turn')).toBeLessThan(at('"Today"'))
   expect(at('Quiet:')).toBeGreaterThan(at('"Today"'))
   expect(at('"Sessions today"')).toBeGreaterThan(at('Quiet:'))
@@ -326,7 +326,7 @@ test('sections can be hidden, shown and moved, and the layout is kept', async ($
   await start($)
   // A layout change redraws the pane, so each look is a fresh mount.
   const look = async () => { const ui = await $.ui.mount(PANE); const d = JSON.stringify(await ui.drawn()); await ui.unmount(); return d }
-  const order = async () => { const d = await look(); return ['"This session"', '"Today"', '"Last 30 days"'].map((x) => d.indexOf(x)) }
+  const order = async () => { const d = await look(); return ['"Session:"', '"Today"', '"Last 30 days"'].map((x) => d.indexOf(x)) }
   await $.command.run({ command: 'usage-panel', args: 'hide today' })
   expect((await order())[1]).toBe(-1)
   expect(await look()).toContain('Hidden: today')
@@ -549,7 +549,7 @@ test('a long folder beside the session id loses its start, not its end', async (
   const note = await ui.find({ type: 'Text', text: /^  \*b598c · …/ })
   expect(note.text.endsWith('-with-a-long-name')).toBe(true)
   // The heading and the note together fit the card.
-  expect('This session'.length + note.text.length).toBeLessThanOrEqual(50)
+  expect('Session:'.length + note.text.length).toBeLessThanOrEqual(50)
 })
 
 test('formatting', () => {
