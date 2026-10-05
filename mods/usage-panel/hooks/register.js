@@ -444,10 +444,10 @@ function sentBar(Box, T, s, W) {
     }))
   }
   // Claude Code's own history, which Burst's compaction never shrinks. The
-  // gap is the tool working, so it is one dim line and never a warning. Said
-  // only once the two have parted.
+  // gap is the tool working, so it is one short line in orange, a colour no
+  // warning here uses. Said only once the two have parted.
   if (s.raw > s.context * 1.1) {
-    out.push(T('Claude Code holds ' + k(s.raw) + ', Burst sends ' + k(s.context), { dimColor: true, wrap: 'wrap' }))
+    out.push(T('Claude Code Cache Size: ' + k(s.raw), { color: HELD_COLOUR }))
   }
   return out
 }
@@ -475,6 +475,8 @@ export function share(amounts, width) {
   }
   return out
 }
+
+const HELD_COLOUR = 'ansi256(208)' // orange
 
 // Burst's rows for This Mac, under the panel's Proxy State: a dashboard that
 // is not answering, and each problem still standing.
