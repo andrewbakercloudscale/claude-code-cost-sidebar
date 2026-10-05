@@ -163,6 +163,14 @@ const scenes = {}
   scenes.problem = { d: scenes.steady.d, b: burst(t[t.length - 1][1], 'ok', 320000, [{ severity: 'warn', title: 'Keep-awake turned off' }]), x: SAVED }
 }
 {
+  // Without Claude Burst: nothing compacts for you, so the context has only
+  // grown. Past 40% of the window the bar is amber and says what to do.
+  const t = allTurns(142).map((x) => [x[0], x[1] + 226000, x[2], x[3], Math.round((x[4] + 0.11) * 100) / 100, x[5], x[6]])
+  const d = doc(t, {}, { burst: null, summary: `  📜 License: ${C}Max (20x)${X}` })
+  d.session.cost = 31.07
+  scenes.alone = { d, b: null }
+}
+{
   // 1. Over the limit: Burst starts the summary in the background.
   const t = allTurns(141)
   scenes.started = { d: doc(t, { top: [STARTED] }), b: burst(t[t.length - 1][1], 'summarising', t[t.length - 1][1]) }
@@ -226,7 +234,7 @@ function Box(p) {
 const button = Text({ color: 'cyan', children: ['▸ Open the Claude Burst dashboard  ', Text({ dimColor: true, color: 'white', children: ['v'] })] })
 
 function page(scene) {
-  const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, [button], scene.b, LIMITS, scene.x || null)
+  const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, scene.b ? [button] : [], scene.b, scene.b ? LIMITS : null, scene.x || null)
   return `<!doctype html><meta charset="utf-8"><style>
   html, body { margin: 0; background: #1f2029; }
   #pane { display: inline-block; padding: 14px 18px 18px; background: #1f2029; color: #d7dae0;
@@ -274,6 +282,10 @@ const card = (file, pane, box) => clip(file, pane, box.y - PAD, box.y + box.heig
 {
   const { pane, cards } = await show('problem')
   await card('card-mac.png', pane, cards.mac)
+}
+{
+  const { pane, cards } = await show('alone')
+  await card('card-session-no-burst.png', pane, cards.session)
 }
 for (const [i, name] of ['started', 'pending', 'finished'].entries()) {
   const { pane, cards } = await show(name)
