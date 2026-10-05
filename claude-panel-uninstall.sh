@@ -42,9 +42,24 @@ remove_path() { # path, label
 # --- scripts and helpers in ~/.local/bin ---------------------------------
 for f in ccusage-panel.sh .ccusage-panel.sh.new claude-panel-launch.sh claude-panel-keyblock claude-panel-overlay \
          claude-panel-keysend claude-panel-session-hook.sh claude-cost-alert-check.sh \
-         claude-day-projection.sh claude-panel-rc-name; do
+         claude-day-projection.sh claude-panel-rc-name ccusage-panel-mod-start; do
   remove_path "$BIN/$f" "~/.local/bin/$f"
 done
+
+# --- the usage-panel mod (the sidebar inside Claude Code) ---------------
+# Asked of claude only when something says the mod is here: claude rewrites
+# ~/.claude/settings.json on start, and a machine without the mod should not
+# have it touched by an uninstall.
+if { [ -f "$HOME/.config/claude-panel/mod-installed" ] || [ -d "$HOME/.claude/plugins/cache/ccusage-panel" ]; } \
+   && command -v claude >/dev/null 2>&1 && claude plugin list --json 2>/dev/null | grep -q '"usage-panel@ccusage-panel"'; then
+  CHANGED=1
+  say "uninstall the usage-panel mod (claude plugin uninstall usage-panel@ccusage-panel)"
+  if [ "$DRY" = 0 ]; then
+    claude plugin uninstall usage-panel@ccusage-panel >/dev/null 2>&1 || fail "could not uninstall the usage-panel mod; run: claude plugin uninstall usage-panel@ccusage-panel"
+    claude plugin marketplace remove ccusage-panel >/dev/null 2>&1
+  fi
+fi
+remove_path "$HOME/.config/claude-panel/mod-installed" "~/.config/claude-panel/mod-installed"
 
 # --- ~/.zshrc autolaunch block -------------------------------------------
 ZSHRC="$HOME/.zshrc"

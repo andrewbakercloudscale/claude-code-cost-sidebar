@@ -1748,6 +1748,8 @@ delta_yellow_mult, delta_red_mult, delta_floor = (float(x) for x in sys.argv[15:
 # Appended last so every index above keeps its meaning. Used for the cells a
 # secondary-served turn genuinely cannot fill in.
 c_na = sys.argv[18]
+# sys.argv[19], "series", is not read: it is there so the cache key of a
+# table that carries the #SERIES line differs from one written before it.
 
 PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-sonnet-5-5": (2.00, 10.00),
@@ -2119,7 +2121,20 @@ sess_total = ("" if any(t[7] for t in turns)
 print(f"#META\t{sess_total}\t{turns[-1][1] if turns else 0}"
       f"\t{context_window_size(turns[-1][5]) if turns else 0}"
       f"\t{int(compaction_supersedes(COMPACTION_MARKERS, turns[-1][9] if turns else None))}")
-turn_h = f"{col_turn}{'Turn':<5}{c_reset}"
+# The same turns as numbers, for the Claude Code mod's graphs: the newest 300,
+# each [turn number, context, context written (the delta), cache hit %, cost
+# or null, epoch or null, served by a secondary], and the compaction markers
+# as [epoch, kind, usd or null]. One line, stripped by the shell like #META.
+series_from = max(0, total_n - 300)
+print("#SERIES\t" + json.dumps({
+    "turns": [[series_from + k + 1, t[1], t[2], round(t[3], 1),
+               None if t[4] is None else round(t[4], 6),
+               None if t[9] is None else int(t[9]), bool(t[6])]
+              for k, t in enumerate(turns[series_from:])],
+    "markers": [[int(m[0]), m[1], m[2]] for m in COMPACTION_MARKERS],
+    "avg_delta": round(avg_delta),
+}, separators=(",", ":")))
+turn_h =f"{col_turn}{'Turn':<5}{c_reset}"
 model_h = f"{col_model}{'Model':<10}{c_reset}"
 input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
 cache_h = f"{col_cache}{'Cache':>6}{c_reset}"
@@ -2281,15 +2296,15 @@ PYEOF
 # Set on every FAST tick, before either builder runs, so the slow-tier
 # summary and the fast-tier table read the same session from the same parse
 # rather than two snapshots that can disagree on screen.
-SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""
+SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""; SESS_SERIES=""
 session_stats_refresh() {
-  SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""
+  SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""; SESS_SERIES=""
   [ -n "${latest:-}" ] || return 0
   local out meta
   out=$(turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
     "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
     "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
-    "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_ELECTRIC")
+    "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_ELECTRIC" series)
   meta=$(printf '%s\n' "$out" | head -1)
   case "$meta" in
     '#META'*)
@@ -2298,6 +2313,14 @@ session_stats_refresh() {
       SESS_WIN=$(printf '%s' "$meta" | cut -f4)
       SESS_COMPACTING=$(printf '%s' "$meta" | cut -f5)
       SESS_TABLE=$(printf '%s\n' "$out" | tail -n +2)
+      # The turns as numbers for the mod's graphs (turn_table_cached's
+      # #SERIES line), when the cache entry is new enough to carry them.
+      case "$SESS_TABLE" in
+        '#SERIES'*)
+          SESS_SERIES=$(printf '%s\n' "$SESS_TABLE" | head -1 | cut -f2-)
+          SESS_TABLE=$(printf '%s\n' "$SESS_TABLE" | tail -n +2)
+          ;;
+      esac
       ;;
     *)
       # A cache entry written before this line existed -- the file is keyed
@@ -3003,6 +3026,22 @@ resolve_session() {
   # project this panel belongs to; project_key() above turns that into the
   # directory name Claude Code actually used.
   project_dir="$HOME/.claude/projects/$(project_key "$PWD")"
+  # Headless, for the Claude Code mod: the mod names its own session, so
+  # there is nothing to guess and none of the pin machinery below applies.
+  # The transcript is looked for under every project when it is not under
+  # this directory's, since a session can be started from a subdirectory.
+  if [ -n "${PANEL_HEADLESS:-}" ]; then
+    latest=""
+    if [ -n "$PIN_SESSION_ID" ]; then
+      latest="$project_dir/$PIN_SESSION_ID.jsonl"
+      if [ ! -f "$latest" ]; then
+        latest=$(ls "$HOME"/.claude/projects/*/"$PIN_SESSION_ID".jsonl 2>/dev/null | head -1)
+        [ -n "$latest" ] && project_dir=$(dirname "$latest")
+      fi
+    fi
+    resolve_identity
+    return 0
+  fi
   # Every tick, not just at startup. The panel and `claude` start at the
   # same moment (the ~/.zshrc preexec hook backgrounds the launcher and then
   # lets the command run), so on the first few ticks the SessionStart hook
@@ -3111,6 +3150,12 @@ resolve_session() {
     # exists to avoid explicitly calls worse than the honest "no active
     # session found" this now falls back to instead.
   fi
+  resolve_identity
+}
+
+# The identity of the transcript resolve_session settled on: sess_id,
+# model_id, model_label, folder_name, sess_start_epoch and sess_elapsed_h.
+resolve_identity() {
   if [ -n "$latest" ]; then
     IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(session_identity_cached "$latest")
     # Floor elapsed time at 3 minutes, a session-so-far rate computed over
@@ -3766,7 +3811,9 @@ COMPACT_STATE_MTIME=""
 COMPACT_PENDING=0
 COMPACT_SHOWN=0
 COMPACT_OVERLAY_PID=""
-PANEL_GHOSTTY_PID=""
+# Headless, the mod's starter found it before detaching, since a detached
+# process has no Ghostty above it to find.
+PANEL_GHOSTTY_PID="${CLAUDE_PANEL_GHOSTTY_PID:-}"
 compaction_pending() { # $1 = session id
   local m
   [ -n "$1" ] && [ -f "$COMPACT_STATE_FILE" ] || return 1
@@ -4327,12 +4374,320 @@ panel_sleep() { # $1 = whole seconds
   done
 }
 
+# The slow tier's fetches, shared by the pane's loop and the headless one: the
+# error file is cleared first, so what shows is this tick's failures rather
+# than every failure since the panel started.
+slow_fetch() {
+  : > "$PANEL_ERR_FILE"
+  RECENT_JSON=$(recent_sections_fetch 2>>"$PANEL_ERR_FILE")
+  refresh_active_block
+}
+
+# ---- headless: the same panel, drawn by the Claude Code mod ---------------
+# PANEL_HEADLESS=1 ccusage-panel.sh <fast secs> <turn rows> <session id> runs
+# this loop with nothing drawn: every tick writes what the pane would have
+# shown, as numbers, to mod/<session id>.json, and the usage-panel mod draws
+# it in a sidebar inside Claude Code. Everything that computes a figure is the
+# pane's own code, run at the pane's own two tiers; only the drawing moved.
+# The alerts over Ghostty still come from here, as they did from the pane.
+#
+# It runs only while the mod wants it: the mod touches mod/<id>.alive on every
+# refresh, and a file older than MOD_ALIVE_SECS ends this loop. One per
+# session, held by mod/<id>.pid.
+MOD_DIR="$HOME/.cache/ccusage-panel-cache/mod"
+MOD_ALIVE_SECS="${PANEL_MOD_ALIVE_SECS:-90}"
+
+mod_alive() { # $1 = session id
+  local f="$MOD_DIR/$1.alive" m
+  m=$(stat -f %m "$f" 2>/dev/null) || return 1
+  (( $(panel_now) - m <= MOD_ALIVE_SECS ))
+}
+
+# Claims mod/<id>.pid for this process. False when another live process holds
+# it. The same pid holds it across restart_if_changed's exec.
+mod_claim() { # $1 = session id
+  local f="$MOD_DIR/$1.pid" held
+  mkdir -p "$MOD_DIR"
+  held=$(cat "$f" 2>/dev/null)
+  if [ -n "$held" ] && [ "$held" != "$$" ] && kill -0 "$held" 2>/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$$" > "$f.$$.tmp" && mv -f "$f.$$.tmp" "$f"
+}
+
+# A colour code from the tier helpers, as the word the mod draws it with.
+tier_name() { # $1 = colour code
+  case "$1" in
+    "$C_GREEN") printf green ;;
+    "$C_YELLOW") printf yellow ;;
+    "$C_RED") printf red ;;
+    "$C_MAGENTA") printf purple ;;
+    "$C_CYAN") printf cyan ;;
+    *) printf '' ;;
+  esac
+}
+
+# Writes mod/<id>.json: the figures build_summary and build_trailing computed
+# on the last slow tick, this tick's turn figures, and the series behind the
+# graphs. Replaced whole, by rename, so the mod never reads half a file.
+mod_json_write() { # $1 = session id
+  local sid="$1" out="$MOD_DIR/$1.json"
+  [ -n "$sid" ] || return 0
+  mkdir -p "$MOD_DIR"
+  local sess_tier="" rate_tier="" today_tier="" pred_tier="" ctx_tier="" spend_tier="" avg_tier="" model_tier=""
+  [ -n "${sc:-}" ] && sess_tier=$(tier_name "$sc")
+  [ -n "${src:-}" ] && rate_tier=$(tier_name "$src")
+  [ -n "${tc:-}" ] && today_tier=$(tier_name "$tc")
+  [ -n "${pc:-}" ] && pred_tier=$(tier_name "$pc")
+  [ -n "${spendc:-}" ] && spend_tier=$(tier_name "$spendc")
+  [ -n "${avgc:-}" ] && avg_tier=$(tier_name "$avgc")
+  [ -n "${mtc:-}" ] && model_tier=$(tier_name "$mtc")
+  if [ -n "$SESS_CTX" ] && [ -n "$SESS_WIN" ] && [ "$SESS_WIN" != 0 ]; then
+    ctx_tier=$(tier_name "$(ctx_tier_color "$(awk -v t="$SESS_CTX" -v w="$SESS_WIN" 'BEGIN{printf "%.0f", t*100/w}')" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")")
+  fi
+  local sess_rate_now="" sess_rate_tier=""
+  if [ -n "$SESS_COST" ] && [ -n "${sess_elapsed_h:-}" ]; then
+    sess_rate_now=$(awk -v c="$SESS_COST" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.4f", c/h }')
+    sess_rate_tier=$(tier_name "$(threshold_color "$sess_rate_now" "$BURN_YELLOW" "$BURN_RED")")
+  fi
+  local errs_file="${PANEL_ERR_FILE:-/dev/null}"
+  MJ_SID="$sid" MJ_NOW="$(panel_now)" MJ_SLOW_AT="${last_slow:-0}" \
+  MJ_REFRESH="$REFRESH" MJ_SLOW_REFRESH="$SLOW_REFRESH" \
+  MJ_MODEL="${model_label:-}" MJ_MODEL_ID="${model_id:-}" MJ_MODEL_TIER="$model_tier" \
+  MJ_FOLDER="${folder_name:-}" MJ_FOLDER_SPEND="${proj_spend:-}" \
+  MJ_SESS_COST="$SESS_COST" MJ_SESS_TIER="$sess_tier" MJ_SESS_RATE="$sess_rate_now" MJ_SESS_RATE_TIER="$sess_rate_tier" \
+  MJ_SESS_START="${sess_start_epoch:-0}" MJ_AVG_SESSION="${avg_session_cost:-0}" \
+  MJ_CTX="$SESS_CTX" MJ_WIN="$SESS_WIN" MJ_CTX_TIER="$ctx_tier" MJ_COMPACTING="$SESS_COMPACTING" \
+  MJ_RESTART_TOKENS="$(panel_option_int CLAUDE_PANEL_RESTART_TOKENS 400000)" \
+  MJ_TODAY="${today_amt:-}" MJ_TODAY_TIER="$today_tier" MJ_PRED="${today_pred:-}" MJ_PRED_TIER="$pred_tier" \
+  MJ_TODAY_UNPRICED="${today_unpriced:-}" MJ_TYPICAL_SO_FAR="${typical_so_far:-}" \
+  MJ_BLOCK="${has_block:-0}" MJ_BLK_COST="${blk_cost:-0}" MJ_BLK_CPH="${blk_cph:-0}" MJ_BLK_REM="${blk_rem:-0}" \
+  MJ_BURN_LABEL="${burn_label:-}" MJ_BURN_TIER="$(tier_name "${burn_color:-}")" \
+  MJ_SPEND30="${spend30:-0}" MJ_PREV_SPEND30="${prev_spend30:-0}" MJ_SPEND_TIER="$spend_tier" \
+  MJ_AVG30="${avg_daily_30:-0}" MJ_PREV_AVG30="${prev_avg_daily_30:-0}" MJ_AVG_TIER="$avg_tier" \
+  MJ_WEEK="${week_cost:-0}" MJ_MONTH="${month_cost:-0}" \
+  MJ_TOP="${top_rows:-}" MJ_SERIES="$SESS_SERIES" \
+  MJ_SUMMARY="${summary_block:-}" MJ_TABLE="$SESS_TABLE" \
+  MJ_ERRORS="$(sort -u "$errs_file" 2>/dev/null | head -5)" \
+  MJ_THRESHOLDS="$CTX_YELLOW $CTX_RED $CTX_PURPLE $BURN_YELLOW $BURN_RED $TIER_YELLOW_MULT $TIER_RED_MULT" \
+  MJ_HOURLY="${HOURLY_BUCKET_CACHE:-}" \
+  python3 - "$out" <<'PYEOF' 2>>"$errs_file"
+import json, os, sys, time
+from datetime import datetime, timedelta
+
+out = sys.argv[1]
+E = os.environ
+
+def num(k):
+    try:
+        return float(E.get(k, ""))
+    except ValueError:
+        return None
+
+def text(k):
+    return E.get(k, "")
+
+def jload(s):
+    try:
+        return json.loads(s)
+    except (ValueError, TypeError):
+        return None
+
+def decode_project(name):
+    """Claude Code names a project's directory by its path with every '/'
+    and '.' made '-'. Rebuilt against the disk one level at a time, taking
+    the longest entry whose own encoding matches, so a name with dashes or
+    dots in it survives; the last component is what is shown. When the
+    disk no longer has it, the encoded name is shown as it is."""
+    rest, path = name, "/"
+    while rest:
+        if not rest.startswith("-"):
+            return name
+        rest = rest[1:]
+        try:
+            entries = os.listdir(path)
+        except OSError:
+            return name
+        best = ""
+        for e in entries:
+            enc = e.replace("/", "-").replace(".", "-")
+            if (rest == enc or rest.startswith(enc + "-")) and len(enc) > len(best.replace(".", "-")):
+                if os.path.isdir(os.path.join(path, e)):
+                    best = e
+        if not best:
+            return name
+        path = os.path.join(path, best)
+        rest = rest[len(best):]
+    return os.path.basename(path) or name
+
+def jfile(k):
+    try:
+        with open(E.get(k, "")) as f:
+            return json.load(f)
+    except (OSError, ValueError, TypeError):
+        return None
+
+recent = jfile("MJ_RECENT_FILE") or {}
+daily = []
+for d in (recent.get("daily") or [])[-30:]:
+    daily.append({
+        "d": d.get("period") or d.get("date"),
+        "cost": round(d.get("totalCost") or 0, 4),
+        "tokens": d.get("totalTokens") or 0,
+        "models": {m.get("modelName"): round(m.get("cost") or 0, 4) for m in d.get("modelBreakdowns") or []},
+    })
+
+hourly = None
+try:
+    with open(E.get("MJ_HOURLY", "")) as f:
+        hb = json.load(f)
+    hourly = [0.0] * 24
+    for b in hb.get("buckets", []):
+        h = int(b.get("hour", -1))
+        if 0 <= h < 24:
+            hourly[h] = round(b.get("avgCost") or 0, 4)
+except (OSError, ValueError, TypeError):
+    pass
+
+projects = []
+sess = jfile("MJ_ALL_SESS_FILE") or {}
+since = (datetime.now() - timedelta(days=29)).strftime("%Y-%m-%d")
+by_proj = {}
+for s in sess.get("session") or []:
+    last = (s.get("lastActivity") or (s.get("metadata") or {}).get("lastActivity") or "")[:10]
+    if last and last < since:
+        continue
+    p = s.get("projectPath") or ""
+    by_proj[p] = by_proj.get(p, 0) + (s.get("totalCost") or 0)
+for p, c in sorted(by_proj.items(), key=lambda kv: -kv[1])[:6]:
+    if c > 0:
+        projects.append({"name": decode_project(p) if p else "unknown", "cost": round(c, 2)})
+
+top = []
+for line in E.get("MJ_TOP", "").splitlines():
+    f = line.split("\t")
+    if len(f) < 4 or not f[0]:
+        continue
+    try:
+        top.append({"sid": f[0], "cost": round(float(f[1]), 4), "tokens": int(float(f[2] or 0)), "last": f[3]})
+    except ValueError:
+        continue
+top.sort(key=lambda r: -r["cost"])
+
+th = (E.get("MJ_THRESHOLDS", "") + " 0 0 0 0 0 0 0").split()
+doc = {
+    "v": 1,
+    "at": int(num("MJ_NOW") or time.time()),
+    "slow_at": int(num("MJ_SLOW_AT") or 0),
+    "refresh": int(num("MJ_REFRESH") or 10),
+    "slow_refresh": int(num("MJ_SLOW_REFRESH") or 120),
+    "sid": text("MJ_SID"),
+    "session": {
+        "model": text("MJ_MODEL"), "model_id": text("MJ_MODEL_ID"), "model_tier": text("MJ_MODEL_TIER"),
+        "folder": text("MJ_FOLDER"), "folder_spend": num("MJ_FOLDER_SPEND"),
+        "cost": num("MJ_SESS_COST"), "tier": text("MJ_SESS_TIER"),
+        "rate": num("MJ_SESS_RATE"), "rate_tier": text("MJ_SESS_RATE_TIER"),
+        "started": int(num("MJ_SESS_START") or 0), "avg_session": num("MJ_AVG_SESSION"),
+        "ctx": num("MJ_CTX"), "win": num("MJ_WIN"), "ctx_tier": text("MJ_CTX_TIER"),
+        "compacting": text("MJ_COMPACTING") == "1", "restart_tokens": num("MJ_RESTART_TOKENS"),
+    },
+    "today": {
+        "cost": num("MJ_TODAY"), "tier": text("MJ_TODAY_TIER"),
+        "pred": num("MJ_PRED"), "pred_tier": text("MJ_PRED_TIER"),
+        "unpriced": text("MJ_TODAY_UNPRICED").strip(), "typical_so_far": num("MJ_TYPICAL_SO_FAR"),
+    },
+    "block": {
+        "active": text("MJ_BLOCK") == "1", "cost": num("MJ_BLK_COST"), "cph": num("MJ_BLK_CPH"),
+        "rem": int(num("MJ_BLK_REM") or 0), "label": text("MJ_BURN_LABEL"), "tier": text("MJ_BURN_TIER"),
+    },
+    "days30": {
+        "spend": num("MJ_SPEND30"), "prev": num("MJ_PREV_SPEND30"), "tier": text("MJ_SPEND_TIER"),
+        "avg": num("MJ_AVG30"), "prev_avg": num("MJ_PREV_AVG30"), "avg_tier": text("MJ_AVG_TIER"),
+    },
+    "week": num("MJ_WEEK"), "month": num("MJ_MONTH"),
+    "daily": daily, "hourly_avg": hourly, "projects": projects, "top": top[:5],
+    "turns": jload(E.get("MJ_SERIES", "")),
+    "summary": E.get("MJ_SUMMARY", ""), "table": E.get("MJ_TABLE", ""),
+    "errors": [l for l in E.get("MJ_ERRORS", "").splitlines() if l.strip()],
+    "thresholds": {
+        "ctx_yellow": float(th[0]), "ctx_red": float(th[1]), "ctx_purple": float(th[2]),
+        "burn_yellow": float(th[3]), "burn_red": float(th[4]),
+        "tier_yellow_mult": float(th[5]), "tier_red_mult": float(th[6]),
+    },
+}
+tmp = f"{out}.{os.getpid()}.tmp"
+with open(tmp, "w") as f:
+    json.dump(doc, f, separators=(",", ":"))
+os.replace(tmp, out)
+PYEOF
+}
+
+# Files of sessions whose mod has gone, after two days.
+mod_prune() {
+  find "$MOD_DIR" -maxdepth 1 -type f -mtime +2 -delete 2>/dev/null
+}
+
+headless_main() {
+  # hsid, not sid: build_trailing reads rows into a variable named sid, and
+  # bash's dynamic scoping would hand it this one.
+  local hsid="$PIN_SESSION_ID" tmp_s tmp_t tmp_r tmp_a
+  [ -n "$hsid" ] || { echo "headless: no session id" >&2; return 2; }
+  mod_claim "$hsid" || return 0
+  PIN_SOURCE=mod
+  COLS="${PANEL_HEADLESS_COLS:-60}"
+  cols="$COLS"
+  export COLS
+  tmp_s=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-s.XXXXXX")
+  tmp_t=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-t.XXXXXX")
+  tmp_r=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-r.XXXXXX")
+  tmp_a=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-a.XXXXXX")
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp_s' '$tmp_t' '$tmp_r' '$tmp_a'; [ \"\$(cat '$MOD_DIR/$hsid.pid' 2>/dev/null)\" = \"\$\$\" ] && rm -f '$MOD_DIR/$hsid.pid'" EXIT
+  mod_prune
+  while mod_alive "$hsid"; do
+    restart_if_changed "$REFRESH" "$TURN_ROWS" "$hsid"
+    now_epoch=$(panel_now)
+    resolve_session
+    compaction_overlay_tick "$hsid"
+    gateway_alerts_tick "$hsid"
+    session_stats_refresh
+
+    slow_due=0
+    slow_frame_due "$now_epoch" && slow_due=1
+    (( slow_due )) && slow_fetch
+    block_clock_tick
+    if (( slow_due )); then
+      # Run in this shell, not a $(...), so the figures each builder
+      # computes on the way are still set when mod_json_write reads them.
+      build_summary > "$tmp_s" 2>>"$PANEL_ERR_FILE"
+      summary_block=$(cat "$tmp_s")
+      build_trailing > "$tmp_t" 2>>"$PANEL_ERR_FILE"
+      band_write "$hsid" "$summary_block"
+      # The two reports behind the graphs, to files: too big for the
+      # environment the writer gets everything else through.
+      printf '%s' "$RECENT_JSON" > "$tmp_r"
+      printf '%s' "${all_sess:-}" > "$tmp_a"
+      last_slow=$now_epoch
+      last_cols=$cols
+      last_model_label="${model_label:-}"
+    fi
+    MJ_RECENT_FILE="$tmp_r" MJ_ALL_SESS_FILE="$tmp_a" mod_json_write "$hsid"
+    panel_sleep "$REFRESH"
+  done
+}
+
 # Test seam: source this file with PANEL_LIB_ONLY=1 to get every function
 # above without entering the render loop. The tty setup further up is
 # already guarded by `[ -t 0 ]`, so a sourced panel touches no terminal and
 # installs no traps.
 if [ -n "${PANEL_LIB_ONLY:-}" ]; then
   return 0 2>/dev/null || exit 0
+fi
+
+# Headless for the Claude Code mod: none of the terminal set-up below.
+if [ -n "${PANEL_HEADLESS:-}" ]; then
+  headless_main
+  exit $?
 fi
 
 # CLAUDE_PANEL_CAFFEINATE (options file, see panel_option): keep the Mac
@@ -4412,9 +4767,7 @@ while true; do
   # One fetch+merge per slow tick, read by every section below it. The error
   # file is cleared first so the panel reports this tick's failures rather
   # than accumulating every failure since the pane opened.
-  (( slow_due )) && : > "$PANEL_ERR_FILE"
-  (( slow_due )) && RECENT_JSON=$(recent_sections_fetch 2>>"$PANEL_ERR_FILE")
-  (( slow_due )) && refresh_active_block
+  (( slow_due )) && slow_fetch
   # Always: re-derives the countdown and the $/hr denominator from the
   # block's fixed epochs. Pure arithmetic, no fetch.
   block_clock_tick
@@ -4511,6 +4864,49 @@ if cmp -s "$BIN_DIR/.ccusage-panel.sh.new" "$BIN_DIR/ccusage-panel.sh"; then
 else
   mv -f "$BIN_DIR/.ccusage-panel.sh.new" "$BIN_DIR/ccusage-panel.sh"
 fi
+
+echo "Installing ccusage-panel-mod-start (the usage-panel mod's data feed) ..."
+# What the usage-panel mod runs every 30 seconds: says the mod is still there
+# (mod/<id>.alive), and starts the headless panel for its session when none is
+# running. The panel stops by itself once .alive is 90 seconds old, so a
+# session that ends takes its panel with it without anyone killing anything.
+cat > "$BIN_DIR/.ccusage-panel-mod-start.new" <<'MODSTART_EOF'
+#!/usr/bin/env bash
+# Usage: ccusage-panel-mod-start <session id> <session cwd>
+set -uo pipefail
+sid="${1:-}" cwd="${2:-$HOME}"
+case "$sid" in
+  ''|*[!0-9a-fA-F-]*) echo "ccusage-panel-mod-start: not a session id: '$sid'" >&2; exit 2 ;;
+esac
+dir="$HOME/.cache/ccusage-panel-cache/mod"
+mkdir -p "$dir"
+touch "$dir/$sid.alive"
+held=$(cat "$dir/$sid.pid" 2>/dev/null)
+if [ -n "$held" ] && kill -0 "$held" 2>/dev/null; then
+  echo running
+  exit 0
+fi
+# The Ghostty this session runs in, found now: the panel is detached below,
+# and a detached process has no Ghostty above it for the alerts to sit over.
+ghostty=0 walk=$$ depth=0
+while [ -n "$walk" ] && [ "$walk" -gt 1 ] && [ "$depth" -lt 16 ]; do
+  if [ "$(ps -o comm= -p "$walk" 2>/dev/null | sed 's|.*/||')" = ghostty ]; then
+    ghostty=$walk
+    break
+  fi
+  walk=$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')
+  depth=$(( depth + 1 ))
+done
+[ -d "$cwd" ] || cwd="$HOME"
+# Twice forked and in a session of its own, so the panel belongs to neither
+# this script nor Claude Code, and no signal to the terminal reaches it.
+( cd "$cwd" && PANEL_HEADLESS=1 CLAUDE_PANEL_GHOSTTY_PID="$ghostty" \
+    nohup python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
+    bash "$HOME/.local/bin/ccusage-panel.sh" 10 12 "$sid" </dev/null >/dev/null 2>&1 & )
+echo started
+MODSTART_EOF
+chmod +x "$BIN_DIR/.ccusage-panel-mod-start.new"
+mv -f "$BIN_DIR/.ccusage-panel-mod-start.new" "$BIN_DIR/ccusage-panel-mod-start"
 
 echo "Installing claude-panel-keyblock (keyboard and click guard for the auto-split) ..."
 # Swallows real keyboard input system-wide for a few seconds while
@@ -5168,6 +5564,21 @@ LOG="$HOME/.cache/claude-panel-launch.log"
 mkdir -p "$(dirname "$LOG")"
 RUN_ID="$(date '+%H%M%S')-$$"
 log() { printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$RUN_ID" "$1" >> "$LOG"; }
+
+# The usage-panel mod draws this panel inside Claude Code, as a sidebar, so
+# while it is installed there is no split to open and nothing to type.
+# CLAUDE_PANEL_SPLIT=true (environment or the options file) opens it anyway.
+split_stands_aside() {
+  local v="${CLAUDE_PANEL_SPLIT:-$(grep -E '^CLAUDE_PANEL_SPLIT=' "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1 | cut -d= -f2-)}"
+  case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]' | tr -d '"'"'"' ')" in
+    true|1|yes|on) return 1 ;;
+  esac
+  [ -f "$HOME/.config/claude-panel/mod-installed" ]
+}
+if split_stands_aside; then
+  log "usage-panel mod installed: the panel is a sidebar inside Claude Code; no split (CLAUDE_PANEL_SPLIT=true to open one)"
+  exit 0
+fi
 
 panel_pids() { pgrep -f '[b]in/ccusage-panel\.sh' 2>/dev/null | sort; }
 
@@ -6987,11 +7398,26 @@ else
   echo "   --resume/--continue and GUI launches will fall back to guessing)"
 fi
 
+# ---- the usage-panel mod: this panel in a sidebar inside Claude Code ----
+# Installed from this checkout's mods/usage-panel when Claude Code loads mods.
+# While it is installed the split launcher stands aside, so no keystrokes are
+# typed into Ghostty; CLAUDE_PANEL_SPLIT=true in the options file brings the
+# split back. A setup run from outside a checkout has no mod to install.
+SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SETUP_DIR/install-mod.sh" ]; then
+  zsh "$SETUP_DIR/install-mod.sh" install
+fi
+
 echo
-echo "Done. Open a NEW terminal window/tab (or 'source ~/.zshrc') and type"
-echo "any 'claude...' command, it'll auto-split right and start the panel."
-echo "Same goes for the 'Launch Claude Code in Ghostty' Finder Service, if"
-echo "you use one (patched above when present)."
+if [ -f "$HOME/.config/claude-panel/mod-installed" ]; then
+  echo "Done. New Claude Code sessions open the panel as a sidebar (the usage-panel"
+  echo "mod). /usage-panel opens it, /usage-panel unpin stops it opening by itself."
+else
+  echo "Done. Open a NEW terminal window/tab (or 'source ~/.zshrc') and type"
+  echo "any 'claude...' command, it'll auto-split right and start the panel."
+  echo "Same goes for the 'Launch Claude Code in Ghostty' Finder Service, if"
+  echo "you use one (patched above when present)."
+fi
 echo "Run the panel manually any time with: ~/.local/bin/ccusage-panel.sh"
 echo
 # Claude Burst (a separate, optional gateway) writes metrics.jsonl, which the
@@ -7005,7 +7431,7 @@ else
   echo "compacts long subscription sessions at the proxy, and this panel's turn table"
   echo "then shows each compaction and what it cost."
 fi
-if [ -x "$BIN_DIR/claude-panel-keyblock" ]; then
+if [ -x "$BIN_DIR/claude-panel-keyblock" ] && [ ! -f "$HOME/.config/claude-panel/mod-installed" ]; then
   echo
   echo "The first auto-split will prompt macOS for two more permissions, for"
   echo "claude-panel-keyblock this time, grant BOTH Accessibility and Input"
