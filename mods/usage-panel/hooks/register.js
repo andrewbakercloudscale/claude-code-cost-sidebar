@@ -405,6 +405,10 @@ const PART_COLOURS = {
   'Tool results': 'green',
 }
 
+// What is left of the bar: a dark track, far from System prompt's gray, so
+// it does not read as one more part.
+const FREE_COLOUR = 'ansi256(237)'
+
 // The context Burst sends for this session as a stacked bar, a legend under
 // it, and what Claude Code itself still holds when that is more.
 function sentBar(Box, T, s, W) {
@@ -428,14 +432,17 @@ function sentBar(Box, T, s, W) {
       cells.push(T('█'.repeat(take), { color: PART_COLOURS[p.name] }))
       used += take
     }
-    if (used < barW) cells.push(T('░'.repeat(barW - used), { dimColor: true }))
+    if (used < barW) cells.push(T('█'.repeat(barW - used), { color: FREE_COLOUR }))
     bar = T(cells)
   }
   const out = [Box({ flexDirection: 'row', columnGap: 1, children: [T('ctx   ', { dimColor: true }), bar, T(label, { color: colour })] })]
   if (parts.length > 0) {
+    const key = parts.map((p) => [PART_COLOURS[p.name], p.name + ' ' + k(p.tokens)])
+    // The rest of the bar is room left before Burst compacts: named, last.
+    if (scale > s.context) key.push([FREE_COLOUR, 'Free ' + k(scale - s.context)])
     out.push(Box({
-      flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: parts.map((p) =>
-        T([T('■ ', { color: PART_COLOURS[p.name] }), T(p.name + ' ' + k(p.tokens), { dimColor: true })])),
+      flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: key.map(([c, text]) =>
+        T([T('■ ', { color: c }), T(text, { dimColor: true })])),
     }))
   }
   // Claude Code's own history, which Burst's compaction never shrinks: what
