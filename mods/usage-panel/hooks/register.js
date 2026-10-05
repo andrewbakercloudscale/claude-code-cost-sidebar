@@ -779,9 +779,11 @@ function sentBar(Box, T, s, W, win, warnPct) {
   }
   // Claude Code's own history, which Burst's compaction never shrinks. The
   // gap is the tool working, so it is one short line in orange, a colour no
-  // warning here uses. Said only once the two have parted.
-  if (s.raw > s.context * 1.1) {
-    out.push(T('Uncompacted Size: ' + k(s.raw), { color: HELD_COLOUR }))
+  // warning here uses. Always said: before the two part it is what Burst
+  // sends, and a line that came and went read as a figure gone missing.
+  const held = Math.max(s.raw || 0, s.context || 0)
+  if (held > 0) {
+    out.push(T('Uncompacted Size: ' + k(held), { color: HELD_COLOUR }))
   }
   return out
 }
