@@ -190,7 +190,7 @@ One turn is usually dear for one of three reasons: a large context written to th
 | The bar chart | One bar per day. Green is ordinary, yellow is over 1.5× the daily average, red over 2×, cyan is today. |
 | `peak $65.0 26 Sep` | The most expensive day. |
 | `this week $118` / `Oct $132` | This week and this calendar month so far. |
-| `By model` | Each model's share of the 30 days' spend, as one bar with a key. |
+| `By model` | Each model's share of the 30 days' spend, as a pie with its key beside it: clockwise from twelve o'clock, largest first. Five models are named; any more are one grey `Other` slice. A share too small for a cell is in the key but not on the pie. |
 
 ### Projects
 

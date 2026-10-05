@@ -804,26 +804,26 @@ function daysSection(Box, T, d, W) {
   const peak = days.reduce((a, b) => (b.cost > a.cost ? b : a), days[0])
   out.push(T([T('peak ', { dimColor: true }), T(money(peak.cost) + ' ' + short(peak.d)), T('  this week ', { dimColor: true }), T(money(d.week)), T('  ' + short(days[last].d).split(' ')[1] + ' ', { dimColor: true }), T(money(d.month))], { wrap: 'truncate-end' }))
 
-  // Models: one stacked bar, with a legend.
+  // Models: a pie, its key beside it.
   const models = {}
   for (const x of days) for (const [m, c] of Object.entries(x.models || {})) models[m] = (models[m] || 0) + c
   const ranked = Object.entries(models).filter(([, c]) => c > 0).sort((a, b) => b[1] - a[1])
   const total = ranked.reduce((a, [, c]) => a + c, 0)
   if (total > 0 && ranked.length > 0) {
     const palette = ['magenta', 'blue', 'yellow', 'green', 'cyan']
+    // Five named, the rest as one slice, so every slice has a key.
+    const slices = ranked.slice(0, 5).map(([m, c], i) => ({ name: modelName(m), cost: c, colour: palette[i] }))
+    const rest = ranked.slice(5).reduce((a, [, c]) => a + c, 0)
+    if (rest > 0) slices.push({ name: 'Other', cost: rest, colour: 'gray' })
     out.push(sub(T, 'By model'))
-    const barW = Math.max(10, W)
-    const cells = []
-    let used = 0
-    ranked.forEach(([, c], i) => {
-      const n = i === ranked.length - 1 ? barW - used : Math.round((c * barW) / total)
-      if (n > 0) cells.push(T('█'.repeat(n), { color: palette[i % palette.length] }))
-      used += Math.max(0, n)
-    })
-    out.push(Box({ flexDirection: 'row', children: cells }))
     out.push(Box({
-      flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: ranked.slice(0, 5).map(([m, c], i) =>
-        T([T('■ ', { color: palette[i % palette.length] }), T(modelName(m) + ' ' + Math.round((c * 100) / total) + '%', { dimColor: true })])),
+      flexDirection: 'row', columnGap: 2, children: [
+        Box({ flexDirection: 'column', children: pie(T, slices.map((x) => [x.colour, x.cost]), PIE_ROWS) }),
+        Box({
+          flexDirection: 'column', children: slices.map((x) =>
+            T([T('■ ', { color: x.colour }), T(lpad(Math.round((x.cost * 100) / total) + '%', 4) + ' ' + x.name, { dimColor: true })], { wrap: 'truncate-end' })),
+        }),
+      ],
     }))
   }
   return out
@@ -1056,6 +1056,47 @@ function footer(Box, T, d) {
 }
 
 // ---- drawing helpers
+
+const PIE_ROWS = 7
+
+// A pie in `rows` rows of text, twice as many cells wide (a cell is about
+// twice as tall as it is wide). Slices are [colour, amount], drawn clockwise
+// from twelve o'clock in the order given. Each cell takes the colour of the
+// slice at its middle; at the rim a half block keeps the outline round.
+export function pie(T, slices, rows) {
+  const total = slices.reduce((a, [, v]) => a + v, 0)
+  if (!(total > 0) || rows < 3) return []
+  const r = rows / 2
+  const at = (x, y) => {
+    const dx = x - r
+    const dy = y - r
+    if (dx * dx + dy * dy > r * r) return null
+    let turn = Math.atan2(dx, -dy) / (2 * Math.PI)
+    if (turn < 0) turn += 1
+    let sum = 0
+    for (const [c, v] of slices) {
+      sum += v / total
+      if (turn < sum) return c
+    }
+    return slices[slices.length - 1][0]
+  }
+  const out = []
+  for (let row = 0; row < rows; row++) {
+    const segs = []
+    for (let col = 0; col < rows * 2; col++) {
+      const x = (col + 0.5) / 2
+      const top = at(x, row + 0.25)
+      const low = at(x, row + 0.75)
+      const ch = top && low ? '█' : top ? '▀' : low ? '▄' : ' '
+      const c = top && low ? at(x, row + 0.5) || top : top || low || undefined
+      const last = segs[segs.length - 1]
+      if (last && last.c === c) last.text += ch
+      else segs.push({ c, text: ch })
+    }
+    out.push(T(segs.map((g) => T(g.text, { color: g.c }))))
+  }
+  return out
+}
 
 // A horizontal gauge: pct filled in colour, the rest dim, ticks at the given
 // percentages.
