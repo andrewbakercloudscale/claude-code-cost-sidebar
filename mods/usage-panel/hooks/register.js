@@ -332,7 +332,8 @@ function sessionSection(Box, T, d, W, burst) {
   if (sent) {
     out.push(...sentBar(Box, T, sent, W))
     if (s.compacting) out.push(T('  ⟳ a summary is ready: the next prompt compacts', { color: 'cyan' }))
-    else if (sent.state && sent.state !== 'ok') out.push(T('  ⟳ ' + sent.state, { color: 'cyan' }))
+    else if (sent.state === 'warning') out.push(T('! Close to the limit: Burst compacts at ' + k(sent.compact_at) + '.', { color: 'yellow', wrap: 'wrap' }))
+    else if (sent.state && sent.state !== 'ok') out.push(T('⟳ ' + sent.state, { color: 'cyan', wrap: 'wrap' }))
   } else if (s.ctx > 0 && s.win > 0) {
     const th = d.thresholds || {}
     const pct = (s.ctx * 100) / s.win
@@ -427,16 +428,10 @@ function sentBar(Box, T, s, W) {
   if (parts.length === 0) {
     bar = gauge(T, pct, barW, colour || 'blue', [])
   } else {
-    const cells = []
-    let used = 0
-    for (const p of parts) {
-      const take = Math.min(Math.max(1, Math.round((p.tokens * barW) / scale)), barW - used)
-      if (take <= 0) break
-      cells.push(T('█'.repeat(take), { color: PART_COLOURS[p.name] }))
-      used += take
-    }
-    if (used < barW) cells.push(T('█'.repeat(barW - used), { color: FREE_COLOUR }))
-    bar = T(cells)
+    const items = parts.map((p) => [PART_COLOURS[p.name], p.tokens])
+    if (scale > s.context) items.push([FREE_COLOUR, scale - s.context])
+    const widths = share(items.map((x) => x[1]), barW)
+    bar = T(items.map(([c], i) => (widths[i] > 0 ? T('█'.repeat(widths[i]), { color: c }) : '')))
   }
   const out = [Box({ flexDirection: 'row', columnGap: 1, children: [T('ctx   ', { dimColor: true }), bar, T(label, { color: colour })] })]
   if (parts.length > 0) {
@@ -452,6 +447,30 @@ function sentBar(Box, T, s, W) {
   // goes, uncached, if Burst drops out. Said only once the two have parted.
   if (s.raw > s.context * 1.1) {
     out.push(T('Claude Code holds ' + k(s.raw) + ': sent whole if Burst drops out', { color: s.raw >= 800000 ? 'red' : s.raw >= 500000 ? 'yellow' : undefined, dimColor: s.raw < 500000, wrap: 'wrap' }))
+  }
+  return out
+}
+
+// `width` cells shared out in proportion, every amount above zero getting at
+// least one: a part too small for a cell, or the last of the room left, is
+// still on the bar. What that costs comes off the widest.
+export function share(amounts, width) {
+  const total = amounts.reduce((a, b) => a + b, 0)
+  if (!(total > 0) || width <= 0) return amounts.map(() => 0)
+  const ideal = amounts.map((a) => (a * width) / total)
+  const out = ideal.map((x, i) => (amounts[i] > 0 ? Math.max(1, Math.round(x)) : 0))
+  let sum = out.reduce((a, b) => a + b, 0)
+  while (sum > width) {
+    const i = out.indexOf(Math.max(...out))
+    if (out[i] <= 1) break
+    out[i]--
+    sum--
+  }
+  while (sum < width) {
+    let best = 0
+    out.forEach((_, i) => { if (ideal[i] - out[i] > ideal[best] - out[best]) best = i })
+    out[best]++
+    sum++
   }
   return out
 }
