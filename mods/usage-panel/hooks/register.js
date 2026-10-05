@@ -18,6 +18,10 @@ const READ_MS = 5000 // the panel writes every 10s; reading at 5s halves the lag
 const FEED_MS = 30000 // keeps the headless panel alive; it stops after 90s without
 const STALE_S = 180 // older than this, the feed has stopped
 const PIN_KEY = 'pinned'
+const LAYOUT_KEY = 'layout'
+// The sidebar's sections, most specific first. The footer (proxy state,
+// licence) always stays at the bottom.
+export const SECTIONS = ['session', 'turns', 'today', 'sessions', 'days', 'projects']
 
 let sid = ''
 let home = ''
@@ -26,12 +30,48 @@ let data = null // the panel's last mod/<sid>.json
 let raw = ''
 let feedError = ''
 let pinned = true
+let layout = null // { order, hidden } as the person left it
+
+// A stored layout made whole: unknown names dropped, sections added since
+// it was saved put back in their default place.
+export function layoutOf(l) {
+  const order = (l && Array.isArray(l.order) ? l.order : []).filter((x) => SECTIONS.includes(x))
+  for (const x of SECTIONS) {
+    if (order.includes(x)) continue
+    const before = SECTIONS.slice(0, SECTIONS.indexOf(x)).reverse().find((y) => order.includes(y))
+    order.splice(before ? order.indexOf(before) + 1 : 0, 0, x)
+  }
+  const hidden = (l && Array.isArray(l.hidden) ? l.hidden : []).filter((x) => SECTIONS.includes(x))
+  return { order, hidden: [...new Set(hidden)] }
+}
+
+// "/usage-panel hide today", "show", "up", "down", "top", "bottom", "reset":
+// the new layout, or a string saying what was wrong.
+export function relayout(l, verb, name) {
+  const lay = layoutOf(l)
+  if (verb === 'reset') return layoutOf(null)
+  if (!SECTIONS.includes(name)) return 'Sections: ' + SECTIONS.join(', ')
+  const i = lay.order.indexOf(name)
+  const move = (j) => { lay.order.splice(i, 1); lay.order.splice(Math.max(0, Math.min(lay.order.length, j)), 0, name) }
+  if (verb === 'hide') lay.hidden = [...new Set([...lay.hidden, name])]
+  else if (verb === 'show') lay.hidden = lay.hidden.filter((x) => x !== name)
+  else if (verb === 'up') move(i - 1)
+  else if (verb === 'down') move(i + 1)
+  else if (verb === 'top') move(0)
+  else if (verb === 'bottom') move(SECTIONS.length)
+  return lay
+}
 
 export function register(on) {
   on('session.start', async ($, e, next) => {
     sid = await $.session.id()
     home = (await $.env.get('HOME')) || ''
     cwd = (e && e.cwd) || (await $.session.cwd()) || home
+    try {
+      layout = (await $.store.get(LAYOUT_KEY)) || null
+    } catch (err) {
+      // No stored layout: the default.
+    }
     try {
       const v = await $.store.get(PIN_KEY)
       if (v === false) pinned = false
@@ -45,7 +85,7 @@ export function register(on) {
       if (await read($)) $.ui.invalidate('ui.render')
     })
     try {
-      await $.command.register({ name: COMMAND, description: 'The usage panel sidebar: open it, or "pin" / "unpin" it for every new session', immediate: true })
+      await $.command.register({ name: COMMAND, description: 'The usage sidebar: open it; pin / unpin; hide, show, up, down, top, bottom <section>; sections; reset', immediate: true })
     } catch (err) {
       $.ui.log('could not add /' + COMMAND + ': ' + err)
     }
@@ -68,16 +108,53 @@ export function register(on) {
       if (pinned) await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS })
       return {}
     }
+    const [verb, name] = arg.split(/\s+/)
+    if (['hide', 'show', 'up', 'down', 'top', 'bottom', 'reset'].includes(verb)) {
+      const next = relayout(layout, verb, name)
+      if (typeof next === 'string') {
+        $.ui.toast(next)
+        return {}
+      }
+      layout = next
+      try { await $.store.set(LAYOUT_KEY, layout) } catch (err) { $.ui.log('could not save the layout: ' + err) }
+      $.ui.invalidate('ui.render')
+      return {}
+    }
+    if (verb === 'sections') {
+      const lay = layoutOf(layout)
+      $.ui.toast(lay.order.map((x) => (lay.hidden.includes(x) ? '(' + x + ')' : x)).join(' · '))
+      return {}
+    }
     await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS, focus: true, closeOnEscape: true })
     return {}
   })
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const width = Math.max(30, Math.min(100, (e.props && e.props.bodyColumns) || (e.viewport && e.viewport.columns) || 50))
     const now = Math.floor((await $.clock.now()) / 1000)
-    return Box({ flexDirection: 'column', children: panel(Box, Text, data, width, now, feedError) })
+    const extras = []
+    // Claude Burst's dashboard, as the pane's [View] was: the dashboard when
+    // it answers, else Burst's support console, which is up when it is not.
+    const b = data && data.burst
+    if (b && b.dashboard) {
+      extras.push(Button({
+        key: 'burst', label: 'Open the Claude Burst dashboard', hotkey: 'v', plain: true,
+        onPress: async () => {
+          let url = b.dashboard
+          try {
+            const r = await $.http.fetch(b.dashboard)
+            if (!r.ok && b.console) url = b.console
+          } catch (err) {
+            if (b.console) url = b.console
+          }
+          try { await $.process.run(['open', url]) } catch (err) { $.ui.toast('could not open ' + url) }
+        },
+      }))
+    }
+    const rows = panel(Box, Text, data, width, now, feedError, layout, extras)
+    return Box({ flexDirection: 'column', children: rows })
   })
 }
 
@@ -118,7 +195,7 @@ const TIER = { green: 'green', yellow: 'yellow', red: 'red', purple: 'magenta', 
 const ACCENT = 'cyan'
 const BLOCKS = ' ▁▂▃▄▅▆▇█'
 
-export function panel(Box, Text, d, width, now, feedError) {
+export function panel(Box, Text, d, width, now, feedError, layout, extras = []) {
   const T = (children, props = {}) => Text({ ...props, children: Array.isArray(children) ? children : [children] })
   const rows = []
   if (!d) {
@@ -141,34 +218,54 @@ export function panel(Box, Text, d, width, now, feedError) {
   }))
   if (feedError) rows.push(T(feedError, { color: 'red', wrap: 'wrap' }))
 
-  rows.push(...sessionSection(Box, T, d, W))
-  // The turn table straight under the session it belongs to, not at the
-  // bottom of the sidebar, where it sat below the fold and went unseen.
-  rows.push(...turnsTable(T, d))
-  rows.push(...todaySection(Box, T, d, W, now))
-  rows.push(...daysSection(Box, T, d, W))
-  rows.push(...projectsSection(Box, T, d, W))
-  rows.push(...topSection(Box, T, d, W))
+  // Most specific first: this session, then today across sessions, then the
+  // last 30 days, then this Mac's set-up. Each block's insights sit under it.
+  // The order, and which are shown, is the person's (see layoutOf).
   const tips = insights(d, now)
-  if (tips.length > 0) {
-    rows.push(heading(T, 'Insights'))
-    for (const t of tips) {
-      rows.push(Box({ flexDirection: 'row', children: [T((t.icon || '•') + ' ', { color: TIER[t.tier] || ACCENT }), T(t.text, { wrap: 'wrap' })] }))
-    }
+  const notes = (scope) => tips.filter((t) => t.scope === scope).map((t) =>
+    Box({ flexDirection: 'row', children: [T((t.icon || '•') + ' ', { color: TIER[t.tier] || ACCENT }), T(t.text, { wrap: 'wrap' })] }))
+  // Each section is a card: a rounded border, its heading inside, so where
+  // one ends and the next starts is plain. The border and padding take 4.
+  const IW = Math.max(26, W - 4)
+  const draw = {
+    session: () => [...sessionSection(Box, T, d, IW), ...notes('session')],
+    turns: () => turnsTable(T, d),
+    today: () => [...todaySection(Box, T, d, IW, now), ...notes('today')],
+    sessions: () => topSection(Box, T, d, IW),
+    days: () => daysSection(Box, T, d, IW),
+    projects: () => [...projectsSection(Box, T, d, IW), ...notes('general')],
   }
-  rows.push(...footer(Box, T, d))
+  const lay = layoutOf(layout)
+  for (const id of lay.order) {
+    if (lay.hidden.includes(id)) continue
+    const body = draw[id]()
+    if (body.length > 0) rows.push(card(Box, id, body))
+  }
+  if (lay.hidden.length > 0) rows.push(T('Hidden: ' + lay.hidden.join(', ') + ' (/' + 'usage-panel show <name>)', { dimColor: true, wrap: 'wrap' }))
+  const foot = [...footer(Box, T, d), ...extras]
+  if (foot.length > 0) rows.push(card(Box, 'setup', [heading(T, 'This Mac'), ...foot]))
   return rows
 }
 
+function card(Box, key, children) {
+  return Box({ key, flexDirection: 'column', borderStyle: 'round', borderColor: 'gray', borderDimColor: true, paddingLeft: 1, paddingRight: 1, children })
+}
+
+// A card's title, bold, with a short dim note after it.
 function heading(T, title, note) {
-  return T([T(' ', {}), T(title, { bold: true, color: ACCENT }), note ? T('  ' + note, { dimColor: true }) : ''], { wrap: 'truncate-end' })
+  return T([T(title, { bold: true, color: ACCENT }), note ? T('  ' + note, { dimColor: true }) : ''], { wrap: 'truncate-end' })
+}
+
+// A smaller heading inside a card, for one chart of several.
+function sub(T, title, note) {
+  return T([T(title, { color: ACCENT }), note ? T('  ' + note, { dimColor: true }) : ''], { wrap: 'truncate-end' })
 }
 
 // ---- this session
 
 function sessionSection(Box, T, d, W) {
   const s = d.session || {}
-  const out = [heading(T, 'This session', d.sid ? '*' + d.sid.slice(-5) : '')]
+  const out = [heading(T, 'This session', [d.sid ? '*' + d.sid.slice(-5) : '', s.folder || ''].filter(Boolean).join(' · '))]
   // Before the first reply the panel knows no model ("Unknown") and prices
   // nothing ($0): say so rather than draw that as a reading.
   const turnsSoFar = (d.turns && d.turns.turns) || []
@@ -176,17 +273,13 @@ function sessionSection(Box, T, d, W) {
     out.push(T('No reply yet: the figures start with the first one.', { dimColor: true, wrap: 'wrap' }))
     return out
   }
-  out.push(T([
-    T(s.model || 'model unknown', { color: TIER[s.model_tier], bold: true }),
-    s.folder ? T('  ' + s.folder, { dimColor: true }) : '',
-    s.folder_spend != null ? T(' ' + money(s.folder_spend), { dimColor: true }) : '',
-  ], { wrap: 'truncate-end' }))
   const turns = (d.turns && d.turns.turns) || []
   const n = turns.length > 0 ? turns[turns.length - 1][0] : 0
   out.push(T([
-    T(s.cost == null ? '--' : money(s.cost, 2), { bold: true, color: TIER[s.tier] }),
+    T(s.model || 'model unknown', { color: TIER[s.model_tier], bold: true }),
     T('  '),
-    T(s.rate == null ? '' : money(s.rate, 2) + '/hr', { color: TIER[s.rate_tier] }),
+    T(s.cost == null ? '--' : money(s.cost, 2), { bold: true, color: TIER[s.tier] }),
+    T(s.rate == null ? '' : '  ' + money(s.rate, 2) + '/hr', { color: TIER[s.rate_tier] }),
     T(n ? '  ' + n + (n === 1 ? ' turn' : ' turns') : '', { dimColor: true }),
     s.avg_session > 0 && s.cost != null && s.cost >= s.avg_session * 0.5 ? T('  ' + ratio(s.cost / s.avg_session) + ' avg', { dimColor: true }) : '',
   ], { wrap: 'truncate-end' }))
@@ -196,12 +289,12 @@ function sessionSection(Box, T, d, W) {
     const th = d.thresholds || {}
     const pct = (s.ctx * 100) / s.win
     const label = k(s.ctx) + '/' + k(s.win) + ' ' + Math.round(pct) + '%'
-    const barW = Math.max(6, W - 6 - label.length)
+    const barW = Math.max(6, W - 8 - label.length)
     const ticks = [th.ctx_yellow, th.ctx_red, th.ctx_purple].filter((x) => x > 0)
     if (s.restart_tokens > 0) ticks.push((s.restart_tokens * 100) / s.win)
     out.push(Box({
       flexDirection: 'row', columnGap: 1, children: [
-        T('ctx', { dimColor: true }),
+        T('ctx   ', { dimColor: true }),
         gauge(T, pct, barW, TIER[s.ctx_tier] || 'green', ticks),
         T(label, { color: TIER[s.ctx_tier] }),
       ],
@@ -211,7 +304,7 @@ function sessionSection(Box, T, d, W) {
 
   // Context per turn, with compactions marked; cost per turn underneath.
   if (turns.length >= 3) {
-    const cols = Math.max(10, W - 9)
+    const cols = Math.max(10, W - 7)
     const shown = turns.slice(-cols)
     const ctxs = shown.map((t) => t[1])
     const drops = new Set()
@@ -225,7 +318,7 @@ function sessionSection(Box, T, d, W) {
     }
     out.push(Box({
       flexDirection: 'row', columnGap: 1, children: [
-        T('context', { dimColor: true }),
+        T('growth', { dimColor: true }),
         spark(T, ctxs, (v, i) => (drops.has(i) ? 'cyan' : ctxColour(v)), 0),
       ],
     }))
@@ -233,7 +326,7 @@ function sessionSection(Box, T, d, W) {
     const med = median(costs.filter((c) => c > 0))
     out.push(Box({
       flexDirection: 'row', columnGap: 1, children: [
-        T('$/turn ', { dimColor: true }),
+        T('$/turn', { dimColor: true }),
         spark(T, costs, (v) => (med > 0 && v > med * 4 ? 'red' : med > 0 && v > med * 2 ? 'yellow' : 'green'), 0),
       ],
     }))
@@ -243,8 +336,8 @@ function sessionSection(Box, T, d, W) {
       const label = Math.round(avg) + '% hit'
       out.push(Box({
         flexDirection: 'row', columnGap: 1, children: [
-          T('cache  ', { dimColor: true }),
-          gauge(T, avg, Math.max(6, W - 10 - label.length), avg >= 90 ? 'green' : avg >= 75 ? 'yellow' : 'red', []),
+          T('cache ', { dimColor: true }),
+          gauge(T, avg, Math.max(6, W - 8 - label.length), avg >= 90 ? 'green' : avg >= 75 ? 'yellow' : 'red', []),
           T(label, { dimColor: true }),
         ],
       }))
@@ -258,42 +351,37 @@ function sessionSection(Box, T, d, W) {
 function todaySection(Box, T, d, W, now) {
   const t = d.today || {}
   const b = d.block || {}
-  const out = [heading(T, 'Today')]
+  const out = [heading(T, 'Today', 'all sessions')]
   if (t.unpriced && !(t.cost > 0)) {
-    out.push(T('? an unpriced model ran today: ' + t.unpriced, { color: 'yellow', wrap: 'wrap' }))
+    out.push(T('? unpriced model today: ' + t.unpriced, { color: 'yellow', wrap: 'wrap' }))
   } else {
     out.push(T([
       T(money(t.cost, 2), { bold: true, color: TIER[t.tier] }),
-      T(' spent', { dimColor: true }),
-      t.pred != null ? T('   by end of day ', { dimColor: true }) : '',
+      t.pred != null ? T('  → ' , { dimColor: true }) : '',
       t.pred != null ? T(money(t.pred, 2), { color: TIER[t.pred_tier] }) : '',
+      t.pred != null ? T(' by end of day', { dimColor: true }) : '',
     ], { wrap: 'truncate-end' }))
   }
   // A typical day by hour (30-day average), this hour highlighted.
   if (Array.isArray(d.hourly_avg) && d.hourly_avg.some((v) => v > 0)) {
     const hour = new Date(now * 1000).getHours()
-    const cw = Math.max(24, W - 2)
+    const cw = Math.max(24, W)
     const hours = stretch(24, cw)
     const vals = hours.map((h) => d.hourly_avg[h])
     const chart = bars(T, Box, vals, 3, (v, i) => (hours[i] === hour ? 'cyan' : hours[i] < hour ? 'blue' : 'gray'))
-    out.push(T('a typical day by hour, 30-day average; now in cyan', { dimColor: true, wrap: 'truncate-end' }))
+    out.push(sub(T, 'By hour', '30-day average'))
     out.push(...chart)
     out.push(T(axis(['0h', '6h', '12h', '18h', '23h'], cw), { dimColor: true }))
   }
   if (b.active) {
     const left = b.rem || 0
     const used = Math.max(0, Math.min(1, 1 - left / 300))
-    out.push(Box({
-      flexDirection: 'row', columnGap: 1, children: [
-        T('5h block', { dimColor: true }),
-        gauge(T, used * 100, Math.max(6, W - 11 - hm(left).length - 5), 'blue', []),
-        T(hm(left) + ' left', { dimColor: true }),
-      ],
-    }))
+    out.push(sub(T, '5h block', hm(left) + ' left'))
+    out.push(gauge(T, used * 100, W, 'blue', []))
     out.push(T([
-      T('         ' + money(b.cost), { color: TIER[b.tier] }),
-      T(' so far, all sessions ', { dimColor: true }),
-      T(money(b.cph, 2) + '/hr ' + (b.label || '').toLowerCase(), { color: TIER[b.tier] }),
+      T(money(b.cost), { color: TIER[b.tier] }),
+      T('  ' + money(b.cph, 2) + '/hr', { color: TIER[b.tier] }),
+      b.label ? T(' ' + b.label.toLowerCase(), { dimColor: true }) : '',
     ], { wrap: 'truncate-end' }))
   }
   return out
@@ -309,11 +397,10 @@ function daysSection(Box, T, d, W) {
   const trend = p.prev > 0 ? p.spend / p.prev : 0
   out.push(T([
     T(money(p.spend), { bold: true, color: TIER[p.tier] }),
-    T('  avg ', { dimColor: true }),
-    T(money(p.avg) + '/day', { color: TIER[p.avg_tier] }),
-    trend > 0 ? T('  ' + (trend >= 1 ? '▲ ' : '▼ ') + ratio(trend) + ' prior 30', { color: trend >= 1.5 ? 'yellow' : trend < 1 ? 'green' : undefined }) : '',
+    T('  ' + money(p.avg) + '/day', { color: TIER[p.avg_tier] }),
+    trend > 0 ? T('  ' + (trend >= 1 ? '▲ ' : '▼ ') + ratio(trend) + ' vs prior', { color: trend >= 1.5 ? 'yellow' : trend < 1 ? 'green' : undefined }) : '',
   ], { wrap: 'truncate-end' }))
-  const cw = Math.max(days.length, W - 2)
+  const cw = Math.max(days.length, W)
   const idx = stretch(days.length, cw)
   const vals = idx.map((i) => days[i].cost)
   const avg = p.avg || 0
@@ -327,7 +414,7 @@ function daysSection(Box, T, d, W) {
   }))
   out.push(T(axis([short(days[0].d), short(days[Math.floor(last / 2)].d), 'today'], cw), { dimColor: true }))
   const peak = days.reduce((a, b) => (b.cost > a.cost ? b : a), days[0])
-  out.push(T([T('peak ', { dimColor: true }), T(money(peak.cost) + ' on ' + short(peak.d)), T('   week ', { dimColor: true }), T(money(d.week)), T('  month ', { dimColor: true }), T(money(d.month))], { wrap: 'truncate-end' }))
+  out.push(T([T('peak ', { dimColor: true }), T(money(peak.cost) + ' ' + short(peak.d)), T('  this week ', { dimColor: true }), T(money(d.week)), T('  ' + short(days[last].d).split(' ')[1] + ' ', { dimColor: true }), T(money(d.month))], { wrap: 'truncate-end' }))
 
   // Models: one stacked bar, with a legend.
   const models = {}
@@ -336,7 +423,8 @@ function daysSection(Box, T, d, W) {
   const total = ranked.reduce((a, [, c]) => a + c, 0)
   if (total > 0 && ranked.length > 0) {
     const palette = ['magenta', 'blue', 'yellow', 'green', 'cyan']
-    const barW = Math.max(10, W - 2)
+    out.push(sub(T, 'By model'))
+    const barW = Math.max(10, W)
     const cells = []
     let used = 0
     ranked.forEach(([, c], i) => {
@@ -358,12 +446,12 @@ function daysSection(Box, T, d, W) {
 function projectsSection(Box, T, d, W) {
   const ps = d.projects || []
   if (ps.length === 0) return []
-  const out = [heading(T, 'By project', '30 days')]
+  const out = [heading(T, 'Projects', '30 days')]
   const max = ps[0].cost || 1
   const nameW = Math.min(22, Math.max(...ps.map((p) => p.name.length)))
   const here = (d.session && d.session.folder) || ''
   for (const p of ps) {
-    const barW = Math.max(4, W - nameW - 12)
+    const barW = Math.max(4, W - nameW - 9)
     const n = Math.max(1, Math.round((p.cost / max) * barW))
     const mine = p.name === here
     out.push(Box({
@@ -380,11 +468,11 @@ function projectsSection(Box, T, d, W) {
 function topSection(Box, T, d, W) {
   const top = d.top || []
   if (top.length === 0) return []
-  const out = [heading(T, 'Top sessions today')]
+  const out = [heading(T, 'Sessions today')]
   const max = top[0].cost || 1
   for (const r of top) {
     const mine = r.sid === d.sid
-    const barW = Math.max(4, W - 30)
+    const barW = Math.max(4, W - 26)
     const n = Math.max(1, Math.round((r.cost / max) * barW))
     out.push(Box({
       flexDirection: 'row', columnGap: 1, children: [
@@ -409,12 +497,12 @@ export function insights(d, now) {
   const recent = turns.slice(-20).filter((x) => !x[6])
 
   if (s.restart_tokens > 0 && s.ctx >= s.restart_tokens) {
-    out.push({ tier: 'red', icon: '!', text: 'Context is ' + k(s.ctx) + ', past the ' + k(s.restart_tokens) + ' restart line: every turn re-reads all of it. /compact or restart.' })
+    out.push({ scope: 'session', tier: 'red', icon: '!', text: 'Context ' + k(s.ctx) + ' is past the ' + k(s.restart_tokens) + ' restart line: /compact or restart.' })
   } else if (recent.length >= 5 && s.ctx > 0) {
     const grow = (recent[recent.length - 1][1] - recent[0][1]) / (recent.length - 1)
     if (grow > 500 && s.restart_tokens > 0) {
       const left = Math.round((s.restart_tokens - s.ctx) / grow)
-      out.push({ tier: left < 30 ? 'yellow' : 'cyan', icon: '↗', text: 'Context grows about ' + k(grow) + ' a turn: the ' + k(s.restart_tokens) + ' restart line in about ' + left + ' turns.' })
+      out.push({ scope: 'session', tier: left < 30 ? 'yellow' : 'cyan', icon: '↗', text: 'Context grows ' + k(grow) + '/turn: restart line in ~' + left + ' turns.' })
     }
   }
 
@@ -422,44 +510,47 @@ export function insights(d, now) {
     const hit = recent.reduce((a, x) => a + x[3], 0) / recent.length
     const costs = recent.map((x) => x[4]).filter((c) => c != null)
     if (hit < 85) {
-      out.push({ tier: 'yellow', icon: '◇', text: 'Cache hit is ' + Math.round(hit) + '% over the last 20 turns: writes cost about 25 times a read, so a pause over 5 minutes or a changed prefix costs more.' })
+      out.push({ scope: 'session', tier: 'yellow', icon: '◇', text: 'Cache hit ' + Math.round(hit) + '%: a pause over 5 min re-writes it at ~25× a read.' })
     } else if (costs.length > 0) {
-      out.push({ tier: 'green', icon: '◇', text: 'Cache hit ' + Math.round(hit) + '%: a turn costs ' + money(median(costs), 2) + ' (median, last 20).' })
+      out.push({ scope: 'session', tier: 'green', icon: '◇', text: 'Median turn ' + money(median(costs), 2) + ' (last 20).' })
     }
     const all = turns.slice(-50).filter((x) => x[4] != null)
     const med = median(all.map((x) => x[4]))
     const worst = all.reduce((a, x) => (a == null || x[4] > a[4] ? x : a), null)
     if (worst && med > 0 && worst[4] > med * 4 && worst[4] >= 0.05) {
-      out.push({ tier: 'yellow', icon: '▲', text: 'Turn ' + worst[0] + ' cost ' + money(worst[4], 2) + ', ' + Math.round(worst[4] / med) + '× the median: it added ' + k(worst[2]) + ' of context.' })
+      out.push({ scope: 'session', tier: 'yellow', icon: '▲', text: 'Turn ' + worst[0] + ': ' + money(worst[4], 2) + ', ' + Math.round(worst[4] / med) + '× median, +' + k(worst[2]) + ' context.' })
     }
   }
 
   if (s.cost != null && s.avg_session > 0 && s.cost > s.avg_session * 3) {
-    out.push({ tier: s.tier || 'yellow', icon: '$', text: 'This session has cost ' + ratio(s.cost / s.avg_session) + ' your 7-day average session (' + money(s.avg_session, 2) + ').' })
+    out.push({ scope: 'session', tier: s.tier || 'yellow', icon: '$', text: ratio(s.cost / s.avg_session) + ' your average session (' + money(s.avg_session, 2) + ', 7 days).' })
   }
 
   if (t.cost != null && t.typical_so_far > 1) {
     const pace = t.cost / t.typical_so_far
-    if (pace >= 1.5) out.push({ tier: pace >= 2 ? 'red' : 'yellow', icon: '◔', text: 'A busy day: ' + ratio(pace) + ' a typical day\'s spend by this hour.' })
-    else if (pace <= 0.5) out.push({ tier: 'green', icon: '◔', text: 'A quiet day: ' + Math.round(pace * 100) + '% of a typical day\'s spend by this hour.' })
+    if (pace >= 1.5) out.push({ scope: 'today', tier: pace >= 2 ? 'red' : 'yellow', icon: '◔', text: 'Busy: ' + ratio(pace) + ' a typical day by this hour.' })
+    else if (pace <= 0.5) out.push({ scope: 'today', tier: 'green', icon: '◔', text: 'Quiet: ' + Math.round(pace * 100) + '% of a typical day by this hour.' })
   }
 
   if (b.active && (b.tier === 'red' || b.tier === 'yellow')) {
-    out.push({ tier: b.tier, icon: '≋', text: 'All sessions together are burning ' + money(b.cph, 2) + '/hr (' + (b.label || '').toLowerCase() + '); the 5h block resets in ' + hm(b.rem) + '.' })
+    out.push({ scope: 'today', tier: b.tier, icon: '≋', text: 'Burning ' + money(b.cph, 2) + '/hr (' + (b.label || '').toLowerCase() + '); block resets in ' + hm(b.rem) + '.' })
   }
 
   const ps = d.projects || []
   const ptotal = ps.reduce((a, p) => a + p.cost, 0)
   if (ps.length > 1 && ptotal > 0 && ps[0].cost / ptotal >= 0.3) {
-    out.push({ tier: 'cyan', icon: '▣', text: ps[0].name + ' is ' + Math.round((ps[0].cost * 100) / ptotal) + '% of the last 30 days across your top projects.' })
+    out.push({ scope: 'general', tier: 'cyan', icon: '▣', text: ps[0].name + ': ' + Math.round((ps[0].cost * 100) / ptotal) + '% of project spend.' })
   }
 
   if (Array.isArray(d.hourly_avg)) {
     let best = 0
     d.hourly_avg.forEach((v, h) => { if (v > d.hourly_avg[best]) best = h })
-    if (d.hourly_avg[best] > 0) out.push({ tier: 'cyan', icon: '◷', text: 'Your busiest hour is usually ' + String(best).padStart(2, '0') + ':00, about ' + money(d.hourly_avg[best]) + ' an hour.' })
+    if (d.hourly_avg[best] > 0) out.push({ scope: 'general', tier: 'cyan', icon: '◷', text: 'Busiest hour: ' + String(best).padStart(2, '0') + ':00, ~' + money(d.hourly_avg[best]) + '/hr.' })
   }
-  return out.slice(0, 6)
+  // At most three per block, most urgent first, so each block's notes stay
+  // a glance rather than a list.
+  const per = {}
+  return out.filter((t) => (per[t.scope] = (per[t.scope] || 0) + 1) <= 3)
 }
 
 // ---- the panel's own turn table and footer rows, colours kept
@@ -468,7 +559,7 @@ function turnsTable(T, d) {
   const lines = parseAnsi(d.table || '')
   if (lines.length === 0) return []
   const b = d.block || {}
-  const out = [heading(T, 'Turns', b.active ? 'burn ' + money(b.cph, 2) + '/hr, all sessions' : '')]
+  const out = [heading(T, 'Turns', b.active ? 'all sessions ' + money(b.cph, 2) + '/hr' : '')]
   for (const line of lines.slice(0, 13)) out.push(lineText(T, line))
   return out
 }
@@ -477,8 +568,7 @@ function footer(Box, T, d) {
   const out = []
   const lines = parseAnsi(d.summary || '')
   const keep = lines.filter((l) => /Proxy State:|License:|no price for/.test(l.text))
-  if (keep.length > 0) out.push(T(' '))
-  for (const l of keep) out.push(lineText(T, l))
+  for (const l of keep) out.push(lineText(T, { text: l.text, segs: l.segs.filter((g) => g.text.trim() !== '[View]') }))
   for (const e of d.errors || []) out.push(T('! ' + e, { color: 'red', wrap: 'truncate-end' }))
   return out
 }
@@ -512,7 +602,9 @@ export function spark(T, vals, colourOf, floor) {
   const span = max - min || 1
   const segs = []
   vals.forEach((v, i) => {
-    const level = v <= 0 ? 0 : Math.max(1, Math.round(((v - min) / span) * 8))
+    // Six eighths at most: a full block would touch the row above, and the
+    // three graphs stacked read as one.
+    const level = v <= 0 ? 0 : Math.max(1, Math.round(((v - min) / span) * 6))
     const ch = BLOCKS[level]
     const c = colourOf(v, i)
     const last = segs[segs.length - 1]
