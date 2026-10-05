@@ -28,6 +28,12 @@ const STALE_S = 180 // older than this, the feed has stopped
 const LIMITS_MS = 15000 // the plan's limits: Burst keeps only its last 20 replies
 const EXTRA_MS = 60000 // Burst's slower figures
 const LIMITS_KEY = 'limits'
+// The context without Claude Burst, as a share of the model's window: green
+// under 40%, amber to 70%, red beyond (400k and 700k of a 1M window). Every
+// turn re-sends the whole context, so past these it is time to /compact or
+// /clear by hand.
+const CTX_AMBER = 0.4
+const CTX_RED = 0.7
 const LIMIT_WARN = 0.8 // a toast when a plan limit passes this, and again at
 const LIMIT_ALARM = 0.95
 const PIN_KEY = 'pinned'
@@ -49,7 +55,7 @@ let layout = null // { order, hidden } as the person left it
 let burst = null // { down, mod }: Burst's /api/mod answer; null without Burst
 let burstRaw = ''
 let limits = null // [{ key, util, reset }]: the plan's limits, as Anthropic last reported them
-let extra = null // { saved, secondary }: Burst's slower figures for the insights
+let extra = null // { saved, secondary, warn }: Burst's slower figures, and the percent of its limit it warns at
 const warned = {} // limit window and reset time -> the level already toasted
 
 // A stored layout made whole: unknown names dropped, sections added since
@@ -286,7 +292,7 @@ async function readLimits($) {
     const key = l.key + ':' + l.reset
     if (level > (warned[key] || 0)) {
       warned[key] = level
-      $.ui.toast('Plan limit: ' + Math.round(l.util * 100) + '% of the ' + limitName(l.key) + ' limit used, resets ' + when(l.reset, now), { timeoutMs: level > 1 ? 30000 : 15000 })
+      limitToast($, l, now)
     }
   }
   return JSON.stringify(limits) !== before
@@ -313,7 +319,9 @@ async function readExtras($) {
   const before = JSON.stringify(extra)
   const now = Math.floor((await $.clock.now()) / 1000)
   const state = await get('/api/state')
-  const next = { saved: null, secondary: null }
+  const next = { saved: null, secondary: null, warn: 0 }
+  const cfg = state && state.context && state.context.compaction
+  if (cfg && cfg.warn_at_percent > 0) next.warn = cfg.warn_at_percent
   const stats = state && state.context && state.context.compaction_stats
   const mine = ((stats && stats.sessions) || []).filter((x) => x && x.session === sid)
   if (mine.length > 0) next.saved = { net: mine.reduce((a, x) => a + (x.net_usd || 0), 0), n: mine.reduce((a, x) => a + (x.compactions || 0), 0) }
@@ -325,8 +333,13 @@ async function readExtras($) {
     const others = ((usage && usage.by_provider) || []).filter((x) => x && x.key !== 'anthropic' && x.requests > 0)
     if (others.length > 0) next.secondary = { requests: others.reduce((a, x) => a + x.requests, 0), usd: others.reduce((a, x) => a + (x.usd || 0), 0), names: others.map((x) => x.key) }
   }
-  extra = next.saved || next.secondary ? next : null
+  extra = next.saved || next.secondary || next.warn ? next : null
   return JSON.stringify(extra) !== before
+}
+
+// The warning for a limit that is close: longer on screen from 95%.
+function limitToast($, l, now) {
+  $.ui.toast('Plan limit: ' + Math.round(l.util * 100) + '% of the ' + limitName(l.key) + ' limit used, resets ' + when(l.reset, now), { timeoutMs: l.util >= LIMIT_ALARM ? 30000 : 15000 })
 }
 
 // The plan's limits from Burst's list of recent replies: the newest reply
@@ -419,7 +432,7 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
   // one ends and the next starts is plain. The border and padding take 4.
   const IW = Math.max(26, W - 4)
   const draw = {
-    session: () => [...sessionSection(Box, T, d, IW, burst), ...notes('session'), ...notes('burst')],
+    session: () => [...sessionSection(Box, T, d, IW, burst, extra && extra.warn), ...notes('session'), ...notes('burst')],
     mac: () => {
       const foot = [...footer(Box, T, d), ...burstRows(Box, T, burst), ...extras]
       return foot.length > 0 ? [heading(T, 'This Mac'), ...foot] : []
@@ -460,7 +473,7 @@ function sub(T, title, note) {
 
 // ---- this session
 
-function sessionSection(Box, T, d, W, burst) {
+function sessionSection(Box, T, d, W, burst, warnPct) {
   const s = d.session || {}
   const out = [heading(T, 'This session', [d.sid ? '*' + d.sid.slice(-5) : '', s.folder || ''].filter(Boolean).join(' · '))]
   // Before the first reply the panel knows no model ("Unknown") and prices
@@ -484,25 +497,31 @@ function sessionSection(Box, T, d, W, burst) {
 
   // One context bar. With Claude Burst it is Burst's: what is really sent
   // (after Burst's own compaction, which Claude Code's figure does not know
-  // about), by part, against the limit Burst compacts at. Otherwise the
+  // about), by part, against the model's window, with Burst's warning and
+  // compaction lines marked. Otherwise the
   // panel's gauge against the model's window, its colour thresholds as ticks.
   if (sent) {
-    out.push(...sentBar(Box, T, sent, W))
+    out.push(...sentBar(Box, T, sent, W, s.win || 0, warnPct))
     if (s.compacting) out.push(T('  ⟳ a summary is ready: the next prompt compacts', { color: 'cyan' }))
     else if (sent.state === 'warning') out.push(T('! Close to the limit: Burst compacts at ' + k(sent.compact_at) + '.', { color: 'yellow', wrap: 'wrap' }))
     else if (sent.state && sent.state !== 'ok') out.push(T('⟳ ' + sent.state, { color: 'cyan', wrap: 'wrap' }))
   } else if (s.ctx > 0 && s.win > 0) {
-    const th = d.thresholds || {}
     const pct = (s.ctx * 100) / s.win
     const label = k(s.ctx) + '/' + k(s.win) + ' ' + Math.round(pct) + '%'
     const barW = Math.max(6, W - 8 - label.length)
-    const ticks = [th.ctx_yellow, th.ctx_red, th.ctx_purple].filter((x) => x > 0)
-    if (s.restart_tokens > 0) ticks.push((s.restart_tokens * 100) / s.win)
+    const c = pct >= CTX_RED * 100 ? 'red' : pct >= CTX_AMBER * 100 ? 'yellow' : 'green'
     out.push(Box({
       flexDirection: 'row', columnGap: 1, children: [
         T('ctx   ', { dimColor: true }),
-        gauge(T, pct, barW, TIER[s.ctx_tier] || 'green', ticks),
-        T(label, { color: TIER[s.ctx_tier] }),
+        gauge(T, pct, barW, c, [CTX_AMBER * 100, CTX_RED * 100]),
+        T(label, { color: c }),
+      ],
+    }))
+    // What the two ticks are, in this model's tokens.
+    out.push(Box({
+      flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [
+        T([T('│ ', { color: 'yellow' }), T('expensive from ' + k(s.win * CTX_AMBER), { dimColor: true })]),
+        T([T('│ ', { color: 'red' }), T('wasteful from ' + k(s.win * CTX_RED), { dimColor: true })]),
       ],
     }))
     if (s.compacting) out.push(T('  ⟳ a summary is ready: the next prompt compacts', { color: 'cyan' }))
@@ -515,13 +534,8 @@ function sessionSection(Box, T, d, W, burst) {
     const ctxs = shown.map((t) => t[1])
     const drops = new Set()
     for (let i = 1; i < shown.length; i++) if (shown[i][1] < shown[i - 1][1] * 0.6) drops.add(i)
-    const th = d.thresholds || {}
     const win = s.win || 0
-    const ctxColour = (v) => {
-      if (!win) return 'blue'
-      const p = (v * 100) / win
-      return p > th.ctx_purple ? 'magenta' : p > th.ctx_red ? 'red' : p > th.ctx_yellow ? 'yellow' : 'blue'
-    }
+    const ctxColour = (v) => (!win ? 'blue' : v >= win * CTX_RED ? 'red' : v >= win * CTX_AMBER ? 'yellow' : 'blue')
     out.push(Box({
       flexDirection: 'row', columnGap: 1, marginTop: 1, children: [
         T('growth', { dimColor: true }),
@@ -570,34 +584,69 @@ const PART_COLOURS = {
 // (237 vanished into the background). No part is grey, so it reads as empty.
 const FREE_COLOUR = 'ansi256(244)'
 
-// The context Burst sends for this session as a stacked bar, a legend under
-// it, and what Claude Code itself still holds when that is more.
-function sentBar(Box, T, s, W) {
+// The context Burst sends for this session as a stacked bar against the
+// model's window, with a line where Burst warns and one where it compacts
+// (the limit is a setting, not the room there is), a legend under it, and
+// what Claude Code itself still holds when that is more. Without a window
+// the bar is against the compaction limit alone.
+function sentBar(Box, T, s, W, win, warnPct) {
   const limit = s.compact_at > 0 ? s.compact_at : 0
-  const scale = Math.max(limit, s.context)
+  const warn = limit ? Math.round((limit * (warnPct > 0 && warnPct < 100 ? warnPct : 80)) / 100) : 0
+  const whole = win > limit && win >= s.context
+  const scale = whole ? win : Math.max(limit, s.context)
   const pct = Math.round((s.context * 100) / scale)
-  const label = k(s.context) + (limit ? '/' + k(limit) + ' ' + pct + '%' : '')
-  const colour = limit && pct >= 100 ? 'red' : limit && pct >= 80 ? 'yellow' : undefined
+  const label = k(s.context) + (whole || limit ? '/' + k(scale) + ' ' + pct + '%' : '')
+  const colour = limit && s.context >= limit ? 'red' : warn && s.context >= warn ? 'yellow' : undefined
   // Largest first, bar and legend alike: what to cut is read off the left.
   const parts = (s.parts || []).filter((p) => p.tokens > 0).sort((a, b) => b.tokens - a.tokens)
   const barW = Math.max(6, W - 8 - label.length)
+  const free = scale - s.context
   let bar
   if (parts.length === 0) {
-    bar = gauge(T, pct, barW, colour || 'blue', [])
+    bar = gauge(T, pct, barW, colour || 'blue', whole ? [(warn * 100) / scale, (limit * 100) / scale] : [])
   } else {
-    const items = parts.map((p) => [PART_COLOURS[p.name], p.tokens])
-    if (scale > s.context) items.push([FREE_COLOUR, scale - s.context])
-    const widths = share(items.map((x) => x[1]), barW)
-    bar = T(items.map(([c], i) => (widths[i] > 0 ? T('█'.repeat(widths[i]), { color: c }) : '')))
+    // What is used takes its true share of the bar, so it meets the two
+    // lines where it should; the parts share that, the smallest giving way
+    // when there are more parts than cells (the legend still names them).
+    const used = free > 0 ? Math.max(1, Math.min(barW - 1, Math.round((s.context * barW) / scale))) : barW
+    const onBar = parts.slice(0, used)
+    const widths = share(onBar.map((p) => p.tokens), used)
+    const cells = []
+    onBar.forEach((p, i) => { for (let n = 0; n < widths[i]; n++) cells.push(['█', PART_COLOURS[p.name]]) })
+    while (cells.length < barW) cells.push(['█', FREE_COLOUR])
+    // The two lines, over whatever is in that cell: still there once passed.
+    if (whole) {
+      const at = (tokens) => Math.max(1, Math.min(barW - 1, Math.round((tokens * barW) / scale)))
+      const stop = at(limit)
+      const first = Math.min(at(warn), stop - 1)
+      if (first >= 1 && first < cells.length) cells[first] = ['│', 'yellow']
+      if (stop < cells.length) cells[stop] = ['│', 'red']
+    }
+    const segs = []
+    for (const [ch, c] of cells) {
+      const last = segs[segs.length - 1]
+      if (last && last.ch === ch && last.c === c) last.text += ch
+      else segs.push({ ch, c, text: ch })
+    }
+    bar = T(segs.map((g) => T(g.text, { color: g.c })))
   }
   const out = [Box({ flexDirection: 'row', columnGap: 1, children: [T('ctx   ', { dimColor: true }), bar, T(label, { color: colour })] })]
   if (parts.length > 0) {
     const key = parts.map((p) => [PART_COLOURS[p.name], p.name + ' ' + k(p.tokens)])
-    // The rest of the bar is room left before Burst compacts: named, last.
-    if (scale > s.context) key.push([FREE_COLOUR, 'Free ' + k(scale - s.context)])
+    // The rest of the bar is room left, in the window or before Burst
+    // compacts: named, last.
+    if (free > 0) key.push([FREE_COLOUR, 'Free ' + k(free)])
     out.push(Box({
       flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: key.map(([c, text]) =>
         T([T('■ ', { color: c }), T(text, { dimColor: true })])),
+    }))
+  }
+  if (whole) {
+    out.push(Box({
+      flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [
+        T([T('│ ', { color: 'yellow' }), T('Burst warns at ' + k(warn), { dimColor: true })]),
+        T([T('│ ', { color: 'red' }), T('compacts at ' + k(limit), { dimColor: true })]),
+      ],
     }))
   }
   // Claude Code's own history, which Burst's compaction never shrinks. The
@@ -850,13 +899,24 @@ export function insights(d, now, limits = null, extra = null, burst = null) {
   const turns = (d.turns && d.turns.turns) || []
   const recent = turns.slice(-20).filter((x) => !x[6])
 
-  if (s.restart_tokens > 0 && s.ctx >= s.restart_tokens) {
-    out.push({ scope: 'session', tier: 'red', icon: '!', text: 'Context ' + k(s.ctx) + ' is past the ' + k(s.restart_tokens) + ' restart line: /compact or restart.' })
-  } else if (recent.length >= 5 && s.ctx > 0) {
-    const grow = (recent[recent.length - 1][1] - recent[0][1]) / (recent.length - 1)
-    if (grow > 500 && s.restart_tokens > 0) {
-      const left = Math.round((s.restart_tokens - s.ctx) / grow)
-      out.push({ scope: 'session', tier: left < 30 ? 'yellow' : 'cyan', icon: '↗', text: 'Grows ' + k(grow) + '/turn: restart in ~' + left + ' turns.' })
+  // How full the context is, and what to do about it. With Claude Burst that
+  // is Burst's to manage: say when it will compact. Without, it is the
+  // user's: past amber and red, say so and name the commands.
+  const sent = burst && !burst.down && burst.mod && burst.mod.session && burst.mod.session.context > 0 ? burst.mod.session : null
+  const grow = recent.length >= 5 ? (recent[recent.length - 1][1] - recent[0][1]) / (recent.length - 1) : 0
+  if (sent) {
+    if (grow > 500 && sent.compact_at > sent.context) {
+      const left = Math.round((sent.compact_at - sent.context) / grow)
+      out.push({ scope: 'session', tier: 'cyan', icon: '↗', text: 'Grows ' + k(grow) + '/turn: Burst compacts in ~' + left + ' turns.' })
+    }
+  } else if (s.ctx > 0 && s.win > 0) {
+    if (s.ctx >= s.win * CTX_RED) {
+      out.push({ scope: 'session', tier: 'red', icon: '!', text: 'Wasteful: every turn re-sends ' + k(s.ctx) + '. /compact now, or /clear and start fresh.' })
+    } else if (s.ctx >= s.win * CTX_AMBER) {
+      out.push({ scope: 'session', tier: 'yellow', icon: '!', text: 'Getting expensive: every turn re-sends ' + k(s.ctx) + '. /compact, or /clear at a break in the work.' })
+    } else if (grow > 500) {
+      const left = Math.round((s.win * CTX_AMBER - s.ctx) / grow)
+      out.push({ scope: 'session', tier: left < 30 ? 'yellow' : 'cyan', icon: '↗', text: 'Grows ' + k(grow) + '/turn: amber (' + k(s.win * CTX_AMBER) + ') in ~' + left + ' turns.' })
     }
   }
 
@@ -907,7 +967,6 @@ export function insights(d, now, limits = null, extra = null, burst = null) {
     if (saved.net > 0) out.push({ scope: 'burst', tier: 'green', icon: '⟳', text: 'Compaction has saved ' + money(saved.net, 2) + ' net this session (' + times + ').' })
     else out.push({ scope: 'burst', tier: 'yellow', icon: '⟳', text: 'Compaction has cost ' + money(-saved.net, 2) + ' more than it has saved so far (' + times + ').' })
   }
-  const sent = burst && !burst.down && burst.mod && burst.mod.session
   if (sent && sent.context >= 100000 && Array.isArray(sent.parts)) {
     const top = sent.parts.reduce((a, p) => (!a || p.tokens > a.tokens ? p : a), null)
     if (top && top.tokens / sent.context >= 0.5) out.push({ scope: 'burst', tier: 'cyan', icon: '▤', text: top.name + ' are ' + Math.round((top.tokens * 100) / sent.context) + '% of the context sent.' })

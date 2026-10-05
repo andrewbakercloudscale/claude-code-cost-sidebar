@@ -187,7 +187,7 @@ test('the feed is kept alive every 30 seconds and the file re-read every 5', asy
 
 test('insights say what matters and nothing when there is nothing', () => {
   const tips = insights(doc(), NOW).map((t) => t.text)
-  expect(tips.some((t) => t.startsWith('Grows 2k/turn: restart in ~'))).toBe(true)
+  expect(tips.some((t) => t.startsWith('Grows 2k/turn: amber (400k) in ~'))).toBe(true)
   expect(tips.some((t) => t.startsWith('32× your average session'))).toBe(true)
   expect(tips.some((t) => t.startsWith('Quiet: 8%'))).toBe(true)
   expect(tips.some((t) => t.startsWith('Burning $7.28/hr (high)'))).toBe(true)
@@ -200,9 +200,18 @@ test('insights say what matters and nothing when there is nothing', () => {
   const crowded = doc({ session: { ...doc().session, ctx: 450_000, avg_session: 1 }, turns: { turns: turns(40, 100_000, 2_000).map((x, i) => (i === 39 ? [x[0], x[1], 30_000, 60, 2.5, x[5], false] : [x[0], x[1], x[2], 60, x[4], x[5], x[6]])), markers: [], avg_delta: 3000 } })
   const s = insights(crowded, NOW).filter((t) => t.scope === 'session')
   expect(s.length).toBe(3)
-  expect(s[0].text).toContain('past the 400k restart line')
+  expect(s[0].text).toBe('Getting expensive: every turn re-sends 450k. /compact, or /clear at a break in the work.')
   const big = doc({ session: { ...doc().session, ctx: 450_000 } })
-  expect(insights(big, NOW)[0].text).toContain('past the 400k restart line')
+  expect(insights(big, NOW)[0].tier).toBe('yellow')
+  // Past 70% of the window it is red, and the bands follow the model's window.
+  const huge = insights(doc({ session: { ...doc().session, ctx: 720_000 } }), NOW)[0]
+  expect([huge.tier, huge.text]).toEqual(['red', 'Wasteful: every turn re-sends 720k. /compact now, or /clear and start fresh.'])
+  const small = insights(doc({ session: { ...doc().session, ctx: 90_000, win: 200_000 } }), NOW)[0]
+  expect(small.text).toContain('Getting expensive: every turn re-sends 90k.')
+  // With Claude Burst the context is Burst's to manage: when it will compact.
+  const withBurst = insights(big, NOW, null, null, { down: false, mod: mod() }).filter((t) => t.scope === 'session').map((t) => t.text)
+  expect(withBurst.some((t) => t.includes('Getting expensive'))).toBe(false)
+  expect(withBurst).toContain('Grows 2k/turn: Burst compacts in ~115 turns.')
   const quiet = doc({ session: { ...doc().session, cost: 4 }, block: { active: false }, today: {}, projects: [], hourly_avg: null, turns: null })
   expect(insights(quiet, NOW)).toEqual([])
 })
@@ -232,7 +241,10 @@ test('without Claude Burst there is no button, and the ctx bar is the panel\'s o
   await start($)
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ key: 'burst' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: '206k/1M 21%' })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: '206k/1M 21%' })).props.color).toBe('green')
+  // Its two ticks are named in this model's tokens.
+  expect(await ui.find({ type: 'Text', text: 'expensive from 400k' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'wasteful from 700k' })).toBeDefined()
   expect(asked).toBe(0)
 })
 
@@ -249,7 +261,7 @@ function mod(over: Record<string, unknown> = {}) {
   }
 }
 
-test('with Claude Burst the session has one ctx bar: what Burst sends, by part, against its compaction limit', async ($, on) => {
+test('with Claude Burst the session has one ctx bar: what Burst sends, by part, in the model\'s window, with its limits marked', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   const urls: string[] = []
   on('http.fetch', ($, e) => {
@@ -259,7 +271,7 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   await start($)
   expect(urls[0]).toBe('http://127.0.0.1:7788/api/mod?session=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c&since=' + NOW)
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '70k/300k 23%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '70k/1M 7%' })).toBeDefined()
   // Once: the panel's own gauge against the model's window is not drawn too.
   expect(await ui.find({ type: 'Text', text: '206k/1M 21%' })).toBeUndefined()
   const drawn = JSON.stringify(await ui.drawn())
@@ -273,13 +285,19 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(at('System tools 14k')).toBeLessThan(at('System prompt 6k'))
   // The room left before Burst compacts has its own colour and is named, last.
   expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'ansi256(244)' })).toBeDefined()
-  expect(at('Free 230k')).toBeGreaterThan(at('System prompt 6k'))
+  expect(at('Free 930k')).toBeGreaterThan(at('System prompt 6k'))
+  // The bar is the model's whole window; where Burst warns and where it
+  // compacts are lines on it, named underneath.
+  expect(await ui.find({ type: 'Text', text: '│', color: 'yellow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '│', color: 'red' })).toBeDefined()
+  expect(drawn).toContain('"Burst warns at 240k"')
+  expect(drawn).toContain('"compacts at 300k"')
   // A part with nothing in it takes no room in the legend.
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
   // What Claude Code holds beyond that is the tool working: one line, never a warning.
   expect(await ui.find({ type: 'Text', text: 'Claude Code Cache Size: 620k', color: 'ansi256(208)' })).toBeDefined()
   // The bar is in the session card; a standing problem is with Proxy State.
-  expect(drawn.indexOf('70k/300k 23%')).toBeLessThan(drawn.indexOf('"Turns"'))
+  expect(drawn.indexOf('70k/1M 7%')).toBeLessThan(drawn.indexOf('"Turns"'))
   expect(await ui.find({ type: 'Text', text: 'Keep-awake turned off', color: 'yellow' })).toBeDefined()
   expect(drawn.indexOf('Keep-awake turned off')).toBeGreaterThan(drawn.indexOf('Proxy State'))
 })
@@ -290,7 +308,7 @@ test('over the limit the bar is red, a compaction under way is named, and a sile
   on('http.fetch', () => (answer ? { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(answer) } } : { deny: 'connection refused' }))
   await start($)
   let ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '310k/300k 100%', color: 'red' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '310k/1M 31%', color: 'red' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '⟳ summarising' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Free/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Claude Code Cache Size/ })).toBeUndefined()

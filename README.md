@@ -65,14 +65,30 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 | `$3.10/hr` | This session's burn rate. |
 | `149 turns` | Replies from the model so far. |
 | `2.4× avg` | This session against your 7-day average session, shown once it has reached half of it. |
-| `ctx` bar and `86k/300k 29%` | How full the context is. With Claude Burst this is the context Burst really sends, against the limit it compacts at; the label turns yellow at 80% and red at 100%. Without Burst it is the transcript's context against the model's window, with ticks at your 30/50/70% thresholds and the restart line. |
-| The coloured parts and their key | With Burst, what the context is made of, largest first: messages, tool results, system tools, MCP tools, memory files (CLAUDE.md and the like), the system prompt. Grey is `Free`: the room left before Burst compacts. |
+| `ctx` bar and `86k/1M 9%` | How full the context is, against the model's whole window. With Claude Burst this is the context Burst really sends, and two lines on the bar show where Burst acts: yellow where it warns, red where it compacts (`Burst warns at 240k`, `compacts at 300k` underneath). Both are read from Burst's settings; the compaction limit is your setting, not the room there is. The label turns yellow past the warning line and red past the compaction line. Without Burst, see [below](#the-context-bar-without-claude-burst). |
+| The coloured parts and their key | With Burst, what the context is made of, largest first: messages, tool results, system tools, MCP tools, memory files (CLAUDE.md and the like), the system prompt. Grey is `Free`: the room left in the window. What is used takes its true share of the bar, so a part smaller than one cell is in the key but not on the bar. |
 | `Claude Code Cache Size: 320k` | Claude Code's own history, which Burst's compaction never shrinks. The gap to the `ctx` figure is what Burst saves on every turn. For information, in orange: never a warning. Shown only once it is more than a tenth above what Burst sends. |
-| `growth` | Context size, one bar per turn, oldest on the left. Blue, then yellow, red and purple past the 30/50/70% thresholds. A cyan bar is a turn where the context fell to under 60% of the turn before: a compaction. |
+| `growth` | Context size, one bar per turn, oldest on the left. Blue, then yellow past 40% of the model's window and red past 70%. A cyan bar is a turn where the context fell to under 60% of the turn before: a compaction. |
 | `$/turn` | Cost, one bar per turn. Yellow is over 2× the median turn, red over 4×. The yellow bar here is the turn after the compaction, which wrote the smaller context to the cache once. |
 | `cache` and `94% hit` | The share of input read from the prompt cache, averaged over the last 20 turns. Green from 90%, yellow from 75%, red below. A cache read costs a tenth of fresh input, so this is the figure that keeps long sessions cheap. |
-| Lines starting `↗ ◇ ▲ ◴ $ !` | Insights, at most three, only when there is something to say: how many turns until the restart line at the current growth, the median turn, a turn that cost over 4× the median, a session over 3× your average, a cache hit rate under 85%. `◴` is a turn made dear by a pause: it came more than five minutes after the one before, read under half its input from the cache (the cache had expired) and cost at least twice the median. It reads `Turn 212 came after a 26m pause and read 4% from cache: $0.90 against a $0.05 median.` |
+| Lines starting `↗ ◇ ▲ ◴ $ !` | Insights, at most three, only when there is something to say: how many turns until Burst compacts (or, without Burst, until the context turns amber) at the current growth, the median turn, a turn that cost over 4× the median, a session over 3× your average, a cache hit rate under 85%. `◴` is a turn made dear by a pause: it came more than five minutes after the one before, read under half its input from the cache (the cache had expired) and cost at least twice the median. It reads `Turn 212 came after a 26m pause and read 4% from cache: $0.90 against a $0.05 median.` |
 | Lines starting `⟳ ▤` | With Claude Burst, two more. `⟳` is what its compaction has saved this session, net of the summaries and the one cache rewrite each costs (or what it has cost so far, when it has not paid for itself yet). `▤` names the part that is half or more of a context of 100k and up, e.g. `Tool results are 65% of the context sent.` |
+
+#### The context bar without Claude Burst
+
+<img src="docs/card-session-no-burst.png" alt="The This session card without Claude Burst: the ctx bar at 522k, 52% of a 1M window, in amber, ticks named expensive from 400k and wasteful from 700k, and a line saying it is getting expensive, with /compact and /clear" width="460">
+
+Nothing compacts for you, so the bar is a traffic light on the transcript's own context, and it tells you when to act.
+
+| Context, as a share of the model's window | On a 1M window | Colour | What the card says |
+|---|---|---|---|
+| Under 40% | under 400k | Green | Nothing, or `Grows 3k/turn: amber (400k) in ~40 turns.` |
+| 40% to 70% | 400k to 700k | Amber | `Getting expensive: every turn re-sends 522k. /compact, or /clear at a break in the work.` |
+| Over 70% | over 700k | Red | `Wasteful: every turn re-sends 760k. /compact now, or /clear and start fresh.` |
+
+- The window is the model's, read from the transcript, so on a 200k model the same lines sit at 80k and 140k.
+- The two ticks on the bar are those lines, named underneath in tokens: `expensive from 400k`, `wasteful from 700k`.
+- Why it matters: every turn sends the whole context again. Cached, that is cheap per token but not free, and one pause that lets the cache expire re-bills all of it at full price.
 
 ### Turns
 
@@ -186,12 +202,12 @@ Burst does the compacting; this panel is where you see it. One compaction, in th
 
 <table>
 <tr>
-<td valign="top"><img src="docs/compaction-1-started.png" alt="Compaction started: the ctx bar at 293k of 300k in yellow, a summarising line, and an Async Compaction Started row at the top of the turn table" width="280"></td>
+<td valign="top"><img src="docs/compaction-1-started.png" alt="Compaction started: the ctx bar at 293k in yellow, past the warning line and just short of the red compaction line, a summarising line, and an Async Compaction Started row at the top of the turn table" width="280"></td>
 <td valign="top"><img src="docs/compaction-2-pending.png" alt="Compaction pending: a line saying a summary is ready and the next prompt compacts, and an Async Compaction Pending row at the top of the turn table" width="280"></td>
-<td valign="top"><img src="docs/compaction-3-finished.png" alt="Compaction finished: the ctx bar at 64k of 300k, a compacted line, a cyan drop at the end of the growth graph, and a turn row reading 64k (-232k) above an Async Compaction Finished row" width="280"></td>
+<td valign="top"><img src="docs/compaction-3-finished.png" alt="Compaction finished: the ctx bar back at 64k, a compacted line, a cyan drop at the end of the growth graph, and a turn row reading 64k (-232k) above an Async Compaction Finished row" width="280"></td>
 </tr>
 <tr>
-<td valign="top"><sub><b>1. Started.</b> The context reaches Burst's limit (300k here). The ctx label is yellow, the session says <code>summarising</code>, and a yellow <code>Async Compaction Started</code> row sits above the turn it began beside. You keep working.</sub></td>
+<td valign="top"><sub><b>1. Started.</b> The context reaches Burst's limit (300k here, the red line on the bar). The ctx label is yellow, the session says <code>summarising</code>, and a yellow <code>Async Compaction Started</code> row sits above the turn it began beside. You keep working.</sub></td>
 <td valign="top"><sub><b>2. Pending.</b> The summary is written and waits. The session says <code>a summary is ready: the next prompt compacts</code>, and the table has a blue <code>Pending (next prompt)</code> row. Turn 142 ran while the summary was being written.</sub></td>
 <td valign="top"><sub><b>3. Finished.</b> The next prompt went out with the summary in place of the history: <code>64k (-232k)</code> in green, a green <code>Finished</code> row with what the summary cost, and a cyan drop at the end of <code>growth</code>. Cache is 19% for that one turn, then recovers.</sub></td>
 </tr>
