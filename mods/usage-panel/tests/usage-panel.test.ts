@@ -264,6 +264,11 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(drawn.split('"ctx   "').length - 1).toBe(1)
   expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'green' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Tool results 30k' })).toBeDefined()
+  // Largest first, in the bar and in the legend.
+  const at = (x: string) => drawn.indexOf(x)
+  expect(at('Tool results 30k')).toBeLessThan(at('Messages 20k'))
+  expect(at('Messages 20k')).toBeLessThan(at('System tools 14k'))
+  expect(at('System tools 14k')).toBeLessThan(at('System prompt 6k'))
   // A part with nothing in it takes no room in the legend.
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Claude Code holds 620k/, color: 'yellow' })).toBeDefined()

@@ -413,7 +413,8 @@ function sentBar(Box, T, s, W) {
   const pct = Math.round((s.context * 100) / scale)
   const label = k(s.context) + (limit ? '/' + k(limit) + ' ' + pct + '%' : '')
   const colour = limit && pct >= 100 ? 'red' : limit && pct >= 80 ? 'yellow' : undefined
-  const parts = (s.parts || []).filter((p) => p.tokens > 0)
+  // Largest first, bar and legend alike: what to cut is read off the left.
+  const parts = (s.parts || []).filter((p) => p.tokens > 0).sort((a, b) => b.tokens - a.tokens)
   const barW = Math.max(6, W - 8 - label.length)
   let bar
   if (parts.length === 0) {
