@@ -7,6 +7,10 @@
 // and draws it: the same figures and traffic lights, plus graphs and insights.
 // Nothing is computed twice and no keystrokes are typed anywhere.
 //
+// With Claude Burst on this Mac (the panel's JSON names its dashboard), the
+// sidebar also draws what Burst says about this session: its route, any
+// problem still standing, and the context it really sends, by part.
+//
 // /usage-panel opens or focuses the sidebar; /usage-panel pin opens it in
 // every new session (the default), /usage-panel unpin stops that. (/usage
 // itself is Claude Code's own.)
@@ -21,7 +25,7 @@ const PIN_KEY = 'pinned'
 const LAYOUT_KEY = 'layout'
 // The sidebar's sections, most specific first. The footer (proxy state,
 // licence) always stays at the bottom.
-export const SECTIONS = ['session', 'turns', 'today', 'sessions', 'days', 'projects']
+export const SECTIONS = ['session', 'burst', 'turns', 'today', 'sessions', 'days', 'projects']
 
 let sid = ''
 let home = ''
@@ -31,6 +35,8 @@ let raw = ''
 let feedError = ''
 let pinned = true
 let layout = null // { order, hidden } as the person left it
+let burst = null // { down, mod }: Burst's /api/mod answer; null without Burst
+let burstRaw = ''
 
 // A stored layout made whole: unknown names dropped, sections added since
 // it was saved put back in their default place.
@@ -80,9 +86,11 @@ export function register(on) {
     }
     await feed($)
     await read($)
+    await readBurst($)
     $.clock.every(FEED_MS, async () => { await feed($) })
     $.clock.every(READ_MS, async () => {
-      if (await read($)) $.ui.invalidate('ui.render')
+      const changed = await read($)
+      if ((await readBurst($)) || changed) $.ui.invalidate('ui.render')
     })
     try {
       await $.command.register({ name: COMMAND, description: 'The usage sidebar: open it; pin / unpin; hide, show, up, down, top, bottom <section>; sections; reset', immediate: true })
@@ -153,7 +161,7 @@ export function register(on) {
         },
       }))
     }
-    const rows = panel(Box, Text, data, width, now, feedError, layout, extras)
+    const rows = panel(Box, Text, data, width, now, feedError, layout, extras, burst)
     return Box({ flexDirection: 'column', children: rows })
   })
 }
@@ -189,13 +197,42 @@ async function read($) {
   return true
 }
 
+// Burst's own account of this session, from its dashboard. True when what
+// the sidebar draws of it changed. Alerts are not asked for (since = now):
+// they are the burst-band mod's to show.
+async function readBurst($) {
+  const b = data && data.burst
+  if (!b || !b.dashboard || !sid) {
+    const had = burst !== null
+    burst = null
+    burstRaw = ''
+    return had
+  }
+  let next = { down: true, mod: null }
+  try {
+    const since = Math.floor((await $.clock.now()) / 1000)
+    const r = await $.http.fetch(b.dashboard.replace(/\/+$/, '') + '/api/mod?session=' + encodeURIComponent(sid) + '&since=' + since)
+    if (r.ok) {
+      const m = JSON.parse(r.text)
+      next = { down: false, mod: { route: m.route, overflow: m.overflow, primary_failing: m.primary_failing, session: m.session, problems: m.problems } }
+    }
+  } catch (err) {
+    // Not answering, or not Burst's answer: drawn as down.
+  }
+  const text = JSON.stringify(next)
+  if (text === burstRaw) return false
+  burstRaw = text
+  burst = next
+  return true
+}
+
 // ---- the sidebar -------------------------------------------------------------
 
 const TIER = { green: 'green', yellow: 'yellow', red: 'red', purple: 'magenta', cyan: 'cyan' }
 const ACCENT = 'cyan'
 const BLOCKS = ' ▁▂▃▄▅▆▇█'
 
-export function panel(Box, Text, d, width, now, feedError, layout, extras = []) {
+export function panel(Box, Text, d, width, now, feedError, layout, extras = [], burst = null) {
   const T = (children, props = {}) => Text({ ...props, children: Array.isArray(children) ? children : [children] })
   const rows = []
   if (!d) {
@@ -229,6 +266,7 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = []) 
   const IW = Math.max(26, W - 4)
   const draw = {
     session: () => [...sessionSection(Box, T, d, IW), ...notes('session')],
+    burst: () => burstSection(Box, T, burst, IW),
     turns: () => turnsTable(T, d),
     today: () => [...todaySection(Box, T, d, IW, now), ...notes('today')],
     sessions: () => topSection(Box, T, d, IW),
@@ -317,15 +355,17 @@ function sessionSection(Box, T, d, W) {
       return p > th.ctx_purple ? 'magenta' : p > th.ctx_red ? 'red' : p > th.ctx_yellow ? 'yellow' : 'blue'
     }
     out.push(Box({
-      flexDirection: 'row', columnGap: 1, children: [
+      flexDirection: 'row', columnGap: 1, marginTop: 1, children: [
         T('growth', { dimColor: true }),
         spark(T, ctxs, (v, i) => (drops.has(i) ? 'cyan' : ctxColour(v)), 0),
       ],
     }))
     const costs = shown.map((t) => (t[4] == null ? 0 : t[4]))
     const med = median(costs.filter((c) => c > 0))
+    // A row's bars reach the cell's foot and the next row's reach its head,
+    // so stacked directly they read as one shape: a blank row between each.
     out.push(Box({
-      flexDirection: 'row', columnGap: 1, children: [
+      flexDirection: 'row', columnGap: 1, marginTop: 1, children: [
         T('$/turn', { dimColor: true }),
         spark(T, costs, (v) => (med > 0 && v > med * 4 ? 'red' : med > 0 && v > med * 2 ? 'yellow' : 'green'), 0),
       ],
@@ -335,13 +375,82 @@ function sessionSection(Box, T, d, W) {
       const avg = cache.reduce((a, b) => a + b, 0) / cache.length
       const label = Math.round(avg) + '% hit'
       out.push(Box({
-        flexDirection: 'row', columnGap: 1, children: [
+        flexDirection: 'row', columnGap: 1, marginTop: 1, children: [
           T('cache ', { dimColor: true }),
           gauge(T, avg, Math.max(6, W - 8 - label.length), avg >= 90 ? 'green' : avg >= 75 ? 'yellow' : 'red', []),
           T(label, { dimColor: true }),
         ],
       }))
     }
+  }
+  return out
+}
+
+// ---- Claude Burst: this session as its gateway sees it
+
+// One colour per part, in the gateway's order.
+const PART_COLOURS = {
+  'System prompt': 'gray',
+  'System tools': 'cyan',
+  'MCP tools': 'magenta',
+  'Memory files': 'yellow',
+  'Messages': 'blue',
+  'Tool results': 'green',
+}
+
+// The route, any problem still standing, and the context Burst really sends
+// (after its own compaction, which Claude Code's figure does not know about)
+// as a stacked bar against the compaction limit. Nothing without Burst.
+export function burstSection(Box, T, burst, W) {
+  if (!burst) return []
+  const m = burst.mod
+  if (burst.down || !m) return [heading(T, 'Claude Burst'), T('⚡ Burst down: its dashboard is not answering', { color: 'red', bold: true, wrap: 'wrap' })]
+  const failing = m.primary_failing > 0
+  const route = m.overflow ? 'SECONDARY' : failing ? 'PRIMARY failing' : 'PRIMARY'
+  const s = m.session
+  const out = [heading(T, 'Claude Burst', 'what it sends for this session')]
+  out.push(T([
+    T('⚡ ' + route, { bold: true, color: m.overflow ? 'yellow' : failing ? 'red' : 'green' }),
+    s && s.state && s.state !== 'ok' ? T('  ' + s.state, { color: 'cyan' }) : '',
+    // Claude Code's own history, which Burst's compaction never shrinks:
+    // what goes, uncached, if Burst drops out.
+    s && s.raw > 0 ? T('  CC holds ' + k(s.raw), { color: s.raw >= 800000 ? 'red' : s.raw >= 500000 ? 'yellow' : undefined, dimColor: s.raw < 500000 }) : '',
+  ], { wrap: 'truncate-end' }))
+  for (const p of m.problems || []) {
+    out.push(Box({ flexDirection: 'row', children: [T('⚠ ', { color: p.severity === 'error' ? 'red' : 'yellow' }), T(p.title, { color: p.severity === 'error' ? 'red' : 'yellow', bold: true, wrap: 'wrap' })] }))
+  }
+  if (!s || !(s.context > 0)) {
+    out.push(T('No request from this session yet.', { dimColor: true }))
+    return out
+  }
+  const limit = s.compact_at > 0 ? s.compact_at : 0
+  const scale = Math.max(limit, s.context)
+  const pct = Math.round((s.context * 100) / scale)
+  const label = k(s.context) + (limit ? '/' + k(limit) + ' ' + pct + '%' : '')
+  const colour = limit && pct >= 100 ? 'red' : limit && pct >= 80 ? 'yellow' : undefined
+  const parts = (s.parts || []).filter((p) => p.tokens > 0)
+  const barW = Math.max(6, W - 8 - label.length)
+  let bar
+  if (parts.length === 0) {
+    bar = gauge(T, pct, barW, colour || 'blue', [])
+  } else {
+    const cells = []
+    let used = 0
+    for (const p of parts) {
+      const take = Math.min(Math.max(1, Math.round((p.tokens * barW) / scale)), barW - used)
+      if (take <= 0) break
+      cells.push(T('█'.repeat(take), { color: PART_COLOURS[p.name] }))
+      used += take
+    }
+    if (used < barW) cells.push(T('░'.repeat(barW - used), { dimColor: true }))
+    bar = T(cells)
+  }
+  out.push(Box({ flexDirection: 'row', columnGap: 1, children: [T('ctx   ', { dimColor: true }), bar, T(label, { color: colour })] }))
+  if (parts.length > 0) {
+    out.push(Box({
+      flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: parts.map((p) =>
+        T([T('■ ', { color: PART_COLOURS[p.name] }), T(p.name + ' ' + k(p.tokens), { dimColor: true })])),
+    }))
   }
   return out
 }

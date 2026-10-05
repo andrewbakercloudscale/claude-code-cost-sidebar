@@ -223,11 +223,76 @@ test('with Claude Burst, a button opens its dashboard, or its console when the d
   expect(runs[runs.length - 1]).toEqual(['open', 'http://127.0.0.1:7789/'])
 })
 
-test('without Claude Burst there is no button', async ($, on) => {
+test('without Claude Burst there is no button and no Burst card', async ($, on) => {
   stubs(on, [doc({ burst: null })])
+  let asked = 0
+  on('http.fetch', () => { asked++; return { deny: 'not expected' } })
   await start($)
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ key: 'burst' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'Claude Burst' })).toBeUndefined()
+  expect(asked).toBe(0)
+})
+
+const BURST = { dashboard: 'http://127.0.0.1:7788/', console: 'http://127.0.0.1:7789/' }
+
+function mod(over: Record<string, unknown> = {}) {
+  return {
+    version: '0.13.0', route: 'PRIMARY', overflow: false, primary_failing: 0, today_usd: 1, today_requests: 2,
+    session: {
+      session: 'S', context: 70_000, state: 'ok', compact_at: 300_000, raw: 620_000,
+      parts: [{ name: 'System prompt', tokens: 6000 }, { name: 'System tools', tokens: 14_000 }, { name: 'MCP tools', tokens: 0 }, { name: 'Messages', tokens: 20_000 }, { name: 'Tool results', tokens: 30_000 }],
+    },
+    alerts: [{ id: 'a', ts: 1 }], problems: [], ...over,
+  }
+}
+
+test('with Claude Burst, a card under the session shows the route, a standing problem and the context it sends by part', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const urls: string[] = []
+  on('http.fetch', ($, e) => {
+    urls.push(e.url)
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(mod({ problems: [{ id: 'p', kind: 'keep-awake', severity: 'warn', title: 'Keep-awake turned off', ts: 1 }] })) } }
+  })
+  await start($)
+  expect(urls[0]).toBe('http://127.0.0.1:7788/api/mod?session=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c&since=' + NOW)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: '⚡ PRIMARY', color: 'green' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Keep-awake turned off', color: 'yellow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '70k/300k 23%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /CC holds 620k$/, color: 'yellow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'green' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Tool results 30k' })).toBeDefined()
+  // A part with nothing in it takes no room in the legend.
+  expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn.indexOf('"Claude Burst"')).toBeGreaterThan(drawn.indexOf('"This session"'))
+  expect(drawn.indexOf('"Claude Burst"')).toBeLessThan(drawn.indexOf('"Turns"'))
+})
+
+test('the Burst card says so on the secondary, mid-compaction, and when the dashboard stops answering', async ($, on) => {
+  const clock = stubs(on, [doc({ burst: BURST })])
+  let answer: object | null = mod({ route: 'SECONDARY', overflow: true, session: { session: 'S', context: 310_000, state: 'summarising', compact_at: 300_000 } })
+  on('http.fetch', () => (answer ? { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(answer) } } : { deny: 'connection refused' }))
+  await start($)
+  let ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: '⚡ SECONDARY', color: 'yellow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  summarising' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '310k/300k 100%', color: 'red' })).toBeDefined()
+  await ui.unmount()
+  answer = null
+  await clock.advance(5000)
+  ui = await $.ui.mount(PANE)
+  expect((await ui.find({ type: 'Text', text: /^⚡ Burst down/ })).props.color).toBe('red')
+})
+
+test('/usage-panel hide burst takes the Burst card away', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(mod()) } }))
+  await start($)
+  await $.command.run({ command: 'usage-panel', args: 'hide burst' })
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: '⚡ PRIMARY' })).toBeUndefined()
 })
 
 test('sections can be hidden, shown and moved, and the layout is kept', async ($, on) => {
@@ -255,11 +320,11 @@ test('sections can be hidden, shown and moved, and the layout is kept', async ($
 test('a stored layout is made whole: unknown names go, new sections come back', () => {
   expect(layoutOf({ order: ['days', 'gone', 'session'], hidden: ['gone', 'turns'] })).toEqual({
     // A returning section goes back beside its default neighbour.
-    order: ['days', 'projects', 'session', 'turns', 'today', 'sessions'],
+    order: ['days', 'projects', 'session', 'burst', 'turns', 'today', 'sessions'],
     hidden: ['turns'],
   })
   expect(relayout(null, 'hide', 'nope')).toContain('Sections: session')
-  expect((relayout(null, 'down', 'session') as any).order.slice(0, 2)).toEqual(['turns', 'session'])
+  expect((relayout(null, 'down', 'session') as any).order.slice(0, 2)).toEqual(['burst', 'session'])
 })
 
 test('formatting', () => {
