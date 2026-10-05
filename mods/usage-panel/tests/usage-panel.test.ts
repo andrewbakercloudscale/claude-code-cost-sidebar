@@ -286,12 +286,12 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   // The room left before Burst compacts has its own colour and is named, last.
   expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'white' })).toBeDefined()
   expect(at('Free 930k')).toBeGreaterThan(at('System prompt 6k'))
-  // The bar is the model's whole window; where Burst warns and where it
-  // compacts are lines on it, named underneath.
-  expect(await ui.find({ type: 'Text', text: '│', color: 'yellow' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '│', color: 'red' })).toBeDefined()
-  expect(drawn).toContain('"Burst warns at 240k"')
-  expect(drawn).toContain('"compacts at 300k"')
+  // The bar is the model's whole window; where Burst compacts is a line on
+  // it, named underneath.
+  // One whole red cell, so the bar is not cut into bands.
+  expect(await ui.find({ type: 'Text', text: '█', color: 'red' })).toBeDefined()
+  expect(drawn).toContain('"Burst compacts at 300k"')
+  expect(drawn).not.toContain('warns at')
   // A part with nothing in it takes no room in the legend.
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
   // What Claude Code holds beyond that is the tool working: one line, never a warning.

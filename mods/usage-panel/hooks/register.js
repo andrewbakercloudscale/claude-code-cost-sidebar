@@ -585,8 +585,8 @@ const PART_COLOURS = {
 const FREE_COLOUR = 'white'
 
 // The context Burst sends for this session as a stacked bar against the
-// model's window, with a line where Burst warns and one where it compacts
-// (the limit is a setting, not the room there is), a legend under it, and
+// model's window, with a line where Burst compacts (the limit is a setting,
+// not the room there is), a legend under it, and
 // what Claude Code itself still holds when that is more. Without a window
 // the bar is against the compaction limit alone.
 function sentBar(Box, T, s, W, win, warnPct) {
@@ -603,7 +603,7 @@ function sentBar(Box, T, s, W, win, warnPct) {
   const free = scale - s.context
   let bar
   if (parts.length === 0) {
-    bar = gauge(T, pct, barW, colour || 'blue', whole ? [(warn * 100) / scale, (limit * 100) / scale] : [])
+    bar = gauge(T, pct, barW, colour || 'blue', whole ? [(limit * 100) / scale] : [])
   } else {
     // What is used takes its true share of the bar, so it meets the two
     // lines where it should; the parts share that, the smallest giving way
@@ -618,9 +618,9 @@ function sentBar(Box, T, s, W, win, warnPct) {
     if (whole) {
       const at = (tokens) => Math.max(1, Math.min(barW - 1, Math.round((tokens * barW) / scale)))
       const stop = at(limit)
-      const first = Math.min(at(warn), stop - 1)
-      if (first >= 1 && first < cells.length) cells[first] = ['│', 'yellow']
-      if (stop < cells.length) cells[stop] = ['│', 'red']
+      // A whole cell in red, the one colour no part has: a line glyph lets
+      // the terminal's background through on both sides of it.
+      if (stop < cells.length) cells[stop] = ['█', 'red']
     }
     const segs = []
     for (const [ch, c] of cells) {
@@ -644,8 +644,7 @@ function sentBar(Box, T, s, W, win, warnPct) {
   if (whole) {
     out.push(Box({
       flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [
-        T([T('│ ', { color: 'yellow' }), T('Burst warns at ' + k(warn), { dimColor: true })]),
-        T([T('│ ', { color: 'red' }), T('compacts at ' + k(limit), { dimColor: true })]),
+        T([T('■ ', { color: 'red' }), T('Burst compacts at ' + k(limit), { dimColor: true })]),
       ],
     }))
   }
