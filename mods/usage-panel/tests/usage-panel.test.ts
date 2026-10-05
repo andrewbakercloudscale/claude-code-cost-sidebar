@@ -299,7 +299,7 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   // A part with nothing in it takes no room in the legend.
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
   // What Claude Code holds beyond that is the tool working: one line, never a warning.
-  expect(await ui.find({ type: 'Text', text: 'Actual Cache Size: 620k', color: 'ansi256(208)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 620k', color: 'ansi256(208)' })).toBeDefined()
   // The bar is in the session card; a standing problem is with Proxy State.
   expect(drawn.indexOf('70k/1M 7%')).toBeLessThan(drawn.indexOf('"Turns"'))
   expect(await ui.find({ type: 'Text', text: 'Keep-awake turned off', color: 'yellow' })).toBeDefined()
@@ -327,7 +327,7 @@ test('over the limit the bar is red, a compaction under way is named, and a sile
   expect(await ui.find({ type: 'Text', text: '310k/1M 31%', color: 'red' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '⟳ summarising' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Free/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^Actual Cache Size/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Uncompacted Size/ })).toBeUndefined()
   await ui.unmount()
   // Once it is done there is no line left saying so for the rest of the session.
   answer = mod({ route: 'SECONDARY', session: { session: 'S', context: 64_000, state: 'compacted', compact_at: 300_000 } })
