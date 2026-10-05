@@ -292,7 +292,7 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   // it, named underneath.
   // A thin red line and an arrow at it, on the bar's own colour, so the bar
   // is not cut into bands.
-  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["▏"]')
+  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["▕"]')
   expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["◀"]')
   expect(drawn).toContain('"Burst compacts at 300k"')
   expect(drawn).not.toContain('warns at')

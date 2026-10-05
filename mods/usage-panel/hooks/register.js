@@ -638,8 +638,12 @@ function sentBar(Box, T, s, W, win, warnPct) {
       // A thin red line with an arrow pointing at it, each drawn on the
       // colour of the cell it stands in: on the terminal's own background
       // the line had a dark gap on both sides and cut the bar in two.
-      if (stop < cells.length) cells[stop] = ['▏', 'red', cells[stop][1]]
-      if (stop + 1 < cells.length) cells[stop + 1] = ['◀', 'red', cells[stop + 1][1]]
+      // The line is on the right edge of the cell before the limit, so it
+      // stands at the limit itself and touches the arrow's cell.
+      if (stop < cells.length) {
+        if (stop > 0) cells[stop - 1] = ['▕', 'red', cells[stop - 1][1]]
+        cells[stop] = ['◀', 'red', cells[stop][1]]
+      }
     }
     const segs = []
     for (const [ch, c, bg] of cells) {
@@ -663,7 +667,7 @@ function sentBar(Box, T, s, W, win, warnPct) {
   if (whole) {
     out.push(Box({
       flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [
-        T([T('▏◀ ', { color: 'red' }), T('Burst compacts at ' + k(limit), { dimColor: true })]),
+        T([T('▕◀ ', { color: 'red' }), T('Burst compacts at ' + k(limit), { dimColor: true })]),
       ],
     }))
   }
