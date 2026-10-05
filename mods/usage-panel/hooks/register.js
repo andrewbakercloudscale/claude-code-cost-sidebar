@@ -56,7 +56,7 @@ let layout = null // { order, hidden } as the person left it
 let burst = null // { down, mod }: Burst's /api/mod answer; null without Burst
 let burstRaw = ''
 let limits = null // [{ key, util, reset }]: the plan's limits, as Anthropic last reported them
-let extra = null // { saved, secondary, warn, comp }: Burst's slower figures, and the percent of its limit it warns at
+let extra = null // { saved, secondary, warn, comp, auto }: Burst's slower figures, the percent of its limit it warns at, and this folder's compaction limit
 const warned = {} // limit window and reset time -> the level already toasted
 
 // A stored layout made whole: unknown names dropped, sections added since
@@ -321,7 +321,15 @@ async function readExtras($) {
   const before = JSON.stringify(extra)
   const now = Math.floor((await $.clock.now()) / 1000)
   const state = await get('/api/state')
-  const next = { saved: null, secondary: null, warn: 0, comp: null }
+  const next = { saved: null, secondary: null, warn: 0, comp: null, auto: null }
+  // Where Burst compacts sessions in this folder: one fixed size, the
+  // person's own for the repository, or the one Intelligent Compaction Mode
+  // has learned for it.
+  const at = cwd ? await get('/api/GetAutoCompactionThreshold?folder=' + encodeURIComponent(cwd)) : null
+  if (at && typeof at.threshold === 'number' && typeof at.source === 'string') {
+    const f = at.failures || {}
+    next.auto = { at: at.threshold, source: at.source, target: at.target || 0, lost: (f.unpaid || 0) + (f.summary_failed || 0) + (f.unused || 0), attempts: f.attempts || 0 }
+  }
   const cfg = state && state.context && state.context.compaction
   if (cfg && cfg.warn_at_percent > 0) next.warn = cfg.warn_at_percent
   const stats = state && state.context && state.context.compaction_stats
@@ -344,7 +352,7 @@ async function readExtras($) {
     const others = ((usage && usage.by_provider) || []).filter((x) => x && x.key !== 'anthropic' && x.requests > 0)
     if (others.length > 0) next.secondary = { requests: others.reduce((a, x) => a + x.requests, 0), usd: others.reduce((a, x) => a + (x.usd || 0), 0), names: others.map((x) => x.key) }
   }
-  extra = next.saved || next.secondary || next.warn || next.comp ? next : null
+  extra = next.saved || next.secondary || next.warn || next.comp || next.auto ? next : null
   return JSON.stringify(extra) !== before
 }
 
@@ -519,7 +527,7 @@ function sessionSection(Box, T, d, W, burst, warnPct) {
   if (sent) {
     out.push(...sentBar(Box, T, sent, W, s.win || 0, warnPct))
     if (s.compacting) out.push(T('  ⟳ a summary is ready: the next prompt compacts', { color: 'cyan' }))
-    else if (sent.state === 'warning') out.push(T('! Close to the limit: Burst compacts at ' + k(sent.compact_at) + '.', { color: 'yellow', wrap: 'wrap' }))
+    else if (sent.state === 'warning') out.push(T('! Close to the limit: Burst compacts at ' + k(compactAt(sent)) + learnedNote() + '.', { color: 'yellow', wrap: 'wrap' }))
     // "compacted" is not said: it stays for the rest of the session and the
     // bar, the growth chart and the turn table already show it.
     else if (sent.state && sent.state !== 'ok' && sent.state !== 'compacted') out.push(T('⟳ ' + sent.state, { color: 'cyan', wrap: 'wrap' }))
@@ -603,13 +611,27 @@ const PART_COLOURS = {
 // What is left of the bar: white, the one colour no part has.
 const FREE_COLOUR = 'white'
 
+// Where Burst compacts this session: what GetAutoCompactionThreshold says
+// for this folder, and until it has answered, what the session's own
+// figures carry.
+function compactAt(s) {
+  const a = extra && extra.auto
+  if (a && a.at > 0) return a.at
+  return s && s.compact_at > 0 ? s.compact_at : 0
+}
+
+// "learned" where the limit is the one Intelligent Compaction Mode chose.
+function learnedNote() {
+  return extra && extra.auto && extra.auto.source === 'learned' && extra.auto.at > 0 ? ' (learned)' : ''
+}
+
 // The context Burst sends for this session as a stacked bar against the
 // model's window, with a line where Burst compacts (the limit is a setting,
 // not the room there is), a legend under it, and
 // what Claude Code itself still holds when that is more. Without a window
 // the bar is against the compaction limit alone.
 function sentBar(Box, T, s, W, win, warnPct) {
-  const limit = s.compact_at > 0 ? s.compact_at : 0
+  const limit = compactAt(s)
   const warn = limit ? Math.round((limit * (warnPct > 0 && warnPct < 100 ? warnPct : 80)) / 100) : 0
   const whole = win > limit && win >= s.context
   const scale = whole ? win : Math.max(limit, s.context)
@@ -669,7 +691,7 @@ function sentBar(Box, T, s, W, win, warnPct) {
   if (whole) {
     out.push(Box({
       flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [
-        T([T('▕◀ ', { color: 'red' }), T('Burst compacts at ' + k(limit), { dimColor: true })]),
+        T([T('▕◀ ', { color: 'red' }), T('Burst compacts at ' + k(limit) + learnedNote(), { dimColor: true })]),
       ],
     }))
   }
@@ -978,8 +1000,8 @@ export function insights(d, now, limits = null, extra = null, burst = null) {
   const sent = burst && !burst.down && burst.mod && burst.mod.session && burst.mod.session.context > 0 ? burst.mod.session : null
   const grow = recent.length >= 5 ? (recent[recent.length - 1][1] - recent[0][1]) / (recent.length - 1) : 0
   if (sent) {
-    if (grow > 500 && sent.compact_at > sent.context) {
-      const left = Math.round((sent.compact_at - sent.context) / grow)
+    if (grow > 500 && compactAt(sent) > sent.context) {
+      const left = Math.round((compactAt(sent) - sent.context) / grow)
       out.push({ scope: 'session', tier: 'cyan', icon: '↗', text: 'Grows ' + k(grow) + '/turn: Auto Compact in ~' + left + ' turns.' })
     }
   } else if (s.ctx > 0 && s.win > 0) {

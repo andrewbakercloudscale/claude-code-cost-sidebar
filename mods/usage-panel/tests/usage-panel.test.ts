@@ -447,6 +447,28 @@ test('Plan Utilisation draws each limit with Claude Burst, and says where they c
   expect(await hidden.find({ type: 'Text', text: 'Plan Utilisation' })).toBeUndefined()
 })
 
+test('the compaction limit is the one GetAutoCompactionThreshold gives for this folder, marked when it is learned', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const urls: string[] = []
+  on('http.fetch', ($, e) => {
+    urls.push(e.url)
+    const body = e.url.includes('/api/GetAutoCompactionThreshold')
+      ? { folder: '/work', repo: 'work', threshold: 130_000, source: 'learned', intelligent: true, enabled: true, fixed: 300_000, floor: 100_000, target: 130_000, failures: { unpaid: 2, attempts: 28 } }
+      : e.url.includes('/api/state') || e.url.includes('/api/responses') || e.url.includes('/api/usage') ? {}
+        : mod({ session: { ...mod().session, context: 110_000, state: 'warning' } })
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
+  })
+  await start($)
+  // Asked by folder: the session's working directory.
+  expect(urls).toContain('http://127.0.0.1:7788/api/GetAutoCompactionThreshold?folder=%2Fwork')
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  // The gateway's answer for the folder, not the 300k the session's own figures carry.
+  expect(drawn).toContain('"Burst compacts at 130k (learned)"')
+  expect(drawn).not.toContain('Burst compacts at 300k')
+  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Burst compacts at 130k (learned).', color: 'yellow' })).toBeDefined()
+})
+
 test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, and this session\'s share', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   const stats = {
