@@ -116,14 +116,14 @@ A turn that added far more than the session's average, or one past 50% of the wi
 | `Proxy State` | With Claude Burst: where requests are going. `PRIMARY (oauth)` in green is your subscription; `SECONDARY (...)` in yellow is the overflow provider; `NOT IN USE` in red means Burst is installed but out of the path. Absent without Burst. |
 | `License` | The plan Claude Code is signed in with, or `API key` when it is metered. |
 | `⚠` rows | With Burst, each of its standing problems (yellow is a warning, red an error), and `⚡ Burst dashboard not answering` when it is down. |
-| `Open Claude Burst dashboard ↗` | A button: click it, or press `v` with the sidebar focused. |
+| `[ Open Claude Burst dashboard ↗ ]` | A button: click it, or press `v` with the sidebar focused. |
 | Red `!` rows | The panel's own errors (a `ccusage` call that failed, a model it has no price for), so a figure that is missing is explained. |
 
 This card sits third so a problem is not under a screen of charts.
 
 ### Plan Utilisation
 
-<img src="docs/card-plan.png" alt="The Plan Utilisation card: the 5-hour limit at 82% in yellow, the weekly limit at 58%, the month's use at API rates against the plan's price, and when the 5-hour limit will be reached at this pace" width="460">
+<img src="docs/card-plan.png" alt="The Plan Utilisation card: the 5-hour limit at 82% in yellow, the weekly limit at 58%, the month's use at API rates beside the plan's price, and when the 5-hour limit will be reached at this pace" width="460">
 
 How close you are to your plan's limits. Anthropic states the figures itself, in headers on every reply; Claude Burst keeps the latest and the sidebar reads them from its dashboard every 15 seconds. They are Anthropic's numbers, not an estimate from token counts.
 
@@ -132,7 +132,7 @@ How close you are to your plan's limits. Anthropic states the figures itself, in
 | `Max (20x)` | The plan Claude Code is signed in with. |
 | `5h` bar, `82%  resets 16:17 (1h58m)` | The share of the 5-hour limit used, and when the window resets. Green, yellow from 80%, red from 95%. The tick on the bar is the 80% mark. |
 | `weekly` bar, `58%  resets Thu 02:00` | The same for the 7-day limit. Any other window Anthropic reports (a per-model weekly limit, for one) gets a row of its own. |
-| `$132 of use this month at API rates, on a $200 plan` | What this month's use would have cost pay-as-you-go, beside the plan's flat price. Shown for Pro ($20), Max 5x ($100) and Max 20x ($200). |
+| `$132 at API rates this month ($200 plan)` | What this month's use would have cost pay-as-you-go, beside the plan's flat price. Shown for Pro ($20), Max 5x ($100) and Max 20x ($200). |
 | Lines starting `↗ !` | `↗`: at the pace of this window so far, the limit is reached before it resets, with when and by how much. `!`: a limit is used up, and when it comes back. |
 
 **A warning before you hit a limit.** When a limit passes 80%, and again at 95%, the mod raises a toast in the session: `Plan limit: 81% of the 5h limit used, resets 16:17 (1h58m)`. Once per level and window, in every open session, so it is not repeated each minute.

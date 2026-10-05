@@ -724,7 +724,7 @@ function planSection(Box, T, d, W, now, limits) {
   if (plan && plan.price > 0 && d.month > 0) {
     out.push(T([
       T(money(d.month), { bold: true }),
-      T(' of use this month at API rates, on a ' + money(plan.price) + ' plan', { dimColor: true }),
+      T(' at API rates this month (' + money(plan.price) + ' plan)', { dimColor: true }),
     ], { wrap: 'wrap' }))
   }
   return out
@@ -1040,7 +1040,13 @@ function footer(Box, T, d) {
   const out = []
   const lines = parseAnsi(d.summary || '')
   const keep = lines.filter((l) => /Proxy State:|License:|no price for/.test(l.text))
-  for (const l of keep) out.push(lineText(T, { text: l.text, segs: l.segs.filter((g) => g.text.trim() !== '[View]') }))
+  for (const l of keep) {
+    // Without the panel's own indent: the rows under these start at the edge.
+    const segs = l.segs.filter((g) => g.text.trim() !== '[View]').map((g) => ({ ...g }))
+    while (segs.length > 0 && segs[0].text.trim() === '') segs.shift()
+    if (segs.length > 0) segs[0].text = segs[0].text.replace(/^\s+/, '')
+    out.push(lineText(T, { text: l.text, segs }))
+  }
   for (const e of d.errors || []) out.push(T('! ' + e, { color: 'red', wrap: 'truncate-end' }))
   return out
 }
