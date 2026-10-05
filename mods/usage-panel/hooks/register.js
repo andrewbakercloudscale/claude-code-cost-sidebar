@@ -379,7 +379,9 @@ async function readExtras($) {
 
 // The warning for a limit that is close: longer on screen from 95%.
 function limitToast($, l, now) {
-  $.ui.toast('Plan limit: ' + Math.round(l.util * 100) + '% of the ' + limitName(l.key) + ' limit used, resets ' + when(l.reset, now), { timeoutMs: l.util >= LIMIT_ALARM ? 30000 : 15000 })
+  // A toast is one colour, the engine's: the level is a coloured mark in
+  // the text, yellow at the warning and red at the alarm.
+  $.ui.toast((l.util >= LIMIT_ALARM ? '🔴 ' : '🟡 ') + 'Plan limit: ' + Math.round(l.util * 100) + '% of the ' + limitName(l.key) + ' limit used, resets ' + when(l.reset, now), { timeoutMs: l.util >= LIMIT_ALARM ? 30000 : 15000 })
 }
 
 // The plan's limits from Burst's list of recent replies: the newest reply

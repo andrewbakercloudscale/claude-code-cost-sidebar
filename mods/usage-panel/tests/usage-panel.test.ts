@@ -589,7 +589,7 @@ test('a plan limit that is close is toasted, once at 80% and once at 95%', async
   five = 0.81
   await clock.advance(60000)
   expect(limit().length).toBe(1)
-  expect(limit()[0]).toContain('Plan limit: 81% of the 5h limit used, resets ')
+  expect(limit()[0]).toContain('🟡 Plan limit: 81% of the 5h limit used, resets ')
   // The same level is not repeated.
   five = 0.9
   await clock.advance(60000)
@@ -597,7 +597,7 @@ test('a plan limit that is close is toasted, once at 80% and once at 95%', async
   five = 0.96
   await clock.advance(60000)
   expect(limit().length).toBe(2)
-  expect(limit()[1]).toContain('96% of the 5h limit')
+  expect(limit()[1]).toContain('🔴 Plan limit: 96% of the 5h limit')
   await clock.advance(120000)
   expect(limit().length).toBe(2)
 })
