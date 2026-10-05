@@ -479,7 +479,8 @@ test('the compaction limit is the one GetAutoCompactionThreshold gives for this 
   // A learned limit reads as automatic, in its own colour, with where it
   // comes from and how often a session may be compacted beside it.
   expect(await ui.find({ type: 'Text', text: 'Auto Compact at 155k', color: 'cyan' })).toBeDefined()
-  expect(drawn).toContain('"learned for this repo, 20% buffer · max 1 per 30 min"')
+  expect(drawn).toContain('"learned for this repo, 20% buffer"')
+  expect(drawn).not.toContain('max 1 per')
   expect(drawn).not.toContain('compacts at 300k')
   expect(await ui.find({ type: 'Text', text: '! Close to the limit: Auto Compact at 155k.', color: 'yellow' })).toBeDefined()
 })
