@@ -635,16 +635,11 @@ function limitLabel(s) {
   return 'Auto Compact at ' + k(compactAt(s))
 }
 
-// What stands beside the limit: where it comes from when it is learned, and
-// how often a session may be compacted. '' when Burst has said neither.
+// What stands beside the limit: where it comes from when it is learned.
+// '' for the fixed one.
 function limitNote(s) {
-  const a = (extra && extra.auto) || {}
-  const delay = a.delay || (s && s.delay_minutes) || 0
-  const buffer = a.buffer || (s && s.buffer_percent) || 0
-  const parts = []
-  if (learnedLimit(s)) parts.push('learned for this repo' + (buffer > 0 ? ', ' + buffer + '% buffer' : ''))
-  if (delay > 0) parts.push('max 1 per ' + delay + ' min')
-  return parts.join(' · ')
+  const buffer = ((extra && extra.auto) || {}).buffer || (s && s.buffer_percent) || 0
+  return learnedLimit(s) ? 'learned for this repo' + (buffer > 0 ? ', ' + buffer + '% buffer' : '') : ''
 }
 
 // The context Burst sends for this session as a stacked bar against the
