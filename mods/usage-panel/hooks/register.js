@@ -346,7 +346,7 @@ async function readExtras($) {
   const before = JSON.stringify(extra)
   const now = Math.floor((await $.clock.now()) / 1000)
   const state = await get('/api/state')
-  const next = { saved: null, secondary: null, warn: 0, comp: null, auto: null }
+  const next = { saved: null, secondary: null, warn: 0, comp: null, auto: null, over: null }
   // Where Burst compacts sessions in this folder: one fixed size, the
   // person's own for the repository, or the one Intelligent Compaction Mode
   // has learned for it.
@@ -368,6 +368,16 @@ async function readExtras($) {
       daily: (Array.isArray(stats.daily) ? stats.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => ({ d: x.date, net: x.net_usd || 0, n: x.compactions || 0 })),
     }
   }
+  // What the secondary's requests would have cost at the price of the model
+  // Claude Code asked for, against what the secondary charged.
+  const over = state && state.context && state.context.overflow_stats
+  if (over && over.requests > 0) {
+    next.over = {
+      days: (state.context.window_days > 0 && state.context.window_days) || 7,
+      n: over.requests, priced: over.priced || 0, list: over.list_usd || 0, paid: over.paid_usd || 0, saved: over.saved_usd || 0,
+      daily: (Array.isArray(over.daily) ? over.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => ({ d: x.date, net: x.saved_usd || 0 })),
+    }
+  }
   if (mine.length > 0) next.saved = { net: mine.reduce((a, x) => a + (x.net_usd || 0), 0), n: mine.reduce((a, x) => a + (x.compactions || 0), 0) }
   if (state && state.today && state.today.SecondaryRequests > 0) {
     const day = new Date(now * 1000)
@@ -377,7 +387,7 @@ async function readExtras($) {
     const others = ((usage && usage.by_provider) || []).filter((x) => x && x.key !== 'anthropic' && x.requests > 0)
     if (others.length > 0) next.secondary = { requests: others.reduce((a, x) => a + x.requests, 0), usd: others.reduce((a, x) => a + (x.usd || 0), 0), names: others.map((x) => x.key) }
   }
-  extra = next.saved || next.secondary || next.warn || next.comp || next.auto ? next : null
+  extra = next.saved || next.secondary || next.warn || next.comp || next.auto || next.over ? next : null
   return JSON.stringify(extra) !== before
 }
 
@@ -515,7 +525,7 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
       const body = planSection(Box, T, d, IW, now, limits)
       return body.length > 0 ? [...body, ...notes('plan')] : []
     },
-    savings: () => savingsSection(Box, T, IW, extra),
+    savings: () => [...savingsSection(Box, T, IW, extra), ...overflowSection(Box, T, IW, extra)],
     today: () => [...todaySection(Box, T, d, IW, now), ...notes('today')],
     sessions: () => topSection(Box, T, d, IW),
     days: () => daysSection(Box, T, d, IW),
@@ -891,6 +901,38 @@ function savingsSection(Box, T, W, extra) {
       T(mine.net >= 0 ? ' this session' : ' so far this session', { dimColor: true }),
     ], { wrap: 'truncate-end' }))
   }
+  return out
+}
+
+// ---- overflow: what sending requests to the secondary has saved
+
+// Past the plan's limit Burst sends requests to the secondary. The saving
+// is what the same tokens would have cost at the price of the model Claude
+// Code asked for, less what the secondary charged. Burst works it out.
+function overflowSection(Box, T, W, extra) {
+  const o = extra && extra.over
+  if (!o || !(o.n > 0)) return []
+  const good = o.saved >= 0
+  const out = [heading(T, 'Overflow to Secondary', 'last ' + o.days + ' days')]
+  out.push(T([
+    T(money(Math.abs(o.saved)), { bold: true, color: good ? 'green' : 'red' }),
+    T(good ? ' saved' : ' lost', { color: good ? 'green' : 'red' }),
+    T('  ' + o.n + (o.n === 1 ? ' request' : ' requests'), { dimColor: true }),
+  ], { wrap: 'truncate-end' }))
+  if (o.daily.length >= 2 && o.daily.some((x) => x.net !== 0)) {
+    const cw = Math.max(o.daily.length, W)
+    const idx = stretch(o.daily.length, cw)
+    const last = o.daily.length - 1
+    out.push(...bars(T, Box, idx.map((i) => Math.abs(o.daily[i].net)), 3, (v, i) => (o.daily[idx[i]].net < 0 ? 'red' : idx[i] === last ? 'cyan' : 'green')))
+    out.push(T(axis([short(o.daily[0].d), 'today'], cw), { dimColor: true }))
+  }
+  const row = (label, value, colour) => Box({
+    flexDirection: 'row', columnGap: 1, children: [T(pad(label, 22), { dimColor: true }), T(lpad(value, 9), { color: colour })],
+  })
+  out.push(row('At Anthropic\'s price', money(o.list, 2)))
+  out.push(row('Secondary charged', '-' + money(o.paid, 2)))
+  out.push(row('Net', money(o.saved, 2), good ? 'green' : 'red'))
+  if (o.priced < o.n) out.push(T((o.n - o.priced) + (o.n - o.priced === 1 ? ' request has' : ' requests have') + ' no price and ' + (o.n - o.priced === 1 ? 'is' : 'are') + ' left out', { dimColor: true, wrap: 'truncate-end' }))
   return out
 }
 
