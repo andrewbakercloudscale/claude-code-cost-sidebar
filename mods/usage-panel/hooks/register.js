@@ -142,6 +142,9 @@ export function panel(Box, Text, d, width, now, feedError) {
   if (feedError) rows.push(T(feedError, { color: 'red', wrap: 'wrap' }))
 
   rows.push(...sessionSection(Box, T, d, W))
+  // The turn table straight under the session it belongs to, not at the
+  // bottom of the sidebar, where it sat below the fold and went unseen.
+  rows.push(...turnsTable(T, d))
   rows.push(...todaySection(Box, T, d, W, now))
   rows.push(...daysSection(Box, T, d, W))
   rows.push(...projectsSection(Box, T, d, W))
@@ -153,7 +156,6 @@ export function panel(Box, Text, d, width, now, feedError) {
       rows.push(Box({ flexDirection: 'row', children: [T((t.icon || '•') + ' ', { color: TIER[t.tier] || ACCENT }), T(t.text, { wrap: 'wrap' })] }))
     }
   }
-  rows.push(...turnsTable(T, d))
   rows.push(...footer(Box, T, d))
   return rows
 }
@@ -465,8 +467,9 @@ export function insights(d, now) {
 function turnsTable(T, d) {
   const lines = parseAnsi(d.table || '')
   if (lines.length === 0) return []
-  const out = [heading(T, 'Recent turns')]
-  for (const line of lines.slice(0, 9)) out.push(lineText(T, line))
+  const b = d.block || {}
+  const out = [heading(T, 'Turns', b.active ? 'burn ' + money(b.cph, 2) + '/hr, all sessions' : '')]
+  for (const line of lines.slice(0, 13)) out.push(lineText(T, line))
   return out
 }
 

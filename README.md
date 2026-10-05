@@ -23,7 +23,7 @@ On a Claude Code that loads mods, setup installs the **usage-panel mod** (`mods/
 - **Last 30 days:** total and daily average against the 30 days before, a daily bar chart with expensive days in amber and red, the peak day, week and month, and a bar of each model's share.
 - **By project** and **top sessions today**, as bar charts, with this session's project and row highlighted.
 - **Insights:** a few plain sentences, only when there is something to say: when the context reaches the restart line at its current growth, a low cache hit rate, a turn that cost several times the median, a session far above your average, a busy or quiet day for this hour, a high burn rate, the project taking most of the month, your usual busiest hour.
-- **The turn table**, Proxy State and License rows, exactly as the panel draws them.
+- **The turn table**, straight under the session graphs, and the Proxy State and License rows at the bottom, exactly as the panel draws them.
 
 | Command | |
 |---|---|
