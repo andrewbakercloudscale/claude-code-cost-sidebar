@@ -425,7 +425,9 @@ test('Plan Utilisation draws each limit with Claude Burst, and says where they c
   // Past 80% the row is yellow; the weekly one resets on another day.
   expect((await ui.find({ type: 'Text', text: /^ 85%  resets (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d\d:\d\d$/ })).props.color).toBe('yellow')
   expect(drawn).toContain('"weekly"')
-  expect(drawn).toContain(' of use this month at API rates, on a $200 plan')
+  expect(drawn).toContain(' at API rates this month ($200 plan)')
+  // This Mac's rows start at the card's edge, like the rows under them.
+  expect(drawn).toContain('"🔀 Proxy State: "')
   // Under This Mac, above Today.
   expect(drawn.indexOf('"Plan Utilisation"')).toBeGreaterThan(drawn.indexOf('Proxy State'))
   expect(drawn.indexOf('"Plan Utilisation"')).toBeLessThan(drawn.indexOf('"Today"'))

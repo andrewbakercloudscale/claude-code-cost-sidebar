@@ -230,8 +230,8 @@ function Box(p) {
   return { html: `<div${cls} style="${st.join(';')}">${kids(p.children)}</div>` }
 }
 
-// Claude Code draws a plain button as its label, with the hotkey after it.
-const button = Text({ color: 'black', backgroundColor: 'cyan', bold: true, children: [' Open Claude Burst dashboard ↗ '] })
+// Claude Code draws a button as its label in square brackets.
+const button = Text({ bold: true, children: ['[ Open Claude Burst dashboard ↗ ]'] })
 
 function page(scene) {
   const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, scene.b ? [button] : [], scene.b, scene.b ? LIMITS : null, scene.x || null)
