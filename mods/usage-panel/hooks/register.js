@@ -476,7 +476,11 @@ function sub(T, title, note) {
 
 function sessionSection(Box, T, d, W, burst, warnPct) {
   const s = d.session || {}
-  const out = [heading(T, 'This session', [d.sid ? '*' + d.sid.slice(-5) : '', s.folder || ''].filter(Boolean).join(' · '))]
+  // A long folder loses its start, not its end: the end is what tells two
+  // repos apart.
+  const id = d.sid ? '*' + d.sid.slice(-5) : ''
+  const room = W - 'This session'.length - 2 - (id ? id.length + 3 : 0)
+  const out = [heading(T, 'This session', [id, s.folder ? cut(s.folder, Math.max(4, room)) : ''].filter(Boolean).join(' · '))]
   // Before the first reply the panel knows no model ("Unknown") and prices
   // nothing ($0): say so rather than draw that as a reading.
   const turnsSoFar = (d.turns && d.turns.turns) || []

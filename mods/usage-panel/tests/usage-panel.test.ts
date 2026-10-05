@@ -542,6 +542,16 @@ test('the costliest turns today are listed under the top sessions, from any sess
   await ui.unmount()
 })
 
+test('a long folder beside the session id loses its start, not its end', async ($, on) => {
+  stubs(on, [doc({ session: { ...doc().session, folder: 'claudecode-cost-usage-panel-with-a-long-name' } })])
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const note = await ui.find({ type: 'Text', text: /^  \*b598c · …/ })
+  expect(note.text.endsWith('-with-a-long-name')).toBe(true)
+  // The heading and the note together fit the card.
+  expect('This session'.length + note.text.length).toBeLessThanOrEqual(50)
+})
+
 test('formatting', () => {
   expect(money(5363.4)).toBe('$5,363')
   expect(money(6.7, 2)).toBe('$6.70')
