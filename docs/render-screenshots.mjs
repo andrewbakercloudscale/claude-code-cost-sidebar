@@ -97,7 +97,7 @@ function doc(turns, marks, over = {}) {
       cost, tier: 'yellow', rate: 3.1, rate_tier: 'yellow', started: NOW - 4 * 3600, avg_session: 6.1,
       ctx: last[1], win: 1000000, ctx_tier: 'green', compacting: false, restart_tokens: 400000,
     },
-    today: { cost: 31.4, tier: 'green', pred: 44.9, pred_tier: 'green', unpriced: '', typical_so_far: 27 },
+    today: { cost: 31.4, tier: 'green', pred: 44.9, pred_tier: 'green', unpriced: '', typical_so_far: 27, turns: 262, turns_usd: 31.4 },
     block: { active: true, cost: 12.8, cph: 4.1, rem: 118, label: 'Elevated', tier: 'yellow' },
     days30: { spend: 806, prev: 733, tier: 'green', avg: 27.8, prev_avg: 24.4, avg_tier: 'green' },
     week: 118, month: 132,

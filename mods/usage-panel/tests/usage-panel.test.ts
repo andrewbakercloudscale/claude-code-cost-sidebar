@@ -28,7 +28,7 @@ function doc(over: Record<string, unknown> = {}) {
       cost: 170.88, tier: 'red', rate: 2.5, rate_tier: 'green', started: NOW - 86400, avg_session: 5.38,
       ctx: 205_818, win: 1_000_000, ctx_tier: 'green', compacting: false, restart_tokens: 400_000,
     },
-    today: { cost: 6.7, tier: 'green', pred: 23.21, pred_tier: 'green', unpriced: '', typical_so_far: 80 },
+    today: { cost: 6.7, tier: 'green', pred: 23.21, pred_tier: 'green', unpriced: '', typical_so_far: 80, turns: 80, turns_usd: 6.4 },
     block: { active: true, cost: 6.7, cph: 7.28, rem: 244, label: 'High', tier: 'red' },
     days30: { spend: 5363, prev: 159, tier: 'red', avg: 185, prev_avg: 5.5, avg_tier: 'red' },
     week: 95.4, month: 455.6,
@@ -117,6 +117,8 @@ test('the sidebar draws the session, today, 30 days, projects, top sessions and 
   expect(await ui.find({ type: 'Text', text: 'Last 30 days' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^\$5,363$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^wordpress-cyber-devtools/ })).toBeDefined()
+  // Beside Turns: today's average cost per API reply, and the burn rate, both for all sessions.
+  expect(JSON.stringify(await ui.drawn())).toContain('"  Avg API: $0.08  All: $7.28/hr"')
   // This session is marked among today's top sessions.
   expect(await ui.find({ type: 'Text', text: / ◀$/ })).toBeDefined()
   // The panel's own rows keep the panel's colours.
@@ -594,19 +596,26 @@ test('a long folder beside the session id loses its start, not its end', async (
 
 test('the models pie gives each slice its share of the disc, clockwise from the top', () => {
   const T = (children: any, props: any = {}) => ({ props, children: Array.isArray(children) ? children : [children] })
-  const rows = pie(T, [['magenta', 50], ['blue', 25], ['yellow', 25]], 7) as any[]
-  expect(rows.length).toBe(7)
-  const cells: Record<string, number> = {}
-  for (const row of rows) for (const seg of row.children) if (seg.props.color) cells[seg.props.color] = (cells[seg.props.color] || 0) + seg.children[0].length
-  const all = cells.magenta + cells.blue + cells.yellow
-  expect(Math.abs(cells.magenta / all - 0.5)).toBeLessThan(0.08)
-  expect(Math.abs(cells.blue / all - 0.25)).toBeLessThan(0.08)
+  const rows = pie(T, [['magenta', 50], ['blue', 25], ['yellow', 25]], 8) as any[]
+  expect(rows.length).toBe(8)
+  // Count quarters of a cell: a quadrant block is its colour's quarters on the other's.
+  const quarters: Record<string, number> = {}
+  const on = (ch: string) => ({ ' ': 0, '▘': 1, '▝': 1, '▖': 1, '▗': 1, '▀': 2, '▄': 2, '▌': 2, '▐': 2, '▞': 2, '▚': 2, '▛': 3, '▜': 3, '▙': 3, '▟': 3, '█': 4 } as any)[ch]
+  for (const row of rows) for (const seg of row.children) for (const ch of seg.children[0]) {
+    if (seg.props.color) quarters[seg.props.color] = (quarters[seg.props.color] || 0) + on(ch)
+    if (seg.props.backgroundColor) quarters[seg.props.backgroundColor] = (quarters[seg.props.backgroundColor] || 0) + 4 - on(ch)
+  }
+  const all = quarters.magenta + quarters.blue + quarters.yellow
+  expect(Math.abs(quarters.magenta / all - 0.5)).toBeLessThan(0.04)
+  expect(Math.abs(quarters.blue / all - 0.25)).toBeLessThan(0.04)
   // The first slice starts at twelve o'clock and runs down the right side.
   const mid = rows[3].children
   expect(mid[mid.length - 1].props.color).toBe('magenta')
+  // The rim is drawn in part cells, on the terminal's own background.
+  expect(rows[0].children.some((g: any) => /[▗▖▄▟▙]/.test(g.children[0]) && !g.props.backgroundColor)).toBe(true)
   // Every row is as wide as the pie: twice its height in cells.
-  for (const row of rows) expect(row.children.reduce((a: number, g: any) => a + g.children[0].length, 0)).toBe(14)
-  expect(pie(T, [], 7)).toEqual([])
+  for (const row of rows) expect(row.children.reduce((a: number, g: any) => a + g.children[0].length, 0)).toBe(16)
+  expect(pie(T, [], 8)).toEqual([])
 })
 
 test('formatting', () => {

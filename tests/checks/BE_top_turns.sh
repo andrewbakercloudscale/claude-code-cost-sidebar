@@ -24,6 +24,8 @@ check_BE_top_turns() {
 
   top_turns_refresh
   assert_eq "today's turns only" "3" "$(jq 'length' <<<"$TOP_TURNS_JSON")"
+  assert_eq "and how many there were today, for the day's average" "3" "$TODAY_TURNS"
+  awk -v u="$TODAY_TURNS_USD" 'BEGIN{exit !(u > 0)}' && _pass || _fail "with what they cost together" "> 0" "$TODAY_TURNS_USD"
   assert_eq "dearest first, from whichever session" "$a" "$(jq -r '.[0].sid' <<<"$TOP_TURNS_JSON")"
   assert_eq "its turn number" "2" "$(jq -r '.[0].turn' <<<"$TOP_TURNS_JSON")"
   assert_eq "its folder" "alpha" "$(jq -r '.[0].folder' <<<"$TOP_TURNS_JSON")"
@@ -53,6 +55,7 @@ check_BE_top_turns() {
   printf '%s' '{"session":[]}' > "$SBX/all.json"
   MJ_RECENT_FILE="$SBX/recent.json" MJ_ALL_SESS_FILE="$SBX/all.json" mod_json_write "$sid"
   assert_eq "the mod's file carries them" "3" "$(jq '.top_turns | length' "$MOD_DIR/$sid.json")"
+  assert_eq "and the day's turn count" "3" "$(jq '.today.turns' "$MOD_DIR/$sid.json")"
 
   # No transcript today: an empty list, not an error.
   rm -f "$pa/$a.jsonl" "$pb/$b.jsonl"

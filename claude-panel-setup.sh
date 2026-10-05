@@ -2325,12 +2325,13 @@ turn_table_series() { # $1 = transcript path
 # out, as they are from the session total. The series holds a session's
 # newest 300 turns, so a longer day in one session is read from there on.
 TOP_TURNS_JSON="[]"
+TODAY_TURNS=""; TODAY_TURNS_USD=""
 TOP_TURNS_FILES="${TOP_TURNS_FILES:-60}"
 top_turns_refresh() {
   local files f out series tmp picked sid path turn cost ctx at folder json="[]"
   files=$(find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' \
     -newermt "$(date '+%Y-%m-%d 00:00:00')" 2>/dev/null)
-  if [ -z "$files" ]; then TOP_TURNS_JSON="[]"; return 0; fi
+  if [ -z "$files" ]; then TOP_TURNS_JSON="[]"; TODAY_TURNS=""; TODAY_TURNS_USD=""; return 0; fi
   tmp=$(mktemp "${TMPDIR:-/tmp}/ccusage-top-turns.XXXXXX") || return 0
   while IFS= read -r f; do
     [ -f "$f" ] || continue
@@ -2367,13 +2368,18 @@ for r in rows:
         seen.add(key)
         once.append(r)
 rows = sorted(once, key=lambda r: -r[0])
+# First, how many turns today and what they cost together: the day's average
+# cost per API reply, from the same turns the list is picked from.
+print(f"#N\t{len(rows)}\t{sum(r[0] for r in rows):.6f}")
 for cost, sid, path, turn, ctx, at in rows[:5]:
     print(f"{sid}\t{path}\t{turn}\t{cost:.6f}\t{int(ctx)}\t{int(at)}")
 TOPTURNS_PYEOF
 )
   rm -f "$tmp"
+  TODAY_TURNS=""; TODAY_TURNS_USD=""
   while IFS=$'\t' read -r sid path turn cost ctx at; do
     [ -n "$sid" ] || continue
+    if [ "$sid" = "#N" ]; then TODAY_TURNS="$path"; TODAY_TURNS_USD="$turn"; continue; fi
     folder=$(session_identity_cached "$path" 2>/dev/null | cut -f4)
     json=$(jq -c --arg sid "$sid" --arg folder "$folder" --argjson turn "$turn" --argjson cost "$cost" \
       --argjson ctx "$ctx" --argjson at "$at" \
@@ -4565,6 +4571,7 @@ mod_json_write() { # $1 = session id
   MJ_AVG30="${avg_daily_30:-0}" MJ_PREV_AVG30="${prev_avg_daily_30:-0}" MJ_AVG_TIER="$avg_tier" \
   MJ_WEEK="${week_cost:-0}" MJ_MONTH="${month_cost:-0}" \
   MJ_TOP="${top_rows:-}" MJ_SERIES="$SESS_SERIES" MJ_TOP_TURNS="${TOP_TURNS_JSON:-[]}" \
+  MJ_TODAY_TURNS="${TODAY_TURNS:-}" MJ_TODAY_TURNS_USD="${TODAY_TURNS_USD:-}" \
   MJ_SUMMARY="${summary_block:-}" MJ_TABLE="$SESS_TABLE" \
   MJ_ERRORS="$(sort -u "$errs_file" 2>/dev/null | head -5)" \
   MJ_THRESHOLDS="$CTX_YELLOW $CTX_RED $CTX_PURPLE $BURN_YELLOW $BURN_RED $TIER_YELLOW_MULT $TIER_RED_MULT" \
@@ -4694,6 +4701,7 @@ doc = {
         "cost": num("MJ_TODAY"), "tier": text("MJ_TODAY_TIER"),
         "pred": num("MJ_PRED"), "pred_tier": text("MJ_PRED_TIER"),
         "unpriced": text("MJ_TODAY_UNPRICED").strip(), "typical_so_far": num("MJ_TYPICAL_SO_FAR"),
+        "turns": int(num("MJ_TODAY_TURNS") or 0) or None, "turns_usd": num("MJ_TODAY_TURNS_USD"),
     },
     "block": {
         "active": text("MJ_BLOCK") == "1", "cost": num("MJ_BLK_COST"), "cph": num("MJ_BLK_CPH"),
