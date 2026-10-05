@@ -306,6 +306,18 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(drawn.indexOf('Keep-awake turned off')).toBeGreaterThan(drawn.indexOf('Proxy State'))
 })
 
+test('before Burst has the breakdown by part, the bar still has the red limit line on white', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(mod({ route: 'PRIMARY', session: { session: 'S', context: 147_000, state: 'ok', compact_at: 300_000 } })) } }))
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["▕"]')
+  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["◀"]')
+  // The used share is one block, where the parts would be.
+  expect(drawn.slice(drawn.indexOf('"ctx   "'), drawn.indexOf('147k/1M 15%'))).not.toContain('░')
+})
+
 test('over the limit the bar is red, a compaction under way is named, and a silent dashboard gives the panel gauge back', async ($, on) => {
   const clock = stubs(on, [doc({ burst: BURST })])
   let answer: object | null = mod({ route: 'SECONDARY', overflow: true, session: { session: 'S', context: 310_000, state: 'summarising', compact_at: 300_000 } })
