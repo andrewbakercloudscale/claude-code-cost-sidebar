@@ -722,7 +722,7 @@ function sentBar(Box, T, s, W, win, warnPct) {
   // gap is the tool working, so it is one short line in orange, a colour no
   // warning here uses. Said only once the two have parted.
   if (s.raw > s.context * 1.1) {
-    out.push(T('Claude Code Cache Size: ' + k(s.raw), { color: HELD_COLOUR }))
+    out.push(T('Actual Cache Size: ' + k(s.raw), { color: HELD_COLOUR }))
   }
   return out
 }
