@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { axis, insights, k, modelName, money } from '../hooks/register.js'
+import { axis, insights, k, layoutOf, modelName, money, relayout } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'usage-panel',
@@ -41,7 +41,7 @@ function doc(over: Record<string, unknown> = {}) {
     top: [{ sid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c', cost: 4.98, tokens: 11e6, last: '2026-10-05T07:45:28.479Z' }, { sid: 'ffffffff-0000-1111-2222-333333312345', cost: 1.2, tokens: 2e6, last: '2026-10-05T06:00:00Z' }],
     turns: { turns: turns(40), markers: [], avg_delta: 3000 },
     summary:
-      `  🔀 Proxy State: ${ESC}[32mPRIMARY (oauth)${ESC}[0m\n` +
+      `  🔀 Proxy State: ${ESC}[32mPRIMARY (oauth)${ESC}[0m ${ESC}[1;38;2;0;0;0;48;2;125;249;255m[View]${ESC}[0m\n` +
       `  📜 License: ${ESC}[36mMax (20x)${ESC}[0m`,
     table:
       `  ${ESC}[36mTurn ${ESC}[0m${ESC}[36mModel     ${ESC}[0m\n` +
@@ -126,6 +126,16 @@ test('the sidebar draws the session, today, 30 days, projects, top sessions and 
   const drawn = JSON.stringify(await ui.drawn())
   expect(drawn.indexOf('1039 Opus 5.5')).toBeGreaterThan(drawn.indexOf('This session'))
   expect(drawn.indexOf('1039 Opus 5.5')).toBeLessThan(drawn.indexOf('"Today"'))
+  // Most specific first: session, today, 30 days, projects, set-up.
+  const at = (x: string) => drawn.indexOf(x)
+  expect(at('Context grows')).toBeGreaterThan(at('This session'))
+  expect(at('Context grows')).toBeLessThan(at('"Today"'))
+  expect(at('Quiet:')).toBeGreaterThan(at('"Today"'))
+  expect(at('"Sessions today"')).toBeGreaterThan(at('Quiet:'))
+  expect(at('"Last 30 days"')).toBeGreaterThan(at('"Sessions today"'))
+  expect(at('"Projects"')).toBeGreaterThan(at('"Last 30 days"'))
+  expect(at('Busiest hour')).toBeGreaterThan(at('"Projects"'))
+  expect(at('Proxy State')).toBeGreaterThan(at('Busiest hour'))
   expect(await ui.find({ type: 'Text', text: /^178k$/ })).toBeDefined()
   // Graphs: the 30-day bars mark the outlier day red.
   expect(await ui.find({ type: 'Text', text: /█/, color: 'red' })).toBeDefined()
@@ -175,18 +185,81 @@ test('the feed is kept alive every 30 seconds and the file re-read every 5', asy
 
 test('insights say what matters and nothing when there is nothing', () => {
   const tips = insights(doc(), NOW).map((t) => t.text)
-  expect(tips.some((t) => t.startsWith('Context grows about 2k a turn'))).toBe(true)
-  expect(tips.some((t) => t.startsWith('This session has cost 32×'))).toBe(true)
-  expect(tips.some((t) => t.startsWith('A quiet day: 8%'))).toBe(true)
-  expect(tips.some((t) => t.startsWith('All sessions together are burning $7.28/hr (high)'))).toBe(true)
-  expect(tips.some((t) => t.startsWith('wordpress-cyber-devtools is 64%'))).toBe(true)
-  // Six at most: the busiest hour is the least urgent and is the one left out.
-  expect(tips.length).toBe(6)
-  expect(insights(doc({ projects: [] }), NOW).some((t) => t.text.startsWith('Your busiest hour is usually 10:00'))).toBe(true)
+  expect(tips.some((t) => t.startsWith('Context grows 2k/turn'))).toBe(true)
+  expect(tips.some((t) => t.startsWith('32× your average session'))).toBe(true)
+  expect(tips.some((t) => t.startsWith('Quiet: 8%'))).toBe(true)
+  expect(tips.some((t) => t.startsWith('Burning $7.28/hr (high)'))).toBe(true)
+  expect(tips.some((t) => t.startsWith('wordpress-cyber-devtools: 64%'))).toBe(true)
+  expect(tips.some((t) => t.startsWith('Busiest hour: 10:00'))).toBe(true)
+  // Each insight belongs to the block it is about.
+  const scopes = insights(doc(), NOW).map((t) => t.scope)
+  expect(scopes).toEqual(['session', 'session', 'session', 'today', 'today', 'general', 'general'])
+  // Three at most per block, most urgent first.
+  const crowded = doc({ session: { ...doc().session, ctx: 450_000, avg_session: 1 }, turns: { turns: turns(40, 100_000, 2_000).map((x, i) => (i === 39 ? [x[0], x[1], 30_000, 60, 2.5, x[5], false] : [x[0], x[1], x[2], 60, x[4], x[5], x[6]])), markers: [], avg_delta: 3000 } })
+  const s = insights(crowded, NOW).filter((t) => t.scope === 'session')
+  expect(s.length).toBe(3)
+  expect(s[0].text).toContain('past the 400k restart line')
   const big = doc({ session: { ...doc().session, ctx: 450_000 } })
   expect(insights(big, NOW)[0].text).toContain('past the 400k restart line')
   const quiet = doc({ session: { ...doc().session, cost: 4 }, block: { active: false }, today: {}, projects: [], hourly_avg: null, turns: null })
   expect(insights(quiet, NOW)).toEqual([])
+})
+
+test('with Claude Burst, a button opens its dashboard, or its console when the dashboard is down', async ($, on) => {
+  const runs: string[][] = []
+  const burst = { dashboard: 'http://127.0.0.1:7788/', console: 'http://127.0.0.1:7789/' }
+  stubs(on, [doc({ burst })], runs)
+  let up = true
+  on('http.fetch', () => (up ? { value: { status: 200, ok: true, headers: {}, text: '' } } : { deny: 'connection refused' }))
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'burst' })).toBeDefined()
+  // The panel's own [View] text is not drawn beside it: it would not click.
+  expect(await ui.find({ type: 'Text', text: /^\[View\]$/ })).toBeUndefined()
+  await ui.press({ key: 'burst' })
+  expect(runs[runs.length - 1]).toEqual(['open', 'http://127.0.0.1:7788/'])
+  up = false
+  await ui.press({ key: 'burst' })
+  expect(runs[runs.length - 1]).toEqual(['open', 'http://127.0.0.1:7789/'])
+})
+
+test('without Claude Burst there is no button', async ($, on) => {
+  stubs(on, [doc({ burst: null })])
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ key: 'burst' })).toBeUndefined()
+})
+
+test('sections can be hidden, shown and moved, and the layout is kept', async ($, on) => {
+  const saved: Record<string, unknown> = {}
+  stubs(on, [doc()], [], saved)
+  await start($)
+  // A layout change redraws the pane, so each look is a fresh mount.
+  const look = async () => { const ui = await $.ui.mount(PANE); const d = JSON.stringify(await ui.drawn()); await ui.unmount(); return d }
+  const order = async () => { const d = await look(); return ['"This session"', '"Today"', '"Last 30 days"'].map((x) => d.indexOf(x)) }
+  await $.command.run({ command: 'usage-panel', args: 'hide today' })
+  expect((await order())[1]).toBe(-1)
+  expect(await look()).toContain('Hidden: today')
+  expect((saved.layout as any).hidden).toEqual(['today'])
+  await $.command.run({ command: 'usage-panel', args: 'show today' })
+  await $.command.run({ command: 'usage-panel', args: 'top days' })
+  const [s, td, dy] = await order()
+  expect(dy).toBeLessThan(s)
+  expect(s).toBeLessThan(td)
+  await $.command.run({ command: 'usage-panel', args: 'reset' })
+  const [s2, td2, dy2] = await order()
+  expect(s2).toBeLessThan(td2)
+  expect(td2).toBeLessThan(dy2)
+})
+
+test('a stored layout is made whole: unknown names go, new sections come back', () => {
+  expect(layoutOf({ order: ['days', 'gone', 'session'], hidden: ['gone', 'turns'] })).toEqual({
+    // A returning section goes back beside its default neighbour.
+    order: ['days', 'projects', 'session', 'turns', 'today', 'sessions'],
+    hidden: ['turns'],
+  })
+  expect(relayout(null, 'hide', 'nope')).toContain('Sections: session')
+  expect((relayout(null, 'down', 'session') as any).order.slice(0, 2)).toEqual(['turns', 'session'])
 })
 
 test('formatting', () => {

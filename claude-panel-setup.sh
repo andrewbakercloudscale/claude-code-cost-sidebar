@@ -4471,6 +4471,7 @@ mod_json_write() { # $1 = session id
   MJ_ERRORS="$(sort -u "$errs_file" 2>/dev/null | head -5)" \
   MJ_THRESHOLDS="$CTX_YELLOW $CTX_RED $CTX_PURPLE $BURN_YELLOW $BURN_RED $TIER_YELLOW_MULT $TIER_RED_MULT" \
   MJ_HOURLY="${HOURLY_BUCKET_CACHE:-}" \
+  MJ_BURST_DASHBOARD="$(panel_gateway_url)" MJ_BURST_CONSOLE="$(burst_console_url)" \
   python3 - "$out" <<'PYEOF' 2>>"$errs_file"
 import json, os, sys, time
 from datetime import datetime, timedelta
@@ -4607,6 +4608,8 @@ doc = {
     "week": num("MJ_WEEK"), "month": num("MJ_MONTH"),
     "daily": daily, "hourly_avg": hourly, "projects": projects, "top": top[:5],
     "turns": jload(E.get("MJ_SERIES", "")),
+    "burst": ({"dashboard": text("MJ_BURST_DASHBOARD"), "console": text("MJ_BURST_CONSOLE")}
+              if text("MJ_BURST_DASHBOARD") else None),
     "summary": E.get("MJ_SUMMARY", ""), "table": E.get("MJ_TABLE", ""),
     "errors": [l for l in E.get("MJ_ERRORS", "").splitlines() if l.strip()],
     "thresholds": {
@@ -4620,6 +4623,15 @@ with open(tmp, "w") as f:
     json.dump(doc, f, separators=(",", ":"))
 os.replace(tmp, out)
 PYEOF
+}
+
+# Claude Burst's support console, for [View] when the dashboard does not
+# answer (see panel_view_target). Empty without Burst.
+burst_console_url() {
+  [ -n "$(panel_gateway_url)" ] || return 0
+  local c
+  c=$(jq -r '.console_listen // "127.0.0.1:7789"' "$HOME/.config/claude-burst/config.json" 2>/dev/null)
+  case "$c" in ''|off|null) ;; *) printf 'http://%s/' "$c" ;; esac
 }
 
 # Files of sessions whose mod has gone, after two days.

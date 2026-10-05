@@ -18,6 +18,8 @@ Full write-up and motivation: **[AI coding costs are guesswork without this: ins
 
 On a Claude Code that loads mods, setup installs the **usage-panel mod** (`mods/usage-panel`), and every new session opens the panel as a sidebar docked to the right of the transcript. Nothing is typed into your terminal and no Accessibility permission is needed: Claude Code draws it.
 
+Each section is its own card, and they run from the most specific to the most general: this session, today across your sessions, the last 30 days and your projects, then this Mac's set-up. Each section's insights sit under it.
+
 - **This session:** model, cost and $/hr (traffic-lit against your 7-day average session), turn count, a context gauge with your 30/50/70% thresholds and the 400k restart line marked on it, and three graphs: context per turn (a compaction shows as a cyan drop), cost per turn (spikes in amber and red) and the cache hit rate.
 - **Today:** spent so far and the end-of-day forecast, a chart of a typical day by hour (30-day average) with the current hour highlighted, and the 5h block's time left and burn rate across all sessions.
 - **Last 30 days:** total and daily average against the 30 days before, a daily bar chart with expensive days in amber and red, the peak day, week and month, and a bar of each model's share.
@@ -30,6 +32,10 @@ On a Claude Code that loads mods, setup installs the **usage-panel mod** (`mods/
 | `/usage-panel` | Open the sidebar (or focus it). Esc puts you back in the prompt. |
 | `/usage-panel unpin` | Stop it opening by itself in new sessions. |
 | `/usage-panel pin` | Open it in every new session again (the default). |
+| `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `turns`, `today`, `sessions`, `days`, `projects`. |
+| `/usage-panel up` / `down` / `top` / `bottom <section>` | Move a section. The layout is kept for every new session. |
+| `/usage-panel sections` / `reset` | Show the current order (hidden ones in brackets), or go back to the default. |
+| `v` (in the sidebar) | With Claude Burst installed: open its dashboard, or its support console when the dashboard is down. The same button is at the foot of the sidebar to click. |
 
 The numbers are the panel's own, not a second implementation: for each session the mod starts `ccusage-panel.sh` without a terminal (`PANEL_HEADLESS=1`, via `~/.local/bin/ccusage-panel-mod-start`), and it runs its usual two refresh tiers and writes what it would have drawn, as numbers, to `~/.cache/ccusage-panel-cache/mod/<session id>.json`. The mod reads that file every 5 seconds. When the session ends the mod stops saying it is there, and the headless panel exits by itself 90 seconds later. The floating alerts over Ghostty still come from it.
 
