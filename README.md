@@ -1,4 +1,6 @@
-# Claude Code Cost & Usage Panel
+# Claude Code Cost Sidebar
+
+**A live cost and usage panel for Claude Code.**
 
 Live, always-visible cost and token tracking for **[Claude Code](https://claude.com/claude-code)**, as a **mod**: a sidebar Claude Code itself draws beside the transcript, so you can watch what a coding agent is actually costing you, turn by turn, instead of finding out at the end of the month.
 
