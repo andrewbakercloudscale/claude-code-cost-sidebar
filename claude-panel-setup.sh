@@ -3984,6 +3984,9 @@ compaction_overlay_tick() { # $1 = session id
 # over its own, so the first panel to claim one used to show it later over
 # whichever window it lived in, often a session nobody was looking at.
 # CLAUDE_PANEL_ALERTS=false turns all of it off.
+# Where Claude Burst's mod is toasting in the session (see
+# compaction_toasted) the panel leaves the alerts to it: the gateway tells
+# the mod, and the mod shows a toast inside Claude Code.
 ALERT_FILE="$HOME/.config/claude-burst/notices.json"
 ALERT_MTIME=""
 ALERT_LAST_ID=""
@@ -4150,6 +4153,14 @@ gateway_alerts_tick() { # $1 = this panel's session id
   [ -x "$HOME/.local/bin/claude-panel-overlay" ] || return 0
   local now sev kind title detail resolves id session item secs
   now=$(panel_now)
+  # Claude Burst's mod is toasting in this session: the gateway's alerts
+  # reach it there, as Claude Code's own toasts, so nothing is floated over
+  # the window as well. A notice already up runs its course first. What the
+  # mod showed is not replayed if it goes away: only later events are read.
+  if compaction_toasted "$own" && ! alert_alive && (( ${#ALERT_QUEUE[@]} == 0 )) && [ -z "$ALERT_STICKY" ]; then
+    ALERT_SINCE=$now; ALERT_LAST_ID=""; ALERT_HELD=()
+    return 0
+  fi
   [ -n "$ALERT_SINCE" ] || ALERT_SINCE=$(( now - 120 ))
   while IFS=$'\x1f' read -r sev kind title detail resolves id session; do
     [ -n "$id" ] || continue
