@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { axis, insights, k, layoutOf, limitsOf, modelName, money, planOf, relayout, share } from '../hooks/register.js'
+import { axis, insights, k, layoutOf, limitsOf, modelName, money, pie, planOf, relayout, share } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'usage-panel',
@@ -550,6 +550,23 @@ test('a long folder beside the session id loses its start, not its end', async (
   expect(note.text.endsWith('-with-a-long-name')).toBe(true)
   // The heading and the note together fit the card.
   expect('Session:'.length + note.text.length).toBeLessThanOrEqual(50)
+})
+
+test('the models pie gives each slice its share of the disc, clockwise from the top', () => {
+  const T = (children: any, props: any = {}) => ({ props, children: Array.isArray(children) ? children : [children] })
+  const rows = pie(T, [['magenta', 50], ['blue', 25], ['yellow', 25]], 7) as any[]
+  expect(rows.length).toBe(7)
+  const cells: Record<string, number> = {}
+  for (const row of rows) for (const seg of row.children) if (seg.props.color) cells[seg.props.color] = (cells[seg.props.color] || 0) + seg.children[0].length
+  const all = cells.magenta + cells.blue + cells.yellow
+  expect(Math.abs(cells.magenta / all - 0.5)).toBeLessThan(0.08)
+  expect(Math.abs(cells.blue / all - 0.25)).toBeLessThan(0.08)
+  // The first slice starts at twelve o'clock and runs down the right side.
+  const mid = rows[3].children
+  expect(mid[mid.length - 1].props.color).toBe('magenta')
+  // Every row is as wide as the pie: twice its height in cells.
+  for (const row of rows) expect(row.children.reduce((a: number, g: any) => a + g.children[0].length, 0)).toBe(14)
+  expect(pie(T, [], 7)).toEqual([])
 })
 
 test('formatting', () => {
