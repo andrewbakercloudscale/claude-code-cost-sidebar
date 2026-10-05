@@ -538,6 +538,40 @@ test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, a
   expect(await hidden.find({ type: 'Text', text: 'Pauseless Compaction' })).toBeUndefined()
 })
 
+test('Overflow to Secondary shows what the secondary saved against the price of the model asked for, per day', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const overflow_stats = {
+    requests: 12, priced: 11, list_usd: 48.2, paid_usd: 6.15, saved_usd: 42.05,
+    daily: [{ date: '2026-10-03', requests: 7, saved_usd: 30 }, { date: '2026-10-04', requests: 0, saved_usd: 0 }, { date: '2026-10-05', requests: 5, saved_usd: 12.05 }],
+  }
+  dashboard(on, { state: { context: { window_days: 7, compaction_stats: { compactions: 0, sessions: [], daily: [] }, overflow_stats } } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  const card = drawn.slice(drawn.indexOf('"Overflow to Secondary"'), drawn.indexOf('"Today"'))
+  expect(card).toContain('{"bold":true,"color":"green"},"children":["$42.0"]')
+  expect(card).toContain('"  12 requests"')
+  expect(card).toContain('"   $48.20"')
+  expect(card).toContain('"   -$6.15"')
+  expect(card).toContain('"   $42.05"')
+  expect(card).toContain('"1 request has no price and is left out"')
+  expect(card).toContain('"3 Oct')
+  // No compaction this week: its card is not drawn, this one still is.
+  expect(await ui.find({ type: 'Text', text: 'Pauseless Compaction' })).toBeUndefined()
+  await ui.unmount()
+  await $.command.run({ command: 'usage-panel', args: 'hide savings' })
+  const hidden = await $.ui.mount(PANE)
+  expect(await hidden.find({ type: 'Text', text: 'Overflow to Secondary' })).toBeUndefined()
+})
+
+test('no Overflow card when nothing went to the secondary', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  dashboard(on, { state: { context: { window_days: 7, overflow_stats: { requests: 0, priced: 0, list_usd: 0, paid_usd: 0, saved_usd: 0, daily: [{ date: '2026-10-05', requests: 0, saved_usd: 0 }] } } } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: 'Overflow to Secondary' })).toBeUndefined()
+})
+
 test('Pauseless Compaction draws a losing day as a red bar', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   const daily = [{ date: '2026-10-04', net_usd: -1.2, compactions: 5 }, { date: '2026-10-05', net_usd: -0.43, compactions: 4 }]
