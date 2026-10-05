@@ -213,7 +213,7 @@ test('insights say what matters and nothing when there is nothing', () => {
   // With Claude Burst the context is Burst's to manage: when it will compact.
   const withBurst = insights(big, NOW, null, null, { down: false, mod: mod() }).filter((t) => t.scope === 'session').map((t) => t.text)
   expect(withBurst.some((t) => t.includes('Getting expensive'))).toBe(false)
-  expect(withBurst).toContain('Grows 2k/turn: Burst compacts in ~115 turns.')
+  expect(withBurst).toContain('Grows 2k/turn: Auto Compact in ~115 turns.')
   const quiet = doc({ session: { ...doc().session, cost: 4 }, block: { active: false }, today: {}, projects: [], hourly_avg: null, turns: null })
   expect(insights(quiet, NOW)).toEqual([])
 })
