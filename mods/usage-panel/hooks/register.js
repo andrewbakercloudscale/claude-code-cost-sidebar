@@ -41,8 +41,9 @@ const LAYOUT_KEY = 'layout'
 // The sidebar's sections, most specific first. This Mac (proxy state,
 // licence, Burst's standing problems, its dashboard button) is third, under
 // the turn table: a problem there must not sit below a screen of charts.
-// Plan Utilisation is next: how close the plan's limits are.
-export const SECTIONS = ['session', 'turns', 'mac', 'plan', 'today', 'sessions', 'days', 'projects']
+// Plan Utilisation is next: how close the plan's limits are. Then, with
+// Claude Burst, what its pauseless compaction has saved.
+export const SECTIONS = ['session', 'turns', 'mac', 'plan', 'savings', 'today', 'sessions', 'days', 'projects']
 
 let sid = ''
 let home = ''
@@ -55,7 +56,7 @@ let layout = null // { order, hidden } as the person left it
 let burst = null // { down, mod }: Burst's /api/mod answer; null without Burst
 let burstRaw = ''
 let limits = null // [{ key, util, reset }]: the plan's limits, as Anthropic last reported them
-let extra = null // { saved, secondary, warn }: Burst's slower figures, and the percent of its limit it warns at
+let extra = null // { saved, secondary, warn, comp }: Burst's slower figures, and the percent of its limit it warns at
 const warned = {} // limit window and reset time -> the level already toasted
 
 // A stored layout made whole: unknown names dropped, sections added since
@@ -320,11 +321,20 @@ async function readExtras($) {
   const before = JSON.stringify(extra)
   const now = Math.floor((await $.clock.now()) / 1000)
   const state = await get('/api/state')
-  const next = { saved: null, secondary: null, warn: 0 }
+  const next = { saved: null, secondary: null, warn: 0, comp: null }
   const cfg = state && state.context && state.context.compaction
   if (cfg && cfg.warn_at_percent > 0) next.warn = cfg.warn_at_percent
   const stats = state && state.context && state.context.compaction_stats
   const mine = ((stats && stats.sessions) || []).filter((x) => x && x.session === sid)
+  // Every session Burst has compacted, over its window (7 days).
+  if (stats && stats.compactions > 0) {
+    next.comp = {
+      days: (state.context.window_days > 0 && state.context.window_days) || 7,
+      n: stats.compactions, saved: stats.saved_usd || 0, summary: stats.summary_usd || 0, rewrite: stats.rewrite_usd || 0,
+      net: stats.net_usd || 0, tokens: stats.tokens_not_resent || 0, before: stats.largest_before || 0, after: stats.largest_after || 0,
+      daily: (Array.isArray(stats.daily) ? stats.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => ({ d: x.date, net: x.net_usd || 0, n: x.compactions || 0 })),
+    }
+  }
   if (mine.length > 0) next.saved = { net: mine.reduce((a, x) => a + (x.net_usd || 0), 0), n: mine.reduce((a, x) => a + (x.compactions || 0), 0) }
   if (state && state.today && state.today.SecondaryRequests > 0) {
     const day = new Date(now * 1000)
@@ -334,7 +344,7 @@ async function readExtras($) {
     const others = ((usage && usage.by_provider) || []).filter((x) => x && x.key !== 'anthropic' && x.requests > 0)
     if (others.length > 0) next.secondary = { requests: others.reduce((a, x) => a + x.requests, 0), usd: others.reduce((a, x) => a + (x.usd || 0), 0), names: others.map((x) => x.key) }
   }
-  extra = next.saved || next.secondary || next.warn ? next : null
+  extra = next.saved || next.secondary || next.warn || next.comp ? next : null
   return JSON.stringify(extra) !== before
 }
 
@@ -443,6 +453,7 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
       const body = planSection(Box, T, d, IW, now, limits)
       return body.length > 0 ? [...body, ...notes('plan')] : []
     },
+    savings: () => savingsSection(Box, T, IW, extra),
     today: () => [...todaySection(Box, T, d, IW, now), ...notes('today')],
     sessions: () => topSection(Box, T, d, IW),
     days: () => daysSection(Box, T, d, IW),
@@ -622,17 +633,19 @@ function sentBar(Box, T, s, W, win, warnPct) {
     if (whole) {
       const at = (tokens) => Math.max(1, Math.min(barW - 1, Math.round((tokens * barW) / scale)))
       const stop = at(limit)
-      // A whole cell in red, the one colour no part has: a line glyph lets
-      // the terminal's background through on both sides of it.
-      if (stop < cells.length) cells[stop] = ['█', 'red']
+      // A thin red line with an arrow pointing at it, each drawn on the
+      // colour of the cell it stands in: on the terminal's own background
+      // the line had a dark gap on both sides and cut the bar in two.
+      if (stop < cells.length) cells[stop] = ['▏', 'red', cells[stop][1]]
+      if (stop + 1 < cells.length) cells[stop + 1] = ['◀', 'red', cells[stop + 1][1]]
     }
     const segs = []
-    for (const [ch, c] of cells) {
+    for (const [ch, c, bg] of cells) {
       const last = segs[segs.length - 1]
-      if (last && last.ch === ch && last.c === c) last.text += ch
-      else segs.push({ ch, c, text: ch })
+      if (last && last.ch === ch && last.c === c && last.bg === bg) last.text += ch
+      else segs.push({ ch, c, bg, text: ch })
     }
-    bar = T(segs.map((g) => T(g.text, { color: g.c })))
+    bar = T(segs.map((g) => T(g.text, g.bg ? { color: g.c, backgroundColor: g.bg } : { color: g.c })))
   }
   const out = [Box({ flexDirection: 'row', columnGap: 1, children: [T('ctx   ', { dimColor: true }), bar, T(label, { color: colour })] })]
   if (parts.length > 0) {
@@ -648,7 +661,7 @@ function sentBar(Box, T, s, W, win, warnPct) {
   if (whole) {
     out.push(Box({
       flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [
-        T([T('■ ', { color: 'red' }), T('Burst compacts at ' + k(limit), { dimColor: true })]),
+        T([T('▏◀ ', { color: 'red' }), T('Burst compacts at ' + k(limit), { dimColor: true })]),
       ],
     }))
   }
@@ -732,6 +745,53 @@ function planSection(Box, T, d, W, now, limits) {
     ], { wrap: 'wrap' }))
   }
   return out
+}
+
+// ---- pauseless compaction: what Claude Burst's compaction has saved
+
+// Each turn after a compaction sends the summary in place of the history;
+// the saving is what those turns would have cost with the history still in,
+// less what the summaries cost to write and the one cache rewrite each
+// compaction causes. Burst works it out; this draws it.
+function savingsSection(Box, T, W, extra) {
+  const c = extra && extra.comp
+  if (!c || !(c.n > 0)) return []
+  const out = [heading(T, 'Pauseless Compaction', 'last ' + c.days + ' days')]
+  out.push(T([
+    T(money(Math.abs(c.net)), { bold: true, color: c.net >= 0 ? 'green' : 'red' }),
+    T(c.net >= 0 ? ' saved' : ' lost', { color: c.net >= 0 ? 'green' : 'red' }),
+    T('  ' + c.n + (c.n === 1 ? ' compaction' : ' compactions'), { dimColor: true }),
+    c.n > 0 && c.net > 0 ? T('  ' + money(c.net / c.n, 2) + ' each', { dimColor: true }) : '',
+  ], { wrap: 'truncate-end' }))
+  if (c.daily.length >= 2) {
+    const cw = Math.max(c.daily.length, W)
+    const idx = stretch(c.daily.length, cw)
+    const last = c.daily.length - 1
+    out.push(...bars(T, Box, idx.map((i) => Math.max(0, c.daily[i].net)), 3, (v, i) => (idx[i] === last ? 'cyan' : 'green')))
+    out.push(T(axis([short(c.daily[0].d), 'today'], cw), { dimColor: true }))
+  }
+  const row = (label, value, colour) => Box({
+    flexDirection: 'row', columnGap: 1, children: [T(pad(label, 22), { dimColor: true }), T(lpad(value, 9), { color: colour })],
+  })
+  out.push(row('Not re-sent', money(c.saved, 2), 'green'))
+  out.push(row('Summaries', '-' + money(c.summary, 2)))
+  out.push(row('Cache rewrites', '-' + money(c.rewrite, 2)))
+  out.push(row('Net', money(c.net, 2), c.net >= 0 ? 'green' : 'red'))
+  if (c.tokens > 0) out.push(T(big(c.tokens) + ' tokens not re-sent' + (c.before > c.after && c.after > 0 ? ', largest ' + k(c.before) + ' → ' + k(c.after) : ''), { dimColor: true, wrap: 'truncate-end' }))
+  const mine = extra.saved
+  if (mine && mine.n > 0) {
+    out.push(T([
+      T('This session: ', { dimColor: true }),
+      T(money(Math.abs(mine.net), 2) + (mine.net >= 0 ? ' saved' : ' lost so far'), { color: mine.net >= 0 ? 'green' : 'yellow' }),
+      T(', ' + mine.n + (mine.n === 1 ? ' compaction' : ' compactions'), { dimColor: true }),
+    ], { wrap: 'truncate-end' }))
+  }
+  return out
+}
+
+// 1.49B, 432M, 86k.
+function big(n) {
+  return n >= 1e9 ? (n / 1e9).toFixed(2).replace(/\.?0+$/, '') + 'B' : k(n)
 }
 
 // ---- today
@@ -962,14 +1022,7 @@ export function insights(d, now, limits = null, extra = null, burst = null) {
     out.push({ scope: 'session', tier: s.tier || 'yellow', icon: '$', text: ratio(s.cost / s.avg_session) + ' your average session (' + money(s.avg_session, 2) + ', 7 days).' })
   }
 
-  // With Claude Burst: what its compaction has saved this session after the
-  // summaries and cache rewrites, and the part that fills most of the context.
-  const saved = extra && extra.saved
-  if (saved && saved.n > 0 && Math.abs(saved.net) >= 0.01) {
-    const times = saved.n + (saved.n === 1 ? ' compaction' : ' compactions')
-    if (saved.net > 0) out.push({ scope: 'burst', tier: 'green', icon: '⟳', text: 'Compaction has saved ' + money(saved.net, 2) + ' net this session (' + times + ').' })
-    else out.push({ scope: 'burst', tier: 'yellow', icon: '⟳', text: 'Compaction has cost ' + money(-saved.net, 2) + ' more than it has saved so far (' + times + ').' })
-  }
+  // With Claude Burst: the part that fills most of the context.
   if (sent && sent.context >= 100000 && Array.isArray(sent.parts)) {
     const top = sent.parts.reduce((a, p) => (!a || p.tokens > a.tokens ? p : a), null)
     if (top && top.tokens / sent.context >= 0.5) out.push({ scope: 'burst', tier: 'cyan', icon: '▤', text: top.name + ' are ' + Math.round((top.tokens * 100) / sent.context) + '% of the context sent.' })

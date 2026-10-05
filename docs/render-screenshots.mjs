@@ -153,7 +153,13 @@ function burst(context, state, raw, problems = []) {
 // The plan's limits as Anthropic's replies report them (Burst keeps the
 // latest), and what Burst's compaction has saved this session.
 const LIMITS = [{ key: '5h', util: 0.82, reset: NOW + 118 * 60 }, { key: '7d', util: 0.58, reset: NOW + 2 * 86400 + 11 * 3600 + 41 * 60 }]
-const SAVED = { saved: { net: 2.84, n: 1 }, secondary: null }
+const SAVED = {
+  saved: { net: 2.84, n: 1 }, secondary: null, warn: 80,
+  comp: {
+    days: 7, n: 9, saved: 31.62, summary: 3.47, rewrite: 2.9, net: 25.25, tokens: 158400000, before: 300400, after: 61200,
+    daily: [['2026-09-29', 2.1], ['2026-09-30', 4.6], ['2026-10-01', 3.2], ['2026-10-02', 0.4], ['2026-10-03', 6.9], ['2026-10-04', 5.21], ['2026-10-05', 2.84]].map(([d, net]) => ({ d, net, n: 1 })),
+  },
+}
 
 const scenes = {}
 {
@@ -277,7 +283,7 @@ const card = (file, pane, box) => clip(file, pane, box.y - PAD, box.y + box.heig
   // The sidebar scrolls: what a new session shows, then what is under it.
   await clip('sidebar-top.png', pane, pane.y, cards.today.y - PAD / 2)
   await clip('sidebar-scrolled.png', pane, cards.today.y - PAD, pane.y + pane.height)
-  for (const id of ['session', 'turns', 'plan', 'today', 'sessions', 'days', 'projects']) await card(`card-${id}.png`, pane, cards[id])
+  for (const id of ['session', 'turns', 'plan', 'savings', 'today', 'sessions', 'days', 'projects']) await card(`card-${id}.png`, pane, cards[id])
 }
 {
   const { pane, cards } = await show('problem')

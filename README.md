@@ -31,14 +31,14 @@ Full write-up and motivation: **[AI coding costs are guesswork without this: ins
 
 A mod is a Claude Code plugin that draws inside the session. On a Claude Code that loads mods, setup installs the **usage-panel mod** (`mods/usage-panel`), and every new session opens the panel as a sidebar docked to the right of the transcript. Nothing is typed into your terminal, no Accessibility permission is needed and it works in any terminal: Claude Code draws it. Before the mod, the panel was a Ghostty split that a launcher opened by typing keystrokes; that split is still here for older versions (see [The panel](#the-panel)).
 
-Each section is its own card, most specific first: this session, its turns, this Mac, Plan Utilisation, today across your sessions, sessions today, the last 30 days, your projects. The sidebar scrolls, so the lower cards are a scroll away, and each can be hidden or moved. [Reading the sidebar](#reading-the-sidebar) goes through every card.
+Each section is its own card, most specific first: this session, its turns, this Mac, Plan Utilisation, Pauseless Compaction (with Claude Burst), today across your sessions, sessions today, the last 30 days, your projects. The sidebar scrolls, so the lower cards are a scroll away, and each can be hidden or moved. [Reading the sidebar](#reading-the-sidebar) goes through every card.
 
 | Command | |
 |---|---|
 | `/usage-panel` | Open the sidebar (or focus it). Esc puts you back in the prompt. |
 | `/usage-panel unpin` | Stop it opening by itself in new sessions. |
 | `/usage-panel pin` | Open it in every new session again (the default). |
-| `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `turns`, `mac`, `plan`, `today`, `sessions`, `days`, `projects`. |
+| `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `turns`, `mac`, `plan`, `savings`, `today`, `sessions`, `days`, `projects`. |
 | `/usage-panel up` / `down` / `top` / `bottom <section>` | Move a section. The layout is kept for every new session. |
 | `/usage-panel sections` / `reset` | Show the current order (hidden ones in brackets), or go back to the default. |
 | `v` (in the sidebar) | With Claude Burst installed: open its dashboard, or its support console when the dashboard is down. The same button is in the This Mac card to click. |
@@ -65,14 +65,14 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 | `$3.10/hr` | This session's burn rate. |
 | `149 turns` | Replies from the model so far. |
 | `2.4× avg` | This session against your 7-day average session, shown once it has reached half of it. |
-| `ctx` bar and `86k/1M 9%` | How full the context is, against the model's whole window. With Claude Burst this is the context Burst really sends, and a red line on the bar shows where Burst compacts (`Burst compacts at 300k` underneath), read from Burst's settings; that limit is your setting, not the room there is. The label turns yellow as it nears the line (at Burst's warning level) and red past it. Without Burst, see [below](#the-context-bar-without-claude-burst). |
+| `ctx` bar and `86k/1M 9%` | How full the context is, against the model's whole window. With Claude Burst this is the context Burst really sends, and a thin red line with an arrow (`▏◀`) on the bar shows where Burst compacts (`Burst compacts at 300k` underneath), read from Burst's settings; that limit is your setting, not the room there is. The label turns yellow as it nears the line (at Burst's warning level) and red past it. Without Burst, see [below](#the-context-bar-without-claude-burst). |
 | The coloured parts and their key | With Burst, what the context is made of, largest first: messages, tool results, system tools, MCP tools, memory files (CLAUDE.md and the like), the system prompt. White is `Free`: the room left in the window. What is used takes its true share of the bar, so a part smaller than one cell is in the key but not on the bar. |
 | `Claude Code Cache Size: 320k` | Claude Code's own history, which Burst's compaction never shrinks. The gap to the `ctx` figure is what Burst saves on every turn. For information, in orange: never a warning. Shown only once it is more than a tenth above what Burst sends. |
 | `growth` | Context size, one bar per turn, oldest on the left. Blue, then yellow past 40% of the model's window and red past 70%. A cyan bar is a turn where the context fell to under 60% of the turn before: a compaction. |
 | `$/turn` | Cost, one bar per turn. Yellow is over 2× the median turn, red over 4×. The yellow bar here is the turn after the compaction, which wrote the smaller context to the cache once. |
 | `cache` and `94% hit` | The share of input read from the prompt cache, averaged over the last 20 turns. Green from 90%, yellow from 75%, red below. A cache read costs a tenth of fresh input, so this is the figure that keeps long sessions cheap. |
 | Lines starting `↗ ◇ ▲ ◴ $ !` | Insights, at most three, only when there is something to say: how many turns until Burst compacts (or, without Burst, until the context turns amber) at the current growth, the median turn, a turn that cost over 4× the median, a session over 3× your average, a cache hit rate under 85%. `◴` is a turn made dear by a pause: it came more than five minutes after the one before, read under half its input from the cache (the cache had expired) and cost at least twice the median. It reads `Turn 212 came after a 26m pause and read 4% from cache: $0.90 against a $0.05 median.` |
-| Lines starting `⟳ ▤` | With Claude Burst, two more. `⟳` is what its compaction has saved this session, net of the summaries and the one cache rewrite each costs (or what it has cost so far, when it has not paid for itself yet). `▤` names the part that is half or more of a context of 100k and up, e.g. `Tool results are 65% of the context sent.` |
+| A line starting `▤` | With Claude Burst, one more: it names the part that is half or more of a context of 100k and up, e.g. `Tool results are 65% of the context sent.` |
 
 #### The context bar without Claude Burst
 
@@ -145,6 +145,25 @@ How close you are to your plan's limits. Anthropic states the figures itself, in
 - There are two limits, 5 hours and 7 days. Anthropic reports no monthly one, so there is no monthly row or warning.
 - A reading is from the last reply on this Mac, in any session, so it is as fresh as your last turn anywhere. The last one is kept, so a session that has not had a reply yet still shows it. A window that has reset is dropped until a reply reports the new one.
 - On an API key there is no plan and no card.
+
+### Pauseless Compaction
+
+<img src="docs/card-savings.png" alt="The Pauseless Compaction card: $25.3 saved over the last 7 days from 9 compactions, a bar per day, what was not re-sent less the summaries and cache rewrites, tokens not re-sent, and this session's share" width="460">
+
+What Claude Burst's [pauseless compaction](#pauseless-compaction-with-claude-burst) has saved, across every session on this Mac. Shown only with Burst, once it has compacted something. The figures are Burst's own, read from its dashboard once a minute.
+
+| On screen | What it is |
+|---|---|
+| `last 7 days` | The window Burst keeps these figures over. |
+| `$25.3 saved` | The net saving: green when compaction has paid for itself, red (`lost`) when it has not yet. |
+| `9 compactions  $2.81 each` | How many times Burst compacted, and the net saving per compaction. |
+| The bars | Net saving per day, oldest on the left, today in cyan. |
+| `Not re-sent` | What the turns after each compaction would have cost with the full history still in the context. |
+| `Summaries` | What the background calls that wrote the summaries cost. |
+| `Cache rewrites` | Each compaction changes the context, so the next turn writes it to the cache once at the higher rate. |
+| `Net` | Not re-sent, less the other two. |
+| `158M tokens not re-sent, largest 300k → 61k` | The same saving in tokens, and the biggest single compaction: the context before and after. |
+| `This session: $2.84 saved, 1 compaction` | This session's own share. `lost so far` in yellow means its compaction has not paid for itself yet; it does over the next few turns. |
 
 ### Today
 
