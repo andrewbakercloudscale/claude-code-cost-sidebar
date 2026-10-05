@@ -2,7 +2,7 @@
 
 Live, always-visible cost and token tracking for **[Claude Code](https://claude.com/claude-code)**, in a sidebar docked inside the Claude Code session itself, so you can watch what a coding agent is actually costing you, turn by turn, instead of finding out at the end of the month.
 
-<p align="center"><img src="docs/usage-sidebar.png" alt="The usage sidebar: this session's cost, context and per-turn graphs, today against a typical day, the last 30 days by day and by model, projects, top sessions, insights and the turn table" width="460"></p>
+<p align="center"><img src="docs/usage-sidebar.png" alt="The usage sidebar: this session's cost, its context as one bar by part against Claude Burst's compaction limit, per-turn graphs and the turn table, today against a typical day, sessions today, the last 30 days by day and by model, projects, insights and this Mac's set-up" width="460"></p>
 
 <sub>Figures in the screenshot are made up.</sub>
 
