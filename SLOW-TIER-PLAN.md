@@ -1,5 +1,7 @@
 # ccusage-panel.sh: slow-tier efficiency plan
 
+> **Note, 2026-10-05.** Since this was written the panel has become a Claude Code mod (a sidebar Claude Code draws, 2.1.287 and later) and the repo has been renamed `claude-code-cost-sidebar`. The refresh tiers and caches described here still produce every figure: for the sidebar the same script runs without a terminal and the mod draws what it writes. The rest is left as written: it is a record.
+
 Written 2026-09-05. Supersedes the Tier 1/2/3 proposal in
 `OPTIMIZATION-PLAN.md`, which correctly identified the cost but attributed it
 to the wrong tier. Everything below was measured on this machine against the

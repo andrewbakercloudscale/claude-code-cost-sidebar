@@ -1,5 +1,7 @@
 # claude-panel-launch.sh: which window gets the panel
 
+> **Note, 2026-10-05.** Since this was written the panel has become a Claude Code mod (a sidebar Claude Code draws, 2.1.287 and later) and the repo has been renamed `claude-code-cost-sidebar`. The launcher described here now runs only for the Ghostty split, which stands aside while the mod is installed, so none of this applies to the sidebar. The rest is left as written: it is a record.
+
 Written 2026-09-05, after a launcher change of mine put six cost panels into
 a window the user was working in. This is the record of what the launcher
 actually does, what broke, what is deployed now, and the answer to the question
