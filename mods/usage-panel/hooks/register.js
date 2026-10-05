@@ -629,10 +629,10 @@ function learnedLimit(s) {
   return !!(s && s.learned)
 }
 
-// "Auto Compact at 155k" for a learned limit, "Burst compacts at 300k" for
-// the fixed one.
+// "Auto Compact at 300k", the fixed limit and a learned one alike: a
+// learned one is told apart by its colour and the line under it.
 function limitLabel(s) {
-  return (learnedLimit(s) ? 'Auto Compact at ' : 'Burst compacts at ') + k(compactAt(s))
+  return 'Auto Compact at ' + k(compactAt(s))
 }
 
 // What stands beside the limit: where it comes from when it is learned, and
