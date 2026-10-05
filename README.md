@@ -163,7 +163,7 @@ What Claude Burst's [pauseless compaction](#pauseless-compaction-with-claude-bur
 | `Cache rewrites` | Each compaction changes the context, so the next turn writes it to the cache once at the higher rate. |
 | `Net` | Not re-sent, less the other two. |
 | `158M tokens not re-sent, largest 300k → 61k` | The same saving in tokens, and the biggest single compaction: the context before and after. |
-| `This session: $2.84 saved, 1 compaction` | This session's own share. `lost so far` in yellow means its compaction has not paid for itself yet; it does over the next few turns. |
+| `1 compaction has saved $2.84 this session` | This session's own share. `has lost $0.40 so far` in yellow means its compaction has not paid for itself yet; it does over the next few turns. |
 
 ### Today
 
@@ -227,7 +227,7 @@ Burst does the compacting; this panel is where you see it. One compaction, in th
 <tr>
 <td valign="top"><img src="docs/compaction-1-started.png" alt="Compaction started: the ctx bar at 293k in yellow, just short of the red compaction line, a summarising line, and an Async Compaction Started row at the top of the turn table" width="280"></td>
 <td valign="top"><img src="docs/compaction-2-pending.png" alt="Compaction pending: a line saying a summary is ready and the next prompt compacts, and an Async Compaction Pending row at the top of the turn table" width="280"></td>
-<td valign="top"><img src="docs/compaction-3-finished.png" alt="Compaction finished: the ctx bar back at 64k, a compacted line, a cyan drop at the end of the growth graph, and a turn row reading 64k (-232k) above an Async Compaction Finished row" width="280"></td>
+<td valign="top"><img src="docs/compaction-3-finished.png" alt="Compaction finished: the ctx bar back at 64k, a cyan drop at the end of the growth graph, and a turn row reading 64k (-232k) above an Async Compaction Finished row" width="280"></td>
 </tr>
 <tr>
 <td valign="top"><sub><b>1. Started.</b> The context reaches Burst's limit (300k here, the red line on the bar). The ctx label is yellow, the session says <code>summarising</code>, and a yellow <code>Async Compaction Started</code> row sits above the turn it began beside. You keep working.</sub></td>
