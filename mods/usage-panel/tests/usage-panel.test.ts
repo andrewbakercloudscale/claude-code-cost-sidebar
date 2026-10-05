@@ -122,6 +122,10 @@ test('the sidebar draws the session, today, 30 days, projects, top sessions and 
   // The panel's own rows keep the panel's colours.
   expect((await ui.find({ type: 'Text', text: /^PRIMARY \(oauth\)$/ })).props.color).toBe('ansi256(2)')
   expect(await ui.find({ type: 'Text', text: /^  1039 Opus 5\.5/ })).toBeDefined()
+  // Directly under the session's graphs, above Today, so it is on screen.
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn.indexOf('1039 Opus 5.5')).toBeGreaterThan(drawn.indexOf('This session'))
+  expect(drawn.indexOf('1039 Opus 5.5')).toBeLessThan(drawn.indexOf('"Today"'))
   expect(await ui.find({ type: 'Text', text: /^178k$/ })).toBeDefined()
   // Graphs: the 30-day bars mark the outlier day red.
   expect(await ui.find({ type: 'Text', text: /█/, color: 'red' })).toBeDefined()
