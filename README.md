@@ -25,14 +25,14 @@ Each section is its own card, and they run from the most specific to the most ge
 - **Last 30 days:** total and daily average against the 30 days before, a daily bar chart with expensive days in amber and red, the peak day, week and month, and a bar of each model's share.
 - **By project** and **top sessions today**, as bar charts, with this session's project and row highlighted.
 - **Insights:** a few plain sentences, only when there is something to say: when the context reaches the restart line at its current growth, a low cache hit rate, a turn that cost several times the median, a session far above your average, a busy or quiet day for this hour, a high burn rate, the project taking most of the month, your usual busiest hour.
-- **This Mac**, second from the top: the Proxy State and License rows exactly as the panel draws them, so a problem there is not below a screen of charts. Then **the turn table**.
+- **The turn table**, straight under the session graphs, then **This Mac**: the Proxy State and License rows exactly as the panel draws them, above the charts so a problem there is seen.
 
 | Command | |
 |---|---|
 | `/usage-panel` | Open the sidebar (or focus it). Esc puts you back in the prompt. |
 | `/usage-panel unpin` | Stop it opening by itself in new sessions. |
 | `/usage-panel pin` | Open it in every new session again (the default). |
-| `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `mac`, `turns`, `today`, `sessions`, `days`, `projects`. |
+| `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `turns`, `mac`, `today`, `sessions`, `days`, `projects`. |
 | `/usage-panel up` / `down` / `top` / `bottom <section>` | Move a section. The layout is kept for every new session. |
 | `/usage-panel sections` / `reset` | Show the current order (hidden ones in brackets), or go back to the default. |
 | The ctx bar with Claude Burst | The session's one context bar becomes Burst's: the context it really sends (after its own compaction) as a stacked bar by part (system prompt, tools, memory files, messages, tool results) against the limit it compacts at, read from Burst's dashboard every 5 seconds. Burst's standing problems are listed in This Mac, under Proxy State. Without Burst the bar is the panel's own, against the model's window. |

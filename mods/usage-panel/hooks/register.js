@@ -24,9 +24,9 @@ const STALE_S = 180 // older than this, the feed has stopped
 const PIN_KEY = 'pinned'
 const LAYOUT_KEY = 'layout'
 // The sidebar's sections, most specific first. This Mac (proxy state,
-// licence, Burst's standing problems, its dashboard button) is second: a
-// problem there must not sit below a screen of charts.
-export const SECTIONS = ['session', 'mac', 'turns', 'today', 'sessions', 'days', 'projects']
+// licence, Burst's standing problems, its dashboard button) is third, under
+// the turn table: a problem there must not sit below a screen of charts.
+export const SECTIONS = ['session', 'turns', 'mac', 'today', 'sessions', 'days', 'projects']
 
 let sid = ''
 let home = ''
