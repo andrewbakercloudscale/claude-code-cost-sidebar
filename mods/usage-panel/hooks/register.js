@@ -11,6 +11,10 @@
 // session's one ctx bar is Burst's: the context it really sends, by part,
 // against its compaction limit. Burst's standing problems sit in This Mac.
 //
+// Also with Burst: Plan Utilisation, the share of the plan's 5-hour and weekly
+// limits used, from the limit headers on Anthropic's replies (Burst keeps the
+// latest for about a minute), with a toast when a limit is close.
+//
 // /usage-panel opens or focuses the sidebar; /usage-panel pin opens it in
 // every new session (the default), /usage-panel unpin stops that. (/usage
 // itself is Claude Code's own.)
@@ -21,12 +25,18 @@ const COLUMNS = 58 // the sidebar's width to start with; dragging it wins
 const READ_MS = 5000 // the panel writes every 10s; reading at 5s halves the lag
 const FEED_MS = 30000 // keeps the headless panel alive; it stops after 90s without
 const STALE_S = 180 // older than this, the feed has stopped
+const LIMITS_MS = 15000 // the plan's limits: Burst keeps only its last 20 replies
+const EXTRA_MS = 60000 // Burst's slower figures
+const LIMITS_KEY = 'limits'
+const LIMIT_WARN = 0.8 // a toast when a plan limit passes this, and again at
+const LIMIT_ALARM = 0.95
 const PIN_KEY = 'pinned'
 const LAYOUT_KEY = 'layout'
 // The sidebar's sections, most specific first. This Mac (proxy state,
 // licence, Burst's standing problems, its dashboard button) is third, under
 // the turn table: a problem there must not sit below a screen of charts.
-export const SECTIONS = ['session', 'turns', 'mac', 'today', 'sessions', 'days', 'projects']
+// Plan Utilisation is next: how close the plan's limits are.
+export const SECTIONS = ['session', 'turns', 'mac', 'plan', 'today', 'sessions', 'days', 'projects']
 
 let sid = ''
 let home = ''
@@ -38,6 +48,9 @@ let pinned = true
 let layout = null // { order, hidden } as the person left it
 let burst = null // { down, mod }: Burst's /api/mod answer; null without Burst
 let burstRaw = ''
+let limits = null // [{ key, util, reset }]: the plan's limits, as Anthropic last reported them
+let extra = null // { saved, secondary }: Burst's slower figures for the insights
+const warned = {} // limit window and reset time -> the level already toasted
 
 // A stored layout made whole: unknown names dropped, sections added since
 // it was saved put back in their default place.
@@ -88,7 +101,11 @@ export function register(on) {
     await feed($)
     await read($)
     await readBurst($)
+    await readLimits($)
+    await readExtras($)
     $.clock.every(FEED_MS, async () => { await feed($) })
+    $.clock.every(LIMITS_MS, async () => { if (await readLimits($)) $.ui.invalidate('ui.render') })
+    $.clock.every(EXTRA_MS, async () => { if (await readExtras($)) $.ui.invalidate('ui.render') })
     $.clock.every(READ_MS, async () => {
       const changed = await read($)
       if ((await readBurst($)) || changed) $.ui.invalidate('ui.render')
@@ -162,7 +179,7 @@ export function register(on) {
         },
       }))
     }
-    const rows = panel(Box, Text, data, width, now, feedError, layout, extras, burst)
+    const rows = panel(Box, Text, data, width, now, feedError, layout, extras, burst, limits, extra)
     return Box({ flexDirection: 'column', children: rows })
   })
 }
@@ -227,13 +244,149 @@ async function readBurst($) {
   return true
 }
 
+// The plan's limits: the limit headers on Anthropic's latest reply. Burst
+// keeps the headers of its last 20 replies of any kind, heartbeats included,
+// so a model reply is in the list for about a minute and less with several
+// sessions open. Hence every 15 seconds, and the last reading is kept in the
+// store: a session that has not had a reply yet, or missed one, shows the
+// reading another session took. True when what the sidebar draws changed.
+// A limit that has passed 80% or 95% is toasted, once per level and window.
+async function readLimits($) {
+  const b = data && data.burst
+  if (!b || !b.dashboard || !sid) {
+    const had = limits !== null
+    limits = null
+    return had
+  }
+  const before = JSON.stringify(limits)
+  const now = Math.floor((await $.clock.now()) / 1000)
+  let found = null
+  try {
+    const r = await $.http.fetch(b.dashboard.replace(/\/+$/, '') + '/api/responses')
+    if (r.ok) found = limitsOf(JSON.parse(r.text))
+  } catch (err) {
+    found = null
+  }
+  if (found) {
+    limits = found
+    if (JSON.stringify(found) !== before) {
+      try { await $.store.set(LIMITS_KEY, found) } catch (err) { $.ui.log('could not save the plan limits: ' + err) }
+    }
+  } else if (limits === null) {
+    try {
+      const kept = await $.store.get(LIMITS_KEY)
+      if (Array.isArray(kept) && kept.every((l) => l && typeof l.key === 'string' && typeof l.util === 'number')) limits = kept
+    } catch (err) {
+      limits = null
+    }
+  }
+  for (const l of limits || []) {
+    if (!(l.reset > now)) continue
+    const level = l.util >= LIMIT_ALARM ? 2 : l.util >= LIMIT_WARN ? 1 : 0
+    const key = l.key + ':' + l.reset
+    if (level > (warned[key] || 0)) {
+      warned[key] = level
+      $.ui.toast('Plan limit: ' + Math.round(l.util * 100) + '% of the ' + limitName(l.key) + ' limit used, resets ' + when(l.reset, now), { timeoutMs: level > 1 ? 30000 : 15000 })
+    }
+  }
+  return JSON.stringify(limits) !== before
+}
+
+// Burst's slower figures, once a minute: what compaction has saved this
+// session, and what went to the secondary today. True when they changed.
+async function readExtras($) {
+  const b = data && data.burst
+  if (!b || !b.dashboard || !sid) {
+    const had = extra !== null
+    extra = null
+    return had
+  }
+  const base = b.dashboard.replace(/\/+$/, '')
+  const get = async (path) => {
+    try {
+      const r = await $.http.fetch(base + path)
+      return r.ok ? JSON.parse(r.text) : null
+    } catch (err) {
+      return null
+    }
+  }
+  const before = JSON.stringify(extra)
+  const now = Math.floor((await $.clock.now()) / 1000)
+  const state = await get('/api/state')
+  const next = { saved: null, secondary: null }
+  const stats = state && state.context && state.context.compaction_stats
+  const mine = ((stats && stats.sessions) || []).filter((x) => x && x.session === sid)
+  if (mine.length > 0) next.saved = { net: mine.reduce((a, x) => a + (x.net_usd || 0), 0), n: mine.reduce((a, x) => a + (x.compactions || 0), 0) }
+  if (state && state.today && state.today.SecondaryRequests > 0) {
+    const day = new Date(now * 1000)
+    const p2 = (n) => String(n).padStart(2, '0')
+    const ymd = day.getFullYear() + '-' + p2(day.getMonth() + 1) + '-' + p2(day.getDate())
+    const usage = await get('/api/usage?range=custom&limit=1&from=' + ymd + '&to=' + ymd + 'T23:59')
+    const others = ((usage && usage.by_provider) || []).filter((x) => x && x.key !== 'anthropic' && x.requests > 0)
+    if (others.length > 0) next.secondary = { requests: others.reduce((a, x) => a + x.requests, 0), usd: others.reduce((a, x) => a + (x.usd || 0), 0), names: others.map((x) => x.key) }
+  }
+  extra = next.saved || next.secondary ? next : null
+  return JSON.stringify(extra) !== before
+}
+
+// The plan's limits from Burst's list of recent replies: the newest reply
+// that carries Anthropic's utilisation headers, one row per window (5h, 7d,
+// and any other it names), shortest window first. null when none does.
+export function limitsOf(responses) {
+  if (!Array.isArray(responses)) return null
+  const rows = responses.filter((r) => r && r.headers && typeof r.headers === 'object')
+    .sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
+  for (const r of rows) {
+    const out = []
+    for (const [name, v] of Object.entries(r.headers)) {
+      const m = /^anthropic-ratelimit-unified-(.+)-utilization$/.exec(name)
+      if (!m || m[1].startsWith('grace')) continue
+      const util = Number(v)
+      if (isNaN(util)) continue
+      out.push({ key: m[1], util, reset: Number(r.headers['anthropic-ratelimit-unified-' + m[1] + '-reset']) || 0 })
+    }
+    if (out.length > 0) return out.sort((a, b) => windowSeconds(a.key) - windowSeconds(b.key) || a.key.localeCompare(b.key))
+  }
+  return null
+}
+
+// "5h" is 18000, "7d" and "7d-opus" 604800; 0 when the name says no length.
+function windowSeconds(key) {
+  const m = /^(\d+)([hd])/.exec(key)
+  return m ? Number(m[1]) * (m[2] === 'h' ? 3600 : 86400) : 0
+}
+
+// "5h", "weekly", "weekly opus".
+function limitName(key) {
+  return key.replace(/^7d/, 'weekly').replace(/[-_]+/g, ' ')
+}
+
+// A time ahead: "16:00 (1h41m)" today, "Thu 02:00" on another day.
+function when(epoch, now) {
+  const t = new Date(epoch * 1000)
+  const same = t.toDateString() === new Date(now * 1000).toDateString()
+  return same ? clock(epoch) + ' (' + hm((epoch - now) / 60) + ')' : DAYS[t.getDay()] + ' ' + clock(epoch)
+}
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+// The plan on the panel's License row, and what it costs a month where that
+// is a published flat price. null for an API key, or no row.
+export function planOf(summary) {
+  const line = parseAnsi(summary || '').map((l) => l.text).find((t) => /License:/.test(t))
+  if (!line) return null
+  const label = line.replace(/^.*License:\s*/, '').trim()
+  if (!label || /^API key/.test(label)) return null
+  const price = /^Max \(20x\)/.test(label) ? 200 : /^Max \(5x\)/.test(label) ? 100 : /^Pro\b/.test(label) ? 20 : 0
+  return { label, price }
+}
+
 // ---- the sidebar -------------------------------------------------------------
 
 const TIER = { green: 'green', yellow: 'yellow', red: 'red', purple: 'magenta', cyan: 'cyan' }
 const ACCENT = 'cyan'
 const BLOCKS = ' ▁▂▃▄▅▆▇█'
 
-export function panel(Box, Text, d, width, now, feedError, layout, extras = [], burst = null) {
+export function panel(Box, Text, d, width, now, feedError, layout, extras = [], burst = null, limits = null, extra = null) {
   const T = (children, props = {}) => Text({ ...props, children: Array.isArray(children) ? children : [children] })
   const rows = []
   if (!d) {
@@ -259,19 +412,23 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
   // Most specific first: this session, then today across sessions, then the
   // last 30 days, then this Mac's set-up. Each block's insights sit under it.
   // The order, and which are shown, is the person's (see layoutOf).
-  const tips = insights(d, now)
+  const tips = insights(d, now, limits, extra, burst)
   const notes = (scope) => tips.filter((t) => t.scope === scope).map((t) =>
     Box({ flexDirection: 'row', children: [T((t.icon || '•') + ' ', { color: TIER[t.tier] || ACCENT }), T(t.text, { wrap: 'wrap' })] }))
   // Each section is a card: a rounded border, its heading inside, so where
   // one ends and the next starts is plain. The border and padding take 4.
   const IW = Math.max(26, W - 4)
   const draw = {
-    session: () => [...sessionSection(Box, T, d, IW, burst), ...notes('session')],
+    session: () => [...sessionSection(Box, T, d, IW, burst), ...notes('session'), ...notes('burst')],
     mac: () => {
       const foot = [...footer(Box, T, d), ...burstRows(Box, T, burst), ...extras]
       return foot.length > 0 ? [heading(T, 'This Mac'), ...foot] : []
     },
     turns: () => turnsTable(T, d),
+    plan: () => {
+      const body = planSection(Box, T, d, IW, now, limits)
+      return body.length > 0 ? [...body, ...notes('plan')] : []
+    },
     today: () => [...todaySection(Box, T, d, IW, now), ...notes('today')],
     sessions: () => topSection(Box, T, d, IW),
     days: () => daysSection(Box, T, d, IW),
@@ -489,6 +646,42 @@ function burstRows(Box, T, burst) {
   })
 }
 
+// ---- plan utilisation: the plan's limits, and what the month's use is worth
+
+function planSection(Box, T, d, W, now, limits) {
+  const plan = planOf(d.summary)
+  const rows = (limits || []).filter((l) => l.reset > now)
+  const hasBurst = !!(d.burst && d.burst.dashboard)
+  if (rows.length === 0 && !plan) return []
+  const out = [heading(T, 'Plan Utilisation', plan ? plan.label : '')]
+  const nameW = Math.max(0, ...rows.map((l) => limitName(l.key).length))
+  const labelOf = (l) => lpad(Math.round(l.util * 100) + '%', 4) + '  resets ' + when(l.reset, now)
+  // One bar width for every row, so the bars can be compared.
+  const labelW = Math.max(0, ...rows.map((l) => labelOf(l).length))
+  for (const l of rows) {
+    const pct = Math.round(l.util * 100)
+    const c = pct >= LIMIT_ALARM * 100 ? 'red' : pct >= LIMIT_WARN * 100 ? 'yellow' : 'green'
+    out.push(Box({
+      flexDirection: 'row', columnGap: 1, children: [
+        T(pad(limitName(l.key), nameW), { dimColor: true }),
+        gauge(T, pct, Math.max(6, W - nameW - 2 - labelW), c, [LIMIT_WARN * 100]),
+        T(labelOf(l), { color: c === 'green' ? undefined : c }),
+      ],
+    }))
+  }
+  if (rows.length === 0) {
+    out.push(T(hasBurst ? 'No limit reading yet: it comes with the next reply.' : 'How much of the limits is used comes from Claude Burst, which reads it off Anthropic\'s replies.', { dimColor: true, wrap: 'wrap' }))
+  }
+  // What the flat price buys: the month's use at pay-as-you-go rates.
+  if (plan && plan.price > 0 && d.month > 0) {
+    out.push(T([
+      T(money(d.month), { bold: true }),
+      T(' of use this month at API rates, on a ' + money(plan.price) + ' plan', { dimColor: true }),
+    ], { wrap: 'wrap' }))
+  }
+  return out
+}
+
 // ---- today
 
 function todaySection(Box, T, d, W, now) {
@@ -626,12 +819,30 @@ function topSection(Box, T, d, W) {
       ],
     }))
   }
+  // The day's dearest turns, whichever session they were in.
+  const dear = d.top_turns || []
+  if (dear.length > 0) {
+    out.push(sub(T, 'Costliest turns today'))
+    for (const r of dear) {
+      const mine = r.sid === d.sid
+      out.push(Box({
+        flexDirection: 'row', columnGap: 1, children: [
+          T('*' + r.sid.slice(-5), { bold: mine, color: mine ? ACCENT : undefined }),
+          T(pad('#' + r.turn, 5), { dimColor: true }),
+          T(lpad(money(r.cost, 2), 6), { bold: mine }),
+          T(lpad(k(r.ctx), 5), { dimColor: true }),
+          T(clock(r.at), { dimColor: true }),
+          T(cut(r.folder || '', Math.max(4, W - 33)), { dimColor: true }),
+        ],
+      }))
+    }
+  }
   return out
 }
 
 // ---- insights: a few plain sentences, only when there is something to say
 
-export function insights(d, now) {
+export function insights(d, now, limits = null, extra = null, burst = null) {
   const out = []
   const s = d.session || {}
   const t = d.today || {}
@@ -649,6 +860,25 @@ export function insights(d, now) {
     }
   }
 
+  // A pause that let the cache go: the turn after it re-read little from the
+  // cache and cost a multiple of the usual. Not a compaction, which shrinks
+  // the context and has its own rows.
+  let gapTurn = 0
+  if (recent.length >= 5) {
+    const med = median(recent.map((x) => x[4]).filter((c) => c != null))
+    for (let i = recent.length - 1; i >= 1; i--) {
+      const a = recent[i - 1]
+      const t = recent[i]
+      if (!(a[5] && t[5] && t[5] - a[5] > 300 && t[3] < 50 && t[1] >= a[1] * 0.8 && t[4] != null)) continue
+      if (med > 0 && t[4] >= med * 2) {
+        gapTurn = t[0]
+        const pause = t[5] - a[5]
+        out.push({ scope: 'session', tier: 'yellow', icon: '◴', text: 'Turn ' + t[0] + ' came after a ' + (pause < 3600 ? Math.round(pause / 60) + 'm' : hm(pause / 60)) + ' pause and read ' + Math.round(t[3]) + '% from cache: ' + money(t[4], 2) + ' against a ' + money(med, 2) + ' median.' })
+      }
+      break
+    }
+  }
+
   if (recent.length >= 5) {
     const hit = recent.reduce((a, x) => a + x[3], 0) / recent.length
     const costs = recent.map((x) => x[4]).filter((c) => c != null)
@@ -660,13 +890,46 @@ export function insights(d, now) {
     const all = turns.slice(-50).filter((x) => x[4] != null)
     const med = median(all.map((x) => x[4]))
     const worst = all.reduce((a, x) => (a == null || x[4] > a[4] ? x : a), null)
-    if (worst && med > 0 && worst[4] > med * 4 && worst[4] >= 0.05) {
+    if (worst && worst[0] !== gapTurn && med > 0 && worst[4] > med * 4 && worst[4] >= 0.05) {
       out.push({ scope: 'session', tier: 'yellow', icon: '▲', text: 'Turn ' + worst[0] + ': ' + money(worst[4], 2) + ', ' + Math.round(worst[4] / med) + '× median, +' + k(worst[2]) + ' context.' })
     }
   }
 
   if (s.cost != null && s.avg_session > 0 && s.cost > s.avg_session * 3) {
     out.push({ scope: 'session', tier: s.tier || 'yellow', icon: '$', text: ratio(s.cost / s.avg_session) + ' your average session (' + money(s.avg_session, 2) + ', 7 days).' })
+  }
+
+  // With Claude Burst: what its compaction has saved this session after the
+  // summaries and cache rewrites, and the part that fills most of the context.
+  const saved = extra && extra.saved
+  if (saved && saved.n > 0 && Math.abs(saved.net) >= 0.01) {
+    const times = saved.n + (saved.n === 1 ? ' compaction' : ' compactions')
+    if (saved.net > 0) out.push({ scope: 'burst', tier: 'green', icon: '⟳', text: 'Compaction has saved ' + money(saved.net, 2) + ' net this session (' + times + ').' })
+    else out.push({ scope: 'burst', tier: 'yellow', icon: '⟳', text: 'Compaction has cost ' + money(-saved.net, 2) + ' more than it has saved so far (' + times + ').' })
+  }
+  const sent = burst && !burst.down && burst.mod && burst.mod.session
+  if (sent && sent.context >= 100000 && Array.isArray(sent.parts)) {
+    const top = sent.parts.reduce((a, p) => (!a || p.tokens > a.tokens ? p : a), null)
+    if (top && top.tokens / sent.context >= 0.5) out.push({ scope: 'burst', tier: 'cyan', icon: '▤', text: top.name + ' are ' + Math.round((top.tokens * 100) / sent.context) + '% of the context sent.' })
+  }
+
+  // The plan's limits at the present pace.
+  for (const l of limits || []) {
+    const len = windowSeconds(l.key)
+    if (!len || !(l.reset > now)) continue
+    if (l.util >= 1) {
+      out.push({ scope: 'plan', tier: 'red', icon: '!', text: 'The ' + limitName(l.key) + ' limit is used up: resets ' + when(l.reset, now) + '.' })
+      continue
+    }
+    const elapsed = len - (l.reset - now)
+    if (elapsed < len * 0.1 || l.util < 0.05) continue
+    const hit = now + ((1 - l.util) * elapsed) / l.util
+    if (hit < l.reset) out.push({ scope: 'plan', tier: l.util >= LIMIT_WARN ? 'red' : 'yellow', icon: '↗', text: 'At this pace the ' + limitName(l.key) + ' limit is reached ' + when(hit, now) + ', ' + hm((l.reset - hit) / 60) + ' before it resets.' })
+  }
+
+  const sec = extra && extra.secondary
+  if (sec && sec.requests > 0) {
+    out.push({ scope: 'today', tier: 'yellow', icon: '⇄', text: sec.requests + (sec.requests === 1 ? ' request' : ' requests') + ' went to the secondary today (' + sec.names.join(', ') + ')' + (sec.usd >= 0.01 ? ': ' + money(sec.usd, 2) + ' on top of the plan.' : '.') })
   }
 
   if (t.cost != null && t.typical_so_far > 1) {

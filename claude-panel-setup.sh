@@ -2305,15 +2305,89 @@ PYEOF
 # Set on every FAST tick, before either builder runs, so the slow-tier
 # summary and the fast-tier table read the same session from the same parse
 # rather than two snapshots that can disagree on screen.
+# The turn table's arguments, in one place. top_turns_refresh below must ask
+# for exactly what session_stats_refresh asks for: the arguments are part of
+# the cache key, so anything else would parse every other session's
+# transcript a second time instead of reading the entry its own panel wrote.
+turn_table_series() { # $1 = transcript path
+  turn_table_cached "$1" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
+    "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
+    "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
+    "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_ELECTRIC" series
+}
+
+# The day's most expensive turns across every session, for the mod's
+# "Costliest turns today": ccusage has no per-turn figure, so this reads the
+# #SERIES line of each transcript written to today (the newest
+# TOP_TURNS_FILES of them), which is cached on the file's mtime+size, and
+# keeps the five dearest turns that began since midnight. Slow tier, headless
+# only: the split has no room for it. Turns served by a secondary are left
+# out, as they are from the session total. The series holds a session's
+# newest 300 turns, so a longer day in one session is read from there on.
+TOP_TURNS_JSON="[]"
+TOP_TURNS_FILES="${TOP_TURNS_FILES:-60}"
+top_turns_refresh() {
+  local files f out series tmp picked sid path turn cost ctx at folder json="[]"
+  files=$(find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' \
+    -newermt "$(date '+%Y-%m-%d 00:00:00')" 2>/dev/null)
+  if [ -z "$files" ]; then TOP_TURNS_JSON="[]"; return 0; fi
+  tmp=$(mktemp "${TMPDIR:-/tmp}/ccusage-top-turns.XXXXXX") || return 0
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    out=$(turn_table_series "$f" 2>/dev/null) || continue
+    series=$(printf '%s\n' "$out" | sed -n '2p')
+    case "$series" in
+      '#SERIES'*) printf '%s\t%s\n' "$f" "${series#*$'\t'}" >> "$tmp" ;;
+    esac
+  done < <(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 ls -t 2>/dev/null | head -n "$TOP_TURNS_FILES")
+  picked=$(python3 - "$tmp" <<'TOPTURNS_PYEOF' 2>/dev/null
+import json, os, sys, time
+
+lt = time.localtime()
+midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+rows = []
+for line in open(sys.argv[1]):
+    path, _, raw = line.rstrip("\n").partition("\t")
+    try:
+        turns = json.loads(raw).get("turns") or []
+    except ValueError:
+        continue
+    sid = os.path.basename(path)[:-len(".jsonl")]
+    for t in turns:
+        if len(t) < 7 or t[4] is None or t[5] is None or t[6] or t[5] < midnight:
+            continue
+        rows.append((t[4], sid, path, t[0], t[1], t[5]))
+# A resumed or forked session carries the turns of the one it came from. The
+# files arrive newest first, so the turn is kept under the session still
+# being written to and not listed twice.
+seen, once = set(), []
+for r in rows:
+    key = (r[0], r[4], r[5])
+    if key not in seen:
+        seen.add(key)
+        once.append(r)
+rows = sorted(once, key=lambda r: -r[0])
+for cost, sid, path, turn, ctx, at in rows[:5]:
+    print(f"{sid}\t{path}\t{turn}\t{cost:.6f}\t{int(ctx)}\t{int(at)}")
+TOPTURNS_PYEOF
+)
+  rm -f "$tmp"
+  while IFS=$'\t' read -r sid path turn cost ctx at; do
+    [ -n "$sid" ] || continue
+    folder=$(session_identity_cached "$path" 2>/dev/null | cut -f4)
+    json=$(jq -c --arg sid "$sid" --arg folder "$folder" --argjson turn "$turn" --argjson cost "$cost" \
+      --argjson ctx "$ctx" --argjson at "$at" \
+      '. + [{sid: $sid, folder: $folder, turn: $turn, cost: $cost, ctx: $ctx, at: $at}]' <<<"$json" 2>/dev/null) || json="[]"
+  done <<<"$picked"
+  TOP_TURNS_JSON="${json:-[]}"
+}
+
 SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""; SESS_SERIES=""
 session_stats_refresh() {
   SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""; SESS_SERIES=""
   [ -n "${latest:-}" ] || return 0
   local out meta
-  out=$(turn_table_cached "$latest" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
-    "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
-    "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
-    "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_ELECTRIC" series)
+  out=$(turn_table_series "$latest")
   meta=$(printf '%s\n' "$out" | head -1)
   case "$meta" in
     '#META'*)
@@ -4490,7 +4564,7 @@ mod_json_write() { # $1 = session id
   MJ_SPEND30="${spend30:-0}" MJ_PREV_SPEND30="${prev_spend30:-0}" MJ_SPEND_TIER="$spend_tier" \
   MJ_AVG30="${avg_daily_30:-0}" MJ_PREV_AVG30="${prev_avg_daily_30:-0}" MJ_AVG_TIER="$avg_tier" \
   MJ_WEEK="${week_cost:-0}" MJ_MONTH="${month_cost:-0}" \
-  MJ_TOP="${top_rows:-}" MJ_SERIES="$SESS_SERIES" \
+  MJ_TOP="${top_rows:-}" MJ_SERIES="$SESS_SERIES" MJ_TOP_TURNS="${TOP_TURNS_JSON:-[]}" \
   MJ_SUMMARY="${summary_block:-}" MJ_TABLE="$SESS_TABLE" \
   MJ_ERRORS="$(sort -u "$errs_file" 2>/dev/null | head -5)" \
   MJ_THRESHOLDS="$CTX_YELLOW $CTX_RED $CTX_PURPLE $BURN_YELLOW $BURN_RED $TIER_YELLOW_MULT $TIER_RED_MULT" \
@@ -4631,6 +4705,7 @@ doc = {
     },
     "week": num("MJ_WEEK"), "month": num("MJ_MONTH"),
     "daily": daily, "hourly_avg": hourly, "projects": projects, "top": top[:5],
+    "top_turns": jload(E.get("MJ_TOP_TURNS", "")) or [],
     "turns": jload(E.get("MJ_SERIES", "")),
     "burst": ({"dashboard": text("MJ_BURST_DASHBOARD"), "console": text("MJ_BURST_CONSOLE")}
               if text("MJ_BURST_DASHBOARD") else None),
@@ -4698,6 +4773,7 @@ headless_main() {
       build_summary > "$tmp_s" 2>>"$PANEL_ERR_FILE"
       summary_block=$(cat "$tmp_s")
       build_trailing > "$tmp_t" 2>>"$PANEL_ERR_FILE"
+      top_turns_refresh
       band_write "$hsid" "$summary_block"
       # The two reports behind the graphs, to files: too big for the
       # environment the writer gets everything else through.

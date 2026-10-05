@@ -6,8 +6,8 @@ Live, always-visible cost and token tracking for **[Claude Code](https://claude.
 
 <table>
 <tr>
-<td valign="top"><img src="docs/sidebar-top.png" alt="The top of the usage sidebar: this session's model, cost and burn rate, its context as one bar by part against Claude Burst's compaction limit, graphs of context, cost and cache per turn, the turn table with a pauseless compaction's Started and Finished rows, and this Mac's proxy state and licence" width="400"></td>
-<td valign="top"><img src="docs/sidebar-scrolled.png" alt="The usage sidebar scrolled down: today against a typical day by hour and the 5h block, sessions today, the last 30 days by day and by model, and spend by project" width="400"></td>
+<td valign="top"><img src="docs/sidebar-top.png" alt="The top of the usage sidebar: this session's model, cost and burn rate, its context as one bar by part against Claude Burst's compaction limit, graphs of context, cost and cache per turn, the turn table with a pauseless compaction's Started and Finished rows, this Mac's proxy state and licence, and Plan Utilisation: how much of the 5-hour and weekly limits is used" width="400"></td>
+<td valign="top"><img src="docs/sidebar-scrolled.png" alt="The usage sidebar scrolled down: today against a typical day by hour and the 5h block, sessions today and the day's costliest turns, the last 30 days by day and by model, and spend by project" width="400"></td>
 </tr>
 <tr>
 <td align="center"><sub>What a session opens with</sub></td>
@@ -19,7 +19,7 @@ Live, always-visible cost and token tracking for **[Claude Code](https://claude.
 
 This came out of a simple problem: AI coding agents burn tokens and money per turn, per session, per day, and none of that is visible while you're working. You only find out later, from a dashboard or an invoice, by which point the expensive session is long over and you've learned nothing you can act on. This repo is the fix: a live panel that sits next to your session and updates every few seconds.
 
-> **Companion tool: [Claude Burst](https://github.com/andrewbakercloudscale/claude-burst).** A local gateway for Claude Code (subscription-first routing with failover, pauseless compaction, session coordination, a dashboard). Each works without the other. Together, the sidebar shows the context Burst really sends and marks every pauseless compaction as it happens: see [Pauseless compaction](#pauseless-compaction-with-claude-burst).
+> **Companion tool: [Claude Burst](https://github.com/andrewbakercloudscale/claude-burst).** A local gateway for Claude Code (subscription-first routing with failover, pauseless compaction, session coordination, a dashboard). Each works without the other. Together, the sidebar shows the context Burst really sends, how much of your plan's 5-hour and weekly limits is used (with a warning as one gets close), and marks every pauseless compaction as it happens: see [Pauseless compaction](#pauseless-compaction-with-claude-burst).
 
 The same panel for OpenCode lives in **[opencode-cost-usage-panel](https://github.com/andrewbakercloudscale/opencode-cost-usage-panel)**: the two were one repo until they were split apart, which is why the design notes here and there cross-reference each other.
 
@@ -31,14 +31,14 @@ Full write-up and motivation: **[AI coding costs are guesswork without this: ins
 
 A mod is a Claude Code plugin that draws inside the session. On a Claude Code that loads mods, setup installs the **usage-panel mod** (`mods/usage-panel`), and every new session opens the panel as a sidebar docked to the right of the transcript. Nothing is typed into your terminal, no Accessibility permission is needed and it works in any terminal: Claude Code draws it. Before the mod, the panel was a Ghostty split that a launcher opened by typing keystrokes; that split is still here for older versions (see [The panel](#the-panel)).
 
-Each section is its own card, most specific first: this session, its turns, this Mac, today across your sessions, sessions today, the last 30 days, your projects. The sidebar scrolls, so the lower cards are a scroll away, and each can be hidden or moved. [Reading the sidebar](#reading-the-sidebar) goes through every card.
+Each section is its own card, most specific first: this session, its turns, this Mac, Plan Utilisation, today across your sessions, sessions today, the last 30 days, your projects. The sidebar scrolls, so the lower cards are a scroll away, and each can be hidden or moved. [Reading the sidebar](#reading-the-sidebar) goes through every card.
 
 | Command | |
 |---|---|
 | `/usage-panel` | Open the sidebar (or focus it). Esc puts you back in the prompt. |
 | `/usage-panel unpin` | Stop it opening by itself in new sessions. |
 | `/usage-panel pin` | Open it in every new session again (the default). |
-| `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `turns`, `mac`, `today`, `sessions`, `days`, `projects`. |
+| `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `turns`, `mac`, `plan`, `today`, `sessions`, `days`, `projects`. |
 | `/usage-panel up` / `down` / `top` / `bottom <section>` | Move a section. The layout is kept for every new session. |
 | `/usage-panel sections` / `reset` | Show the current order (hidden ones in brackets), or go back to the default. |
 | `v` (in the sidebar) | With Claude Burst installed: open its dashboard, or its support console when the dashboard is down. The same button is in the This Mac card to click. |
@@ -71,7 +71,8 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 | `growth` | Context size, one bar per turn, oldest on the left. Blue, then yellow, red and purple past the 30/50/70% thresholds. A cyan bar is a turn where the context fell to under 60% of the turn before: a compaction. |
 | `$/turn` | Cost, one bar per turn. Yellow is over 2× the median turn, red over 4×. The yellow bar here is the turn after the compaction, which wrote the smaller context to the cache once. |
 | `cache` and `94% hit` | The share of input read from the prompt cache, averaged over the last 20 turns. Green from 90%, yellow from 75%, red below. A cache read costs a tenth of fresh input, so this is the figure that keeps long sessions cheap. |
-| Lines starting `↗ ◇ ▲ $ !` | Insights, at most three, only when there is something to say: how many turns until the restart line at the current growth, the median turn, a turn that cost over 4× the median, a session over 3× your average, a cache hit rate under 85%. |
+| Lines starting `↗ ◇ ▲ ◴ $ !` | Insights, at most three, only when there is something to say: how many turns until the restart line at the current growth, the median turn, a turn that cost over 4× the median, a session over 3× your average, a cache hit rate under 85%. `◴` is a turn made dear by a pause: it came more than five minutes after the one before, read under half its input from the cache (the cache had expired) and cost at least twice the median. It reads `Turn 212 came after a 26m pause and read 4% from cache: $0.90 against a $0.05 median.` |
+| Lines starting `⟳ ▤` | With Claude Burst, two more. `⟳` is what its compaction has saved this session, net of the summaries and the one cache rewrite each costs (or what it has cost so far, when it has not paid for itself yet). `▤` names the part that is half or more of a context of 100k and up, e.g. `Tool results are 65% of the context sent.` |
 
 ### Turns
 
@@ -104,6 +105,27 @@ A turn that added far more than the session's average, or one past 50% of the wi
 
 This card sits third so a problem is not under a screen of charts.
 
+### Plan Utilisation
+
+<img src="docs/card-plan.png" alt="The Plan Utilisation card: the 5-hour limit at 82% in yellow, the weekly limit at 58%, the month's use at API rates against the plan's price, and when the 5-hour limit will be reached at this pace" width="460">
+
+How close you are to your plan's limits. Anthropic states the figures itself, in headers on every reply; Claude Burst keeps the latest and the sidebar reads them from its dashboard every 15 seconds. They are Anthropic's numbers, not an estimate from token counts.
+
+| On screen | What it is |
+|---|---|
+| `Max (20x)` | The plan Claude Code is signed in with. |
+| `5h` bar, `82%  resets 16:17 (1h58m)` | The share of the 5-hour limit used, and when the window resets. Green, yellow from 80%, red from 95%. The tick on the bar is the 80% mark. |
+| `weekly` bar, `58%  resets Thu 02:00` | The same for the 7-day limit. Any other window Anthropic reports (a per-model weekly limit, for one) gets a row of its own. |
+| `$132 of use this month at API rates, on a $200 plan` | What this month's use would have cost pay-as-you-go, beside the plan's flat price. Shown for Pro ($20), Max 5x ($100) and Max 20x ($200). |
+| Lines starting `↗ !` | `↗`: at the pace of this window so far, the limit is reached before it resets, with when and by how much. `!`: a limit is used up, and when it comes back. |
+
+**A warning before you hit a limit.** When a limit passes 80%, and again at 95%, the mod raises a toast in the session: `Plan limit: 81% of the 5h limit used, resets 16:17 (1h58m)`. Once per level and window, in every open session, so it is not repeated each minute.
+
+- The limit rows and the toast need Claude Burst: it is what sees Anthropic's replies. Without it the card shows the plan and the month's use only.
+- There are two limits, 5 hours and 7 days. Anthropic reports no monthly one, so there is no monthly row or warning.
+- A reading is from the last reply on this Mac, in any session, so it is as fresh as your last turn anywhere. The last one is kept, so a session that has not had a reply yet still shows it. A window that has reset is dropped until a reply reports the new one.
+- On an API key there is no plan and no card.
+
 ### Today
 
 <img src="docs/card-today.png" alt="The Today card" width="460">
@@ -115,13 +137,26 @@ This card sits third so a problem is not under a screen of charts.
 | `By hour` | A typical day: your average spend in each hour over the last 30 days. Blue hours are gone, cyan is this hour, grey are still to come. |
 | `5h block  1h58m left` | The current 5-hour usage block and when it resets. The bar is how much of the block has passed. |
 | `$12.8  $4.10/hr elevated` | Spent in this block, and its burn rate across all sessions, with the panel's word for it. |
-| Lines starting `◔ ≋` | Insights: a busy day (1.5× a typical day by this hour or more) or a quiet one (half or less), and a raised burn rate. |
+| Lines starting `◔ ≋ ⇄` | Insights: a busy day (1.5× a typical day by this hour or more) or a quiet one (half or less), and a raised burn rate. With Claude Burst, `⇄` says how many requests went to the secondary provider today, which one, and what they cost on top of the plan. |
 
 ### Sessions today
 
 <img src="docs/card-sessions.png" alt="The Sessions today card" width="460">
 
 The five most expensive sessions today: the end of each session's id, its cost, a bar against the most expensive, and when it was last active. This session is in cyan with a `◀`.
+
+**Costliest turns today** is the five dearest single turns of the day, from whichever session they were in:
+
+| Column | What it is |
+|---|---|
+| `*91b04` | The end of the session's id. This session's rows are in cyan. |
+| `#61` | The turn's number in that session, the same number its turn table shows. |
+| `$1.92` | What the turn cost. |
+| `268k` | The context it sent. |
+| `11:28` | When. |
+| `api-server` | The folder that session runs in. |
+
+One turn is usually dear for one of three reasons: a large context written to the cache for the first time, a pause that let the cache expire, or a long reply. A session resumed from another repeats its turns in its own transcript; each is listed once. A session's newest 300 turns are read, and turns served by a secondary provider are left out, as they are from the session total.
 
 ### Last 30 days
 
