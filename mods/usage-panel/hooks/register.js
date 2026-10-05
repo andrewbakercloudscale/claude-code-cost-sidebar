@@ -21,6 +21,8 @@
 
 const PANE = 'usage'
 const COMMAND = 'usage-panel'
+const SHOW_COMMAND = 'show-cost-panel'
+const HIDE_COMMAND = 'hide-cost-panel'
 const COLUMNS = 58 // the sidebar's width to start with; dragging it wins
 const READ_MS = 5000 // the panel writes every 10s; reading at 5s halves the lag
 const FEED_MS = 30000 // keeps the headless panel alive; it stops after 90s without
@@ -122,6 +124,13 @@ export function register(on) {
     } catch (err) {
       $.ui.log('could not add /' + COMMAND + ': ' + err)
     }
+    // The two things people look for first, under names that say them.
+    try {
+      await $.command.register({ name: SHOW_COMMAND, description: 'Show the cost and usage sidebar in this session', immediate: true })
+      await $.command.register({ name: HIDE_COMMAND, description: 'Hide the cost and usage sidebar in this session', immediate: true })
+    } catch (err) {
+      $.ui.log('could not add /' + SHOW_COMMAND + ' and /' + HIDE_COMMAND + ': ' + err)
+    }
     if (pinned) {
       try {
         await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS })
@@ -130,6 +139,18 @@ export function register(on) {
       }
     }
     return next(e)
+  })
+
+  // Beside the session, like the one a new session opens: no focus taken.
+  on('command.run', { command: SHOW_COMMAND }, async ($) => {
+    try { await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS }) } catch (err) { $.ui.toast('could not open the usage sidebar') }
+    return {}
+  })
+
+  // This session only: /usage-panel unpin stops it opening in new ones.
+  on('command.run', { command: HIDE_COMMAND }, async ($) => {
+    try { await $.ui.close({ id: PANE }) } catch (err) { $.ui.log('could not close the usage sidebar: ' + err) }
+    return {}
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {
