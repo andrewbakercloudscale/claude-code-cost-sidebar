@@ -307,7 +307,7 @@ for (const [i, name] of ['started', 'pending', 'finished'].entries()) {
     font: 15px/20px Menlo, 'SF Mono', monospace; font-variant-ligatures: none; }
   #toast { width: 38ch; padding: .5lh 2ch; border: 1px solid #6b6e80; border-radius: 6px; }
   #toast div:first-child { opacity: .55; }
-  </style><div id="pane"><div id="toast"><div>usage-panel</div><div>Plan limit: 82% of the 5h limit used, resets 16:17 (1h58m)</div></div></div>`)
+  </style><div id="pane"><div id="toast"><div>usage-panel</div><div>🟡 Plan limit: 82% of the 5h limit used, resets 16:17 (1h58m)</div></div></div>`)
   const pane = await tab.locator('#pane').boundingBox()
   await clip('toast-limit.png', pane, pane.y, pane.y + pane.height)
 }

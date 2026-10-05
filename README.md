@@ -156,9 +156,9 @@ How close you are to your plan's limits. Anthropic states the figures itself, in
 | `$132 at API rates this month ($200 plan)` | What this month's use would have cost pay-as-you-go, beside the plan's flat price. Shown for Pro ($20), Max 5x ($100) and Max 20x ($200). |
 | Lines starting `↗ !` | `↗`: at the pace of this window so far, the limit is reached before it resets, with when and by how much. `!`: a limit is used up, and when it comes back. |
 
-**A warning before you hit a limit.** When a limit passes 80%, and again at 95%, the mod raises a toast in the session: `Plan limit: 81% of the 5h limit used, resets 16:17 (1h58m)`. Once per level and window, in every open session, so it is not repeated each minute.
+**A warning before you hit a limit.** When a limit passes 80%, and again at 95%, the mod raises a toast in the session: `🟡 Plan limit: 81% of the 5h limit used, resets 16:17 (1h58m)`, with a yellow mark at 80% and a red one (`🔴`) at 95%. Once per level and window, in every open session, so it is not repeated each minute.
 
-<img src="docs/toast-limit.png" alt="The toast: usage-panel, Plan limit: 82% of the 5h limit used, resets 16:17 (1h58m)" width="380">
+<img src="docs/toast-limit.png" alt="The toast: usage-panel, a yellow mark, Plan limit: 82% of the 5h limit used, resets 16:17 (1h58m)" width="380">
 
 <sub>Claude Code draws the toast; this picture copies its look.</sub>
 
