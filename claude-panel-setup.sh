@@ -3843,7 +3843,7 @@ summary_block=""
 trailing_raw=""
 
 # The summary rows (Model to Proxy State) for the Claude Code mod in
-# claude-burst's mods/burst-band, which shows them inside the session: the
+# claude-burst's mods/burst, which shows them inside the session: the
 # same numbers and colours as this pane, with no second ccusage run. One file
 # per session, with the ANSI colours left in; files older than two days go.
 BAND_DIR="$HOME/.cache/ccusage-panel-cache/band"
