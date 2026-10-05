@@ -478,10 +478,10 @@ test('the compaction limit is the one GetAutoCompactionThreshold gives for this 
   // The gateway's answer for the folder, not the 300k the session's own figures carry.
   // A learned limit reads as automatic, in its own colour, with where it
   // comes from and how often a session may be compacted beside it.
-  expect(await ui.find({ type: 'Text', text: 'Auto compacts at 155k', color: 'cyan' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Auto Compact at 155k', color: 'cyan' })).toBeDefined()
   expect(drawn).toContain('"learned for this repo, 20% buffer · max 1 per 30 min"')
   expect(drawn).not.toContain('compacts at 300k')
-  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Auto compacts at 155k.', color: 'yellow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Auto Compact at 155k.', color: 'yellow' })).toBeDefined()
 })
 
 test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, and this session\'s share', async ($, on) => {
