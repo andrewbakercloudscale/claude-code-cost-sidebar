@@ -113,6 +113,13 @@ function doc(turns, marks, over = {}) {
       { sid: 'aaaaaaaa-0000-0000-0000-000000091b04', cost: 9.8, tokens: 19e6, last: new Date((NOW - 77 * 60) * 1000).toISOString() },
       { sid: 'aaaaaaaa-0000-0000-0000-00000000c7e2', cost: 4.31, tokens: 8e6, last: new Date((NOW - 219 * 60) * 1000).toISOString() },
     ],
+    top_turns: [
+      { sid: 'aaaaaaaa-0000-0000-0000-000000091b04', folder: 'api-server', turn: 61, cost: 1.92, ctx: 268000, at: NOW - 171 * 60 },
+      { sid: SID, folder: 'my-app', turn: 118, cost: 0.84, ctx: 221000, at: NOW - 96 * 60 },
+      { sid: 'aaaaaaaa-0000-0000-0000-00000000c7e2', folder: 'infra-terraform', turn: 34, cost: 0.71, ctx: 143000, at: NOW - 247 * 60 },
+      { sid: SID, folder: 'my-app', turn: 143, cost: 0.38, ctx: 64000, at: NOW - 21 * 60 },
+      { sid: 'aaaaaaaa-0000-0000-0000-000000091b04', folder: 'api-server', turn: 77, cost: 0.36, ctx: 291000, at: NOW - 104 * 60 },
+    ],
     turns: { turns, markers: [], avg_delta: 3000 },
     burst: { dashboard: 'http://127.0.0.1:7788/', console: 'http://127.0.0.1:7789/' },
     summary: `  🔀 Proxy State: ${G}PRIMARY (oauth)${X}\n  📜 License: ${C}Max (20x)${X}`,
@@ -143,12 +150,17 @@ function burst(context, state, raw, problems = []) {
   }
 }
 
+// The plan's limits as Anthropic's replies report them (Burst keeps the
+// latest), and what Burst's compaction has saved this session.
+const LIMITS = [{ key: '5h', util: 0.82, reset: NOW + 118 * 60 }, { key: '7d', util: 0.58, reset: NOW + 2 * 86400 + 11 * 3600 + 41 * 60 }]
+const SAVED = { saved: { net: 2.84, n: 1 }, secondary: null }
+
 const scenes = {}
 {
   // Six turns after a compaction: the sidebar as it mostly looks.
   const t = allTurns(149)
-  scenes.steady = { d: doc(t, { under: { 143: [FINISHED], 142: [STARTED] } }), b: burst(t[t.length - 1][1], 'ok', 320000) }
-  scenes.problem = { d: scenes.steady.d, b: burst(t[t.length - 1][1], 'ok', 320000, [{ severity: 'warn', title: 'Keep-awake turned off' }]) }
+  scenes.steady = { d: doc(t, { under: { 143: [FINISHED], 142: [STARTED] } }), b: burst(t[t.length - 1][1], 'ok', 320000), x: SAVED }
+  scenes.problem = { d: scenes.steady.d, b: burst(t[t.length - 1][1], 'ok', 320000, [{ severity: 'warn', title: 'Keep-awake turned off' }]), x: SAVED }
 }
 {
   // 1. Over the limit: Burst starts the summary in the background.
@@ -165,7 +177,7 @@ const scenes = {}
 {
   // 3. The next prompt went out with the summary in place of the history.
   const t = allTurns(143)
-  scenes.finished = { d: doc(t, { under: { 143: [FINISHED], 142: [STARTED] } }), b: burst(64000, 'compacted', 299000) }
+  scenes.finished = { d: doc(t, { under: { 143: [FINISHED], 142: [STARTED] } }), b: burst(64000, 'compacted', 299000), x: SAVED }
 }
 
 // ---- Box/Text as HTML --------------------------------------------------------
@@ -214,7 +226,7 @@ function Box(p) {
 const button = Text({ color: 'cyan', children: ['▸ Open the Claude Burst dashboard  ', Text({ dimColor: true, color: 'white', children: ['v'] })] })
 
 function page(scene) {
-  const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, [button], scene.b)
+  const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, [button], scene.b, LIMITS, scene.x || null)
   return `<!doctype html><meta charset="utf-8"><style>
   html, body { margin: 0; background: #1f2029; }
   #pane { display: inline-block; padding: 14px 18px 18px; background: #1f2029; color: #d7dae0;
@@ -257,7 +269,7 @@ const card = (file, pane, box) => clip(file, pane, box.y - PAD, box.y + box.heig
   // The sidebar scrolls: what a new session shows, then what is under it.
   await clip('sidebar-top.png', pane, pane.y, cards.today.y - PAD / 2)
   await clip('sidebar-scrolled.png', pane, cards.today.y - PAD, pane.y + pane.height)
-  for (const id of ['session', 'turns', 'today', 'sessions', 'days', 'projects']) await card(`card-${id}.png`, pane, cards[id])
+  for (const id of ['session', 'turns', 'plan', 'today', 'sessions', 'days', 'projects']) await card(`card-${id}.png`, pane, cards[id])
 }
 {
   const { pane, cards } = await show('problem')

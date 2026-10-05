@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { axis, insights, k, layoutOf, modelName, money, relayout, share } from '../hooks/register.js'
+import { axis, insights, k, layoutOf, limitsOf, modelName, money, planOf, relayout, share } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'usage-panel',
@@ -54,7 +54,7 @@ function doc(over: Record<string, unknown> = {}) {
 
 // Answers everything the mod calls. `files` is what fs.read returns for the
 // session's JSON on each read, in turn; null is no file yet.
-function stubs(on, files: Array<object | null>, runs: string[][] = [], store: Record<string, unknown> = {}, opened: object[] = []) {
+function stubs(on, files: Array<object | null>, runs: string[][] = [], store: Record<string, unknown> = {}, opened: object[] = [], toasts: string[] = []) {
   const clock = mock.clock(on, { now: NOW * 1000 })
   mock.env(on, { HOME: '/Users/me' })
   on('session.start', () => ({ cwd: '/work' }))
@@ -62,7 +62,7 @@ function stubs(on, files: Array<object | null>, runs: string[][] = [], store: Re
   on('session.cwd', () => ({ value: '/work' }))
   on('command.register', () => ({ value: undefined }))
   on('ui.open', ($, e) => { opened.push(e); return { value: { isPlaced: true } } })
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', ($, e) => { toasts.push(JSON.stringify(e)); return { value: undefined } })
   on('store.get', ($, e) => (e.key in store ? { value: store[e.key] } : { value: undefined }))
   on('store.set', ($, e) => { store[e.key] = e.value; return { value: undefined } })
   on('process.run', ($, e) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: 'started\n', stderr: '' } } })
@@ -327,7 +327,7 @@ test('sections can be hidden, shown and moved, and the layout is kept', async ($
 test('a stored layout is made whole: unknown names go, new sections come back', () => {
   expect(layoutOf({ order: ['days', 'gone', 'session'], hidden: ['gone', 'turns'] })).toEqual({
     // A returning section goes back beside its default neighbour.
-    order: ['days', 'projects', 'session', 'turns', 'mac', 'today', 'sessions'],
+    order: ['days', 'projects', 'session', 'turns', 'mac', 'plan', 'today', 'sessions'],
     hidden: ['turns'],
   })
   expect(relayout(null, 'hide', 'nope')).toContain('Sections: session')
@@ -353,6 +353,173 @@ test('close to the limit, the session says what Burst will do, not "warning"', a
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Text', text: '! Close to the limit: Burst compacts at 300k.', color: 'yellow' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /warning/ })).toBeUndefined()
+})
+
+// Burst's dashboard, as far as the mod asks it: the session (/api/mod), recent
+// replies with Anthropic's limit headers, the state and today's usage.
+function reply(five: number, week: number, time = '2026-10-05T14:00:00+02:00') {
+  return {
+    time, status: 200,
+    headers: {
+      'anthropic-ratelimit-unified-5h-utilization': String(five), 'anthropic-ratelimit-unified-5h-reset': String(NOW + 6060),
+      'anthropic-ratelimit-unified-7d-utilization': String(week), 'anthropic-ratelimit-unified-7d-reset': String(NOW + 3 * 86400),
+      'anthropic-ratelimit-unified-grace-5h-utilization': '0.000', 'anthropic-ratelimit-unified-5h-status': 'allowed',
+    },
+  }
+}
+
+function dashboard(on, answers: { responses?: () => unknown, state?: unknown, usage?: unknown, session?: unknown }, urls: string[] = []) {
+  on('http.fetch', ($, e) => {
+    urls.push(e.url)
+    const body = e.url.includes('/api/responses') ? (answers.responses ? answers.responses() : [])
+      : e.url.includes('/api/state') ? (answers.state || {})
+        : e.url.includes('/api/usage') ? (answers.usage || {})
+          : (answers.session || mod())
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
+  })
+}
+
+test('the plan limits are read off the newest reply that carries them', () => {
+  const found = limitsOf([{ time: '2026-10-05T13:00:00+02:00', headers: { 'content-type': 'text/event-stream' } }, reply(0.2, 0.3, '2026-10-05T12:00:00+02:00'), reply(0.42, 0.35, '2026-10-05T12:30:00+02:00')])
+  // Shortest window first; the grace figure is not a limit.
+  expect(found).toEqual([{ key: '5h', util: 0.42, reset: NOW + 6060 }, { key: '7d', util: 0.35, reset: NOW + 3 * 86400 }])
+  expect(limitsOf([{ time: 'x', headers: {} }])).toBe(null)
+  // Anything that is not the list of replies is no reading, not a crash.
+  expect(limitsOf(mod())).toBe(null)
+  expect(limitsOf(null)).toBe(null)
+  expect(planOf(doc().summary)).toEqual({ label: 'Max (20x)', price: 200 })
+  expect(planOf(`  📜 License: ${ESC}[36mPro${ESC}[0m`)).toEqual({ label: 'Pro', price: 20 })
+  expect(planOf(`  📜 License: ${ESC}[36mTeam${ESC}[0m`)).toEqual({ label: 'Team', price: 0 })
+  expect(planOf(`  📜 License: ${ESC}[33mAPI key (anthropic)${ESC}[0m`)).toBe(null)
+  expect(planOf('')).toBe(null)
+})
+
+test('Plan Utilisation draws each limit with Claude Burst, and says where they come from without it', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const urls: string[] = []
+  dashboard(on, { responses: () => [reply(0.42, 0.85)] }, urls)
+  await start($)
+  expect(urls.some((u) => u === 'http://127.0.0.1:7788/api/responses')).toBe(true)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(await ui.find({ type: 'Text', text: 'Plan Utilisation' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ 42%  resets \d\d:\d\d \(1h41m\)$/ })).toBeDefined()
+  // Past 80% the row is yellow; the weekly one resets on another day.
+  expect((await ui.find({ type: 'Text', text: /^ 85%  resets (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d\d:\d\d$/ })).props.color).toBe('yellow')
+  expect(drawn).toContain('"weekly"')
+  expect(drawn).toContain(' of use this month at API rates, on a $200 plan')
+  // Under This Mac, above Today.
+  expect(drawn.indexOf('"Plan Utilisation"')).toBeGreaterThan(drawn.indexOf('Proxy State'))
+  expect(drawn.indexOf('"Plan Utilisation"')).toBeLessThan(drawn.indexOf('"Today"'))
+  await ui.unmount()
+  await $.command.run({ command: 'usage-panel', args: 'hide plan' })
+  const hidden = await $.ui.mount(PANE)
+  expect(await hidden.find({ type: 'Text', text: 'Plan Utilisation' })).toBeUndefined()
+})
+
+test('a reading another session took is shown until this one has its own', async ($, on) => {
+  // Burst lists its last 20 replies of any kind: a model reply is soon gone.
+  const saved: Record<string, unknown> = { limits: [{ key: '5h', util: 0.3, reset: NOW + 6060 }] }
+  const clock = stubs(on, [doc({ burst: BURST })], [], saved)
+  let list: unknown[] = []
+  dashboard(on, { responses: () => list })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /^ 30%  resets / })).toBeDefined()
+  await ui.unmount()
+  list = [reply(0.44, 0.35)]
+  await clock.advance(15000)
+  expect((saved.limits as any)[0].util).toBe(0.44)
+  // And a poll that finds none keeps it.
+  list = []
+  await clock.advance(15000)
+  const later = await $.ui.mount(PANE)
+  expect(await later.find({ type: 'Text', text: /^ 44%  resets / })).toBeDefined()
+})
+
+test('without Claude Burst, Plan Utilisation shows the plan and no limits', async ($, on) => {
+  stubs(on, [doc({ burst: null })])
+  let asked = 0
+  on('http.fetch', () => { asked++; return { deny: 'not expected' } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: 'Plan Utilisation' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /comes from Claude Burst/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /%  resets / })).toBeUndefined()
+  expect(asked).toBe(0)
+})
+
+test('a plan limit that is close is toasted, once at 80% and once at 95%', async ($, on) => {
+  const toasts: string[] = []
+  const clock = stubs(on, [doc({ burst: BURST })], [], {}, [], toasts)
+  let five = 0.5
+  dashboard(on, { responses: () => [reply(five, 0.35)] })
+  await start($)
+  const limit = () => toasts.filter((t) => t.includes('Plan limit'))
+  expect(limit().length).toBe(0)
+  five = 0.81
+  await clock.advance(60000)
+  expect(limit().length).toBe(1)
+  expect(limit()[0]).toContain('Plan limit: 81% of the 5h limit used, resets ')
+  // The same level is not repeated.
+  five = 0.9
+  await clock.advance(60000)
+  expect(limit().length).toBe(1)
+  five = 0.96
+  await clock.advance(60000)
+  expect(limit().length).toBe(2)
+  expect(limit()[1]).toContain('96% of the 5h limit')
+  await clock.advance(120000)
+  expect(limit().length).toBe(2)
+})
+
+test('insights from Claude Burst: the limit at this pace, compaction savings, what fills the context, the secondary', () => {
+  const d = doc({ burst: BURST })
+  // 60% of the 5-hour limit with 3h20m still to run: used up well before it resets.
+  const limits = [{ key: '5h', util: 0.6, reset: NOW + 12000 }, { key: '7d', util: 0.35, reset: NOW + 3 * 86400 }]
+  const extra = { saved: { net: 3.19, n: 2 }, secondary: { requests: 4, usd: 0.37, names: ['together'] } }
+  const burst = { down: false, mod: mod({ session: { ...mod().session, context: 200_000, parts: [{ name: 'Tool results', tokens: 130_000 }, { name: 'Messages', tokens: 70_000 }] } }) }
+  const tips = insights(d, NOW, limits, extra, burst)
+  const text = (scope: string) => tips.filter((t) => t.scope === scope).map((t) => t.text)
+  expect(text('plan').length).toBe(1)
+  expect(text('plan')[0]).toMatch(/^At this pace the 5h limit is reached \d\d:\d\d \(1h07m\), 2h13m before it resets\.$/)
+  expect(text('burst')).toEqual(['Compaction has saved $3.19 net this session (2 compactions).', 'Tool results are 65% of the context sent.'])
+  expect(text('today').some((t) => t === '4 requests went to the secondary today (together): $0.37 on top of the plan.')).toBe(true)
+  // A limit that is gone says so; one barely started says nothing.
+  const gone = insights(d, NOW, [{ key: '7d', util: 1, reset: NOW + 86400 }], null, null).filter((t) => t.scope === 'plan')
+  expect(gone[0].text).toMatch(/^The weekly limit is used up: resets /)
+  expect(insights(d, NOW, [{ key: '5h', util: 0.04, reset: NOW + 17000 }], null, null).filter((t) => t.scope === 'plan')).toEqual([])
+  // Compaction that has not paid for itself yet is said as plainly.
+  const cost = insights(d, NOW, null, { saved: { net: -0.4, n: 1 }, secondary: null }, null).filter((t) => t.scope === 'burst')
+  expect(cost[0].text).toBe('Compaction has cost $0.40 more than it has saved so far (1 compaction).')
+})
+
+test('a turn made dear by a pause that let the cache go is named as that', () => {
+  const ts = turns(40).map((x, i) => (i === 39 ? [x[0], x[1], x[2], 4, 0.9, x[5] + 1500, false] : x))
+  const tips = insights(doc({ turns: { turns: ts, markers: [], avg_delta: 3000 } }), NOW).map((t) => t.text)
+  expect(tips.some((t) => t === 'Turn 1039 came after a 26m pause and read 4% from cache: $0.90 against a $0.05 median.')).toBe(true)
+  // Once: the same turn is not also reported as an unexplained spike.
+  expect(tips.filter((t) => t.includes('1039')).length).toBe(1)
+  // A short gap is not a pause.
+  const quick = turns(40).map((x, i) => (i === 39 ? [x[0], x[1], x[2], 4, 0.9, x[5], false] : x))
+  expect(insights(doc({ turns: { turns: quick, markers: [], avg_delta: 3000 } }), NOW).some((t) => t.text.includes('pause'))).toBe(false)
+})
+
+test('the costliest turns today are listed under the top sessions, from any session', async ($, on) => {
+  stubs(on, [doc({ top_turns: [
+    { sid: 'ffffffff-0000-1111-2222-333333312345', folder: 'wordpress-cyber-devtools', turn: 212, cost: 6.81, ctx: 849_740, at: NOW - 3600 },
+    { sid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c', folder: 'claude-burst', turn: 1031, cost: 2.1, ctx: 286_963, at: NOW - 600 },
+  ] })])
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(await ui.find({ type: 'Text', text: 'Costliest turns today' })).toBeDefined()
+  expect(drawn).toContain('"#212 "')
+  expect(drawn).toContain('" $6.81"')
+  // A long folder keeps its end, as the project rows do.
+  expect(drawn).toContain('"…s-cyber-devtools"')
+  expect(drawn.indexOf('"#212 "')).toBeLessThan(drawn.indexOf('"#1031"'))
+  await ui.unmount()
 })
 
 test('formatting', () => {
