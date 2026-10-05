@@ -172,7 +172,8 @@ export function register(on) {
     const b = data && data.burst
     if (b && b.dashboard) {
       extras.push(Button({
-        key: 'burst', label: 'Open the Claude Burst dashboard', hotkey: 'v', plain: true,
+        // Not plain: Claude Code draws it as a button, so it reads as one.
+        key: 'burst', label: 'Open Claude Burst dashboard ↗', hotkey: 'v',
         onPress: async () => {
           let url = b.dashboard
           try {
@@ -572,7 +573,7 @@ function sessionSection(Box, T, d, W, burst, warnPct) {
 
 // One colour per part, in the gateway's order.
 const PART_COLOURS = {
-  'System prompt': 'white',
+  'System prompt': 'ansi256(244)', // mid grey: 237 vanished into a dark terminal
   'System tools': 'cyan',
   'MCP tools': 'magenta',
   'Memory files': 'yellow',
@@ -580,9 +581,8 @@ const PART_COLOURS = {
   'Tool results': 'green',
 }
 
-// What is left of the bar: mid grey, light enough to see on a dark terminal
-// (237 vanished into the background). No part is grey, so it reads as empty.
-const FREE_COLOUR = 'ansi256(244)'
+// What is left of the bar: white, the one colour no part has.
+const FREE_COLOUR = 'white'
 
 // The context Burst sends for this session as a stacked bar against the
 // model's window, with a line where Burst warns and one where it compacts
@@ -1024,7 +1024,15 @@ function turnsTable(T, d) {
   const lines = parseAnsi(d.table || '')
   if (lines.length === 0) return []
   const b = d.block || {}
-  const out = [heading(T, 'Turns', b.active ? 'all sessions ' + money(b.cph, 2) + '/hr' : '')]
+  // Beside the heading: this session's average cost per turn (one turn is
+  // one API reply), and the burn rate of the 5h block across every session.
+  const s = d.session || {}
+  const all = (d.turns && d.turns.turns) || []
+  const n = all.length > 0 ? all[all.length - 1][0] : 0
+  const notes = []
+  if (s.cost > 0 && n > 0) notes.push('Avg API: ' + money(s.cost / n, 2))
+  if (b.active) notes.push('All: ' + money(b.cph, 2) + '/hr')
+  const out = [heading(T, 'Turns', notes.join('  '))]
   for (const line of lines.slice(0, 13)) out.push(lineText(T, line))
   return out
 }

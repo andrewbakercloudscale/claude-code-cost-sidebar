@@ -231,7 +231,7 @@ function Box(p) {
 }
 
 // Claude Code draws a plain button as its label, with the hotkey after it.
-const button = Text({ color: 'cyan', children: ['▸ Open the Claude Burst dashboard  ', Text({ dimColor: true, color: 'white', children: ['v'] })] })
+const button = Text({ color: 'black', backgroundColor: 'cyan', bold: true, children: [' Open Claude Burst dashboard ↗ '] })
 
 function page(scene) {
   const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, scene.b ? [button] : [], scene.b, scene.b ? LIMITS : null, scene.x || null)
@@ -290,6 +290,20 @@ const card = (file, pane, box) => clip(file, pane, box.y - PAD, box.y + box.heig
 for (const [i, name] of ['started', 'pending', 'finished'].entries()) {
   const { pane, cards } = await show(name)
   await clip(`compaction-${i + 1}-${name}.png`, pane, pane.y, cards.turns.y + cards.turns.height + PAD)
+}
+
+// The warning as a plan limit gets close. Claude Code draws a toast itself:
+// the mod's name, dim, over the text, in a rounded frame. This copies that.
+{
+  await tab.setContent(`<!doctype html><meta charset="utf-8"><style>
+  html, body { margin: 0; background: #1f2029; }
+  #pane { display: inline-block; padding: 18px; background: #1f2029; color: #d7dae0;
+    font: 15px/20px Menlo, 'SF Mono', monospace; font-variant-ligatures: none; }
+  #toast { width: 38ch; padding: .5lh 2ch; border: 1px solid #6b6e80; border-radius: 6px; }
+  #toast div:first-child { opacity: .55; }
+  </style><div id="pane"><div id="toast"><div>usage-panel</div><div>Plan limit: 82% of the 5h limit used, resets 16:17 (1h58m)</div></div></div>`)
+  const pane = await tab.locator('#pane').boundingBox()
+  await clip('toast-limit.png', pane, pane.y, pane.y + pane.height)
 }
 
 await browser.close()

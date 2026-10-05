@@ -284,7 +284,7 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(at('Messages 20k')).toBeLessThan(at('System tools 14k'))
   expect(at('System tools 14k')).toBeLessThan(at('System prompt 6k'))
   // The room left before Burst compacts has its own colour and is named, last.
-  expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'ansi256(244)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'white' })).toBeDefined()
   expect(at('Free 930k')).toBeGreaterThan(at('System prompt 6k'))
   // The bar is the model's whole window; where Burst warns and where it
   // compacts are lines on it, named underneath.

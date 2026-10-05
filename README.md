@@ -66,7 +66,7 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 | `149 turns` | Replies from the model so far. |
 | `2.4× avg` | This session against your 7-day average session, shown once it has reached half of it. |
 | `ctx` bar and `86k/1M 9%` | How full the context is, against the model's whole window. With Claude Burst this is the context Burst really sends, and two lines on the bar show where Burst acts: yellow where it warns, red where it compacts (`Burst warns at 240k`, `compacts at 300k` underneath). Both are read from Burst's settings; the compaction limit is your setting, not the room there is. The label turns yellow past the warning line and red past the compaction line. Without Burst, see [below](#the-context-bar-without-claude-burst). |
-| The coloured parts and their key | With Burst, what the context is made of, largest first: messages, tool results, system tools, MCP tools, memory files (CLAUDE.md and the like), the system prompt. Grey is `Free`: the room left in the window. What is used takes its true share of the bar, so a part smaller than one cell is in the key but not on the bar. |
+| The coloured parts and their key | With Burst, what the context is made of, largest first: messages, tool results, system tools, MCP tools, memory files (CLAUDE.md and the like), the system prompt. White is `Free`: the room left in the window. What is used takes its true share of the bar, so a part smaller than one cell is in the key but not on the bar. |
 | `Claude Code Cache Size: 320k` | Claude Code's own history, which Burst's compaction never shrinks. The gap to the `ctx` figure is what Burst saves on every turn. For information, in orange: never a warning. Shown only once it is more than a tenth above what Burst sends. |
 | `growth` | Context size, one bar per turn, oldest on the left. Blue, then yellow past 40% of the model's window and red past 70%. A cyan bar is a turn where the context fell to under 60% of the turn before: a compaction. |
 | `$/turn` | Cost, one bar per turn. Yellow is over 2× the median turn, red over 4×. The yellow bar here is the turn after the compaction, which wrote the smaller context to the cache once. |
@@ -94,7 +94,7 @@ Nothing compacts for you, so the bar is a traffic light on the transcript's own 
 
 <img src="docs/card-turns.png" alt="The Turns card: the per-turn table with a pauseless compaction's rows" width="460">
 
-The last 12 turns of this session, newest first. `all sessions $4.10/hr` beside the heading is the burn rate of the current 5h block across every session, not just this one.
+The last 12 turns of this session, newest first. Beside the heading: `Avg API: $0.10` is this session's average cost per turn (one turn is one API reply: the session's cost over its turns), and `All: $4.10/hr` is the burn rate of the current 5h block across every session, not just this one.
 
 | Column | What it is |
 |---|---|
@@ -116,7 +116,7 @@ A turn that added far more than the session's average, or one past 50% of the wi
 | `Proxy State` | With Claude Burst: where requests are going. `PRIMARY (oauth)` in green is your subscription; `SECONDARY (...)` in yellow is the overflow provider; `NOT IN USE` in red means Burst is installed but out of the path. Absent without Burst. |
 | `License` | The plan Claude Code is signed in with, or `API key` when it is metered. |
 | `⚠` rows | With Burst, each of its standing problems (yellow is a warning, red an error), and `⚡ Burst dashboard not answering` when it is down. |
-| `▸ Open the Claude Burst dashboard  v` | Click it, or press `v` with the sidebar focused. |
+| `Open Claude Burst dashboard ↗` | A button: click it, or press `v` with the sidebar focused. |
 | Red `!` rows | The panel's own errors (a `ccusage` call that failed, a model it has no price for), so a figure that is missing is explained. |
 
 This card sits third so a problem is not under a screen of charts.
@@ -136,6 +136,10 @@ How close you are to your plan's limits. Anthropic states the figures itself, in
 | Lines starting `↗ !` | `↗`: at the pace of this window so far, the limit is reached before it resets, with when and by how much. `!`: a limit is used up, and when it comes back. |
 
 **A warning before you hit a limit.** When a limit passes 80%, and again at 95%, the mod raises a toast in the session: `Plan limit: 81% of the 5h limit used, resets 16:17 (1h58m)`. Once per level and window, in every open session, so it is not repeated each minute.
+
+<img src="docs/toast-limit.png" alt="The toast: usage-panel, Plan limit: 82% of the 5h limit used, resets 16:17 (1h58m)" width="380">
+
+<sub>Claude Code draws the toast; this picture copies its look.</sub>
 
 - The limit rows and the toast need Claude Burst: it is what sees Anthropic's replies. Without it the card shows the plan and the month's use only.
 - There are two limits, 5 hours and 7 days. Anthropic reports no monthly one, so there is no monthly row or warning.
