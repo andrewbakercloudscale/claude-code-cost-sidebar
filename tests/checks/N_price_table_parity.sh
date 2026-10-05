@@ -33,6 +33,9 @@ check_N_price_table_parity() {
   assert_contains "Sonnet 5 at 2/10"    '"claude-sonnet-5":(2.00,10.00),' "$a"
   assert_contains "Sonnet 5.5 at 2/10"  '"claude-sonnet-5-5":(2.00,10.00),' "$a"
   assert_contains "Haiku 4.5 at 1/5"    '"claude-haiku-4-5":(1.00,5.00),' "$a"
+  # Claude Code logs Haiku by its dated id: without this row every Haiku
+  # turn showed "?" and "no known price".
+  assert_contains "Haiku 4.5 dated id at 1/5" '"claude-haiku-4-5-20251001":(1.00,5.00),' "$a"
   assert_contains "Fable 5.1 at 10/50"  '"claude-fable-5-1":(10.00,50.00),' "$a"
   assert_contains "Mythos 5.1 at 10/50" '"claude-mythos-5-1":(10.00,50.00),' "$a"
 

@@ -788,6 +788,8 @@ PRICES = {
     "claude-opus-5-5":   (4.00, 20.00),
     "claude-opus-5":     (5.00, 25.00),
     "claude-haiku-4-5":  (1.00, 5.00),
+    # Claude Code logs Haiku by its dated id, not the alias above.
+    "claude-haiku-4-5-20251001": (1.00, 5.00),
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-opus-4-8":   (5.00, 25.00),
     "claude-opus-4-7":   (5.00, 25.00),
@@ -1280,6 +1282,8 @@ PRICES = {
     "claude-opus-5-5":   (4.00, 20.00),
     "claude-opus-5":     (5.00, 25.00),
     "claude-haiku-4-5":  (1.00, 5.00),
+    # Claude Code logs Haiku by its dated id, not the alias above.
+    "claude-haiku-4-5-20251001": (1.00, 5.00),
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-opus-4-8":   (5.00, 25.00),
     "claude-opus-4-7":   (5.00, 25.00),
@@ -1724,7 +1728,10 @@ PYEOF
 turn_table_cached() {
   local path="$1"; shift
   local key cache_file stamp cached
-  key=$(printf '%s' "$path $*" | shasum -a 256 | cut -c1-16)
+  # The script's own mtime is in the key: a new price table (or any parser
+  # change) re-prices turns already cached, rather than waiting for the
+  # session's next reply.
+  key=$(printf '%s' "$path $* $(stat -f %m "${BASH_SOURCE[0]}" 2>/dev/null)" | shasum -a 256 | cut -c1-16)
   cache_file="$CCUSAGE_CACHE_DIR/turns-$key.out"
   stamp=$(transcript_stamp "$path")
   if [ -f "$cache_file" ]; then
@@ -1757,6 +1764,8 @@ PRICES = {  # model id -> (input $/1M, output $/1M)
     "claude-opus-5-5":   (4.00, 20.00),
     "claude-opus-5":     (5.00, 25.00),
     "claude-haiku-4-5":  (1.00, 5.00),
+    # Claude Code logs Haiku by its dated id, not the alias above.
+    "claude-haiku-4-5-20251001": (1.00, 5.00),
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-opus-4-8":   (5.00, 25.00),
     "claude-opus-4-7":   (5.00, 25.00),
@@ -1808,7 +1817,7 @@ def fmt_k(n):
 def context_window_size(model_id):
     if model_id not in PRICES:
         return 0
-    size = 200_000 if model_id == "claude-haiku-4-5" else 1_000_000
+    size = 200_000 if model_id.startswith("claude-haiku-4-5") else 1_000_000
     if size == 1_000_000 and os.environ.get("CLAUDE_CODE_DISABLE_1M_CONTEXT", "0") == "1":
         size = 200_000
     return size
@@ -3446,7 +3455,7 @@ build_summary() {
       # actually forced down" from a hardcoded model-name list, that list
       # (originally just Sonnet 5/Fable 5) is exactly what went stale and
       # caused the 1M-window bug this comment now sits next to.
-      if [ "$win_size" = "200000" ] && [ "$model_id" != "claude-haiku-4-5" ] && [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-0}" = "1" ]; then
+      if [ "$win_size" = "200000" ] && [[ "$model_id" != claude-haiku-4-5* ]] && [ "${CLAUDE_CODE_DISABLE_1M_CONTEXT:-0}" = "1" ]; then
         forced_note=" [forced 200k]"
       fi
       # From CTX_RED up the label goes with it, same rule as the turn
