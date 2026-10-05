@@ -65,7 +65,7 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 | `$3.10/hr` | This session's burn rate. |
 | `149 turns` | Replies from the model so far. |
 | `2.4× avg` | This session against your 7-day average session, shown once it has reached half of it. |
-| `ctx` bar and `86k/1M 9%` | How full the context is, against the model's whole window. With Claude Burst this is the context Burst really sends, and two lines on the bar show where Burst acts: yellow where it warns, red where it compacts (`Burst warns at 240k`, `compacts at 300k` underneath). Both are read from Burst's settings; the compaction limit is your setting, not the room there is. The label turns yellow past the warning line and red past the compaction line. Without Burst, see [below](#the-context-bar-without-claude-burst). |
+| `ctx` bar and `86k/1M 9%` | How full the context is, against the model's whole window. With Claude Burst this is the context Burst really sends, and a red line on the bar shows where Burst compacts (`Burst compacts at 300k` underneath), read from Burst's settings; that limit is your setting, not the room there is. The label turns yellow as it nears the line (at Burst's warning level) and red past it. Without Burst, see [below](#the-context-bar-without-claude-burst). |
 | The coloured parts and their key | With Burst, what the context is made of, largest first: messages, tool results, system tools, MCP tools, memory files (CLAUDE.md and the like), the system prompt. White is `Free`: the room left in the window. What is used takes its true share of the bar, so a part smaller than one cell is in the key but not on the bar. |
 | `Claude Code Cache Size: 320k` | Claude Code's own history, which Burst's compaction never shrinks. The gap to the `ctx` figure is what Burst saves on every turn. For information, in orange: never a warning. Shown only once it is more than a tenth above what Burst sends. |
 | `growth` | Context size, one bar per turn, oldest on the left. Blue, then yellow past 40% of the model's window and red past 70%. A cyan bar is a turn where the context fell to under 60% of the turn before: a compaction. |
@@ -206,7 +206,7 @@ Burst does the compacting; this panel is where you see it. One compaction, in th
 
 <table>
 <tr>
-<td valign="top"><img src="docs/compaction-1-started.png" alt="Compaction started: the ctx bar at 293k in yellow, past the warning line and just short of the red compaction line, a summarising line, and an Async Compaction Started row at the top of the turn table" width="280"></td>
+<td valign="top"><img src="docs/compaction-1-started.png" alt="Compaction started: the ctx bar at 293k in yellow, just short of the red compaction line, a summarising line, and an Async Compaction Started row at the top of the turn table" width="280"></td>
 <td valign="top"><img src="docs/compaction-2-pending.png" alt="Compaction pending: a line saying a summary is ready and the next prompt compacts, and an Async Compaction Pending row at the top of the turn table" width="280"></td>
 <td valign="top"><img src="docs/compaction-3-finished.png" alt="Compaction finished: the ctx bar back at 64k, a compacted line, a cyan drop at the end of the growth graph, and a turn row reading 64k (-232k) above an Async Compaction Finished row" width="280"></td>
 </tr>
