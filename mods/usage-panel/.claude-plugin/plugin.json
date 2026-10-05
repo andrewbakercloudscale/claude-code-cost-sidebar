@@ -1,6 +1,6 @@
 {
   "name": "usage-panel",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "The usage panel in a sidebar inside Claude Code: this session, today, the last 30 days, projects, top sessions and insights, with graphs, and the context Claude Burst really sends by part where Burst is installed. /usage-panel opens it, /usage-panel pin and /usage-panel unpin choose whether every session opens it",
   "author": { "name": "Andrew Baker" }
 }
