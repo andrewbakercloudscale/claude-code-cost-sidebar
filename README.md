@@ -32,10 +32,10 @@ Each section is its own card, and they run from the most specific to the most ge
 | `/usage-panel` | Open the sidebar (or focus it). Esc puts you back in the prompt. |
 | `/usage-panel unpin` | Stop it opening by itself in new sessions. |
 | `/usage-panel pin` | Open it in every new session again (the default). |
-| `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `burst`, `turns`, `today`, `sessions`, `days`, `projects`. |
+| `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `turns`, `today`, `sessions`, `days`, `projects`. |
 | `/usage-panel up` / `down` / `top` / `bottom <section>` | Move a section. The layout is kept for every new session. |
 | `/usage-panel sections` / `reset` | Show the current order (hidden ones in brackets), or go back to the default. |
-| Claude Burst card | With Claude Burst installed: under This session, Burst's route (primary, secondary, failing), any problem still standing, and the context Burst really sends for this session as a stacked bar by part (system prompt, tools, memory files, messages, tool results) against its compaction limit. Read from Burst's dashboard every 5 seconds; `/usage-panel hide burst` removes it. |
+| The ctx bar with Claude Burst | The session's one context bar becomes Burst's: the context it really sends (after its own compaction) as a stacked bar by part (system prompt, tools, memory files, messages, tool results) against the limit it compacts at, read from Burst's dashboard every 5 seconds. Burst's standing problems are listed in This Mac, under Proxy State. Without Burst the bar is the panel's own, against the model's window. |
 | `v` (in the sidebar) | With Claude Burst installed: open its dashboard, or its support console when the dashboard is down. The same button is at the foot of the sidebar to click. |
 
 The numbers are the panel's own, not a second implementation: for each session the mod starts `ccusage-panel.sh` without a terminal (`PANEL_HEADLESS=1`, via `~/.local/bin/ccusage-panel-mod-start`), and it runs its usual two refresh tiers and writes what it would have drawn, as numbers, to `~/.cache/ccusage-panel-cache/mod/<session id>.json`. The mod reads that file every 5 seconds. When the session ends the mod stops saying it is there, and the headless panel exits by itself 90 seconds later. The floating alerts over Ghostty still come from it.

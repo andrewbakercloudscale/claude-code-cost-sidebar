@@ -223,14 +223,14 @@ test('with Claude Burst, a button opens its dashboard, or its console when the d
   expect(runs[runs.length - 1]).toEqual(['open', 'http://127.0.0.1:7789/'])
 })
 
-test('without Claude Burst there is no button and no Burst card', async ($, on) => {
+test('without Claude Burst there is no button, and the ctx bar is the panel\'s own', async ($, on) => {
   stubs(on, [doc({ burst: null })])
   let asked = 0
   on('http.fetch', () => { asked++; return { deny: 'not expected' } })
   await start($)
   const ui = await $.ui.mount(PANE)
   expect(await ui.find({ key: 'burst' })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: 'Claude Burst' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '206k/1M 21%' })).toBeDefined()
   expect(asked).toBe(0)
 })
 
@@ -247,7 +247,7 @@ function mod(over: Record<string, unknown> = {}) {
   }
 }
 
-test('with Claude Burst, a card under the session shows the route, a standing problem and the context it sends by part', async ($, on) => {
+test('with Claude Burst the session has one ctx bar: what Burst sends, by part, against its compaction limit', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   const urls: string[] = []
   on('http.fetch', ($, e) => {
@@ -257,42 +257,37 @@ test('with Claude Burst, a card under the session shows the route, a standing pr
   await start($)
   expect(urls[0]).toBe('http://127.0.0.1:7788/api/mod?session=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c&since=' + NOW)
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '⚡ PRIMARY', color: 'green' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'Keep-awake turned off', color: 'yellow' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '70k/300k 23%' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /CC holds 620k$/, color: 'yellow' })).toBeDefined()
+  // Once: the panel's own gauge against the model's window is not drawn too.
+  expect(await ui.find({ type: 'Text', text: '206k/1M 21%' })).toBeUndefined()
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn.split('"ctx   "').length - 1).toBe(1)
   expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'green' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Tool results 30k' })).toBeDefined()
   // A part with nothing in it takes no room in the legend.
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
-  const drawn = JSON.stringify(await ui.drawn())
-  expect(drawn.indexOf('"Claude Burst"')).toBeGreaterThan(drawn.indexOf('"This session"'))
-  expect(drawn.indexOf('"Claude Burst"')).toBeLessThan(drawn.indexOf('"Turns"'))
+  expect(await ui.find({ type: 'Text', text: /^Claude Code holds 620k/, color: 'yellow' })).toBeDefined()
+  // The bar is in the session card; a standing problem is with Proxy State.
+  expect(drawn.indexOf('70k/300k 23%')).toBeLessThan(drawn.indexOf('"Turns"'))
+  expect(await ui.find({ type: 'Text', text: 'Keep-awake turned off', color: 'yellow' })).toBeDefined()
+  expect(drawn.indexOf('Keep-awake turned off')).toBeGreaterThan(drawn.indexOf('Proxy State'))
 })
 
-test('the Burst card says so on the secondary, mid-compaction, and when the dashboard stops answering', async ($, on) => {
+test('over the limit the bar is red, a compaction under way is named, and a silent dashboard gives the panel gauge back', async ($, on) => {
   const clock = stubs(on, [doc({ burst: BURST })])
   let answer: object | null = mod({ route: 'SECONDARY', overflow: true, session: { session: 'S', context: 310_000, state: 'summarising', compact_at: 300_000 } })
   on('http.fetch', () => (answer ? { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(answer) } } : { deny: 'connection refused' }))
   await start($)
   let ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '⚡ SECONDARY', color: 'yellow' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '  summarising' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '310k/300k 100%', color: 'red' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  ⟳ summarising' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Claude Code holds/ })).toBeUndefined()
   await ui.unmount()
   answer = null
   await clock.advance(5000)
   ui = await $.ui.mount(PANE)
-  expect((await ui.find({ type: 'Text', text: /^⚡ Burst down/ })).props.color).toBe('red')
-})
-
-test('/usage-panel hide burst takes the Burst card away', async ($, on) => {
-  stubs(on, [doc({ burst: BURST })])
-  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(mod()) } }))
-  await start($)
-  await $.command.run({ command: 'usage-panel', args: 'hide burst' })
-  const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '⚡ PRIMARY' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: '⚡ Burst dashboard not answering', color: 'red' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '206k/1M 21%' })).toBeDefined()
 })
 
 test('sections can be hidden, shown and moved, and the layout is kept', async ($, on) => {
@@ -320,11 +315,11 @@ test('sections can be hidden, shown and moved, and the layout is kept', async ($
 test('a stored layout is made whole: unknown names go, new sections come back', () => {
   expect(layoutOf({ order: ['days', 'gone', 'session'], hidden: ['gone', 'turns'] })).toEqual({
     // A returning section goes back beside its default neighbour.
-    order: ['days', 'projects', 'session', 'burst', 'turns', 'today', 'sessions'],
+    order: ['days', 'projects', 'session', 'turns', 'today', 'sessions'],
     hidden: ['turns'],
   })
   expect(relayout(null, 'hide', 'nope')).toContain('Sections: session')
-  expect((relayout(null, 'down', 'session') as any).order.slice(0, 2)).toEqual(['burst', 'session'])
+  expect((relayout(null, 'down', 'session') as any).order.slice(0, 2)).toEqual(['turns', 'session'])
 })
 
 test('formatting', () => {
