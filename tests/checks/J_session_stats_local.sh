@@ -48,7 +48,7 @@ JSON
   # must come back EMPTY so the summary prints "--", rather than being
   # parsed out of a table row and rendered as money.
   local key cache
-  key=$(printf '%s' "$tp $TURN_ROWS $C_BOLD$C_CYAN $C_RESET $C_CYAN $C_CYAN $C_GREEN $C_BLUE $C_RED $C_YELLOW $C_MAGENTA $CTX_YELLOW $CTX_RED $CTX_PURPLE $TIER_YELLOW_MULT $TIER_RED_MULT $MIN_DELTA_ALERT $C_ELECTRIC series" | shasum -a 256 | cut -c1-16)
+  key=$(printf '%s' "$tp $TURN_ROWS $C_BOLD$C_CYAN $C_RESET $C_CYAN $C_CYAN $C_GREEN $C_BLUE $C_RED $C_YELLOW $C_MAGENTA $CTX_YELLOW $CTX_RED $CTX_PURPLE $TIER_YELLOW_MULT $TIER_RED_MULT $MIN_DELTA_ALERT $C_ELECTRIC series $(stat -f %m "$PANEL_SH" 2>/dev/null)" | shasum -a 256 | cut -c1-16)
   cache="$CCUSAGE_CACHE_DIR_REAL/turns-$key.out"
   if [ -f "$cache" ]; then
     # Line 2 is #META and line 3 #SERIES: a legacy entry had neither.
