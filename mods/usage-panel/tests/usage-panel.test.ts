@@ -538,6 +538,30 @@ test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, a
   expect(await hidden.find({ type: 'Text', text: 'Pauseless Compaction' })).toBeUndefined()
 })
 
+test('Pauseless Compaction draws a losing day as a red bar', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const daily = [{ date: '2026-10-04', net_usd: -1.2, compactions: 5 }, { date: '2026-10-05', net_usd: -0.43, compactions: 4 }]
+  dashboard(on, { state: { context: { window_days: 7, compaction_stats: { compactions: 9, saved_usd: 0.75, summary_usd: 1.38, rewrite_usd: 1, net_usd: -1.63, tokens_not_resent: 3_740_000, sessions: [], daily } } } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  const card = drawn.slice(drawn.indexOf('"Pauseless Compaction"'), drawn.indexOf('"Not re-sent'))
+  expect(card).toContain('" lost"')
+  expect(card).toMatch(/"color":"red"\},"children":\["[▁▂▃▄▅▆▇█ ]+"\]/)
+  expect(card).toContain('"4 Oct')
+})
+
+test('Pauseless Compaction has no chart for a week with nothing saved or lost on any day', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const daily = [{ date: '2026-10-04', net_usd: 0, compactions: 0 }, { date: '2026-10-05', net_usd: 0, compactions: 0 }]
+  dashboard(on, { state: { context: { window_days: 7, compaction_stats: { compactions: 1, saved_usd: 0, summary_usd: 0, rewrite_usd: 0, net_usd: 0, tokens_not_resent: 0, sessions: [], daily } } } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  const card = drawn.slice(drawn.indexOf('"Pauseless Compaction"'), drawn.indexOf('"Not re-sent'))
+  expect(card).not.toContain('"today"')
+})
+
 test('without Burst, or before Burst has compacted anything, there is no Pauseless Compaction card', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   dashboard(on, { state: { context: { compaction_stats: { compactions: 0, sessions: [], daily: [] } } } })
@@ -600,6 +624,38 @@ test('a plan limit that is close is toasted, once at 80% and once at 95%', async
   expect(limit()[1]).toContain('🔴 Plan limit: 96% of the 5h limit')
   await clock.advance(120000)
   expect(limit().length).toBe(2)
+})
+
+test('a day that uses two days of the weekly limit is toasted, once that day, for every session', async ($, on) => {
+  const toasts: string[] = []
+  // Yesterday ended at 30% and was warned about: today starts there, unwarned.
+  const store: Record<string, unknown> = { weekday: { day: '2000-1-1', base: 0.1, reset: NOW + 3 * 86400, carried: 0, last: 0.3, warned: true } }
+  const clock = stubs(on, [doc({ burst: BURST })], [], store, [], toasts)
+  let week = 0.35
+  dashboard(on, { responses: () => [reply(0.1, week)] })
+  await start($)
+  const pace = () => toasts.filter((t) => t.includes('Plan pace'))
+  expect(pace().length).toBe(0)
+  expect((store.weekday as { base: number }).base).toBe(0.3)
+  // 25% today: under two days' share (29%).
+  week = 0.55
+  await clock.advance(60000)
+  expect(pace().length).toBe(0)
+  week = 0.6
+  await clock.advance(60000)
+  expect(pace().length).toBe(1)
+  expect(pace()[0]).toContain("🟡 Plan pace: 30% of the weekly limit used today, over 2 days' share (29%). 60% used, resets ")
+  // Once: not again as the day goes on, and not from another session reading the same store.
+  week = 0.7
+  await clock.advance(60000)
+  expect(pace().length).toBe(1)
+  expect((store.weekday as { warned: boolean }).warned).toBe(true)
+  // The week reset in the middle of the day: what was used before it still counts.
+  store.weekday = { ...(store.weekday as object), warned: false, base: 0.6, last: 0.7, reset: NOW + 86400 }
+  week = 0.2
+  await clock.advance(60000)
+  expect(pace().length).toBe(2)
+  expect(pace()[1]).toContain('Plan pace: 30% of the weekly limit used today')
 })
 
 test('insights from Claude Burst: the limit at this pace, what fills the context, the secondary', () => {
