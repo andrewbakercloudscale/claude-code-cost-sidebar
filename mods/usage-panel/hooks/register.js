@@ -665,17 +665,17 @@ function sentBar(Box, T, s, W, win, warnPct) {
   const barW = Math.max(6, W - 8 - label.length)
   const free = scale - s.context
   let bar
-  if (parts.length === 0) {
-    bar = gauge(T, pct, barW, colour || 'blue', whole ? [(limit * 100) / scale] : [])
-  } else {
+  {
     // What is used takes its true share of the bar, so it meets the two
     // lines where it should; the parts share that, the smallest giving way
     // when there are more parts than cells (the legend still names them).
     const used = free > 0 ? Math.max(1, Math.min(barW - 1, Math.round((s.context * barW) / scale))) : barW
-    const onBar = parts.slice(0, used)
+    // Before Burst has the breakdown by part the used share is one block,
+    // on the same bar: the room left and the limit's line look the same.
+    const onBar = parts.length > 0 ? parts.slice(0, used) : [{ tokens: s.context }]
     const widths = share(onBar.map((p) => p.tokens), used)
     const cells = []
-    onBar.forEach((p, i) => { for (let n = 0; n < widths[i]; n++) cells.push(['█', PART_COLOURS[p.name]]) })
+    onBar.forEach((p, i) => { for (let n = 0; n < widths[i]; n++) cells.push(['█', p.name ? PART_COLOURS[p.name] : colour || 'blue']) })
     while (cells.length < barW) cells.push(['█', FREE_COLOUR])
     // The two lines, over whatever is in that cell: still there once passed.
     if (whole) {
