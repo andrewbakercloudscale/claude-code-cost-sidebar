@@ -8,8 +8,8 @@
 // Nothing is computed twice and no keystrokes are typed anywhere.
 //
 // With Claude Burst on this Mac (the panel's JSON names its dashboard), the
-// sidebar also draws what Burst says about this session: its route, any
-// problem still standing, and the context it really sends, by part.
+// session's one ctx bar is Burst's: the context it really sends, by part,
+// against its compaction limit. Burst's standing problems sit in This Mac.
 //
 // /usage-panel opens or focuses the sidebar; /usage-panel pin opens it in
 // every new session (the default), /usage-panel unpin stops that. (/usage
@@ -25,7 +25,7 @@ const PIN_KEY = 'pinned'
 const LAYOUT_KEY = 'layout'
 // The sidebar's sections, most specific first. The footer (proxy state,
 // licence) always stays at the bottom.
-export const SECTIONS = ['session', 'burst', 'turns', 'today', 'sessions', 'days', 'projects']
+export const SECTIONS = ['session', 'turns', 'today', 'sessions', 'days', 'projects']
 
 let sid = ''
 let home = ''
@@ -265,8 +265,7 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
   // one ends and the next starts is plain. The border and padding take 4.
   const IW = Math.max(26, W - 4)
   const draw = {
-    session: () => [...sessionSection(Box, T, d, IW), ...notes('session')],
-    burst: () => burstSection(Box, T, burst, IW),
+    session: () => [...sessionSection(Box, T, d, IW, burst), ...notes('session')],
     turns: () => turnsTable(T, d),
     today: () => [...todaySection(Box, T, d, IW, now), ...notes('today')],
     sessions: () => topSection(Box, T, d, IW),
@@ -280,7 +279,7 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
     if (body.length > 0) rows.push(card(Box, id, body))
   }
   if (lay.hidden.length > 0) rows.push(T('Hidden: ' + lay.hidden.join(', ') + ' (/' + 'usage-panel show <name>)', { dimColor: true, wrap: 'wrap' }))
-  const foot = [...footer(Box, T, d), ...extras]
+  const foot = [...footer(Box, T, d), ...burstRows(Box, T, burst), ...extras]
   if (foot.length > 0) rows.push(card(Box, 'setup', [heading(T, 'This Mac'), ...foot]))
   return rows
 }
@@ -301,13 +300,14 @@ function sub(T, title, note) {
 
 // ---- this session
 
-function sessionSection(Box, T, d, W) {
+function sessionSection(Box, T, d, W, burst) {
   const s = d.session || {}
   const out = [heading(T, 'This session', [d.sid ? '*' + d.sid.slice(-5) : '', s.folder || ''].filter(Boolean).join(' · '))]
   // Before the first reply the panel knows no model ("Unknown") and prices
   // nothing ($0): say so rather than draw that as a reading.
   const turnsSoFar = (d.turns && d.turns.turns) || []
-  if (turnsSoFar.length === 0 && !(s.ctx > 0)) {
+  const sent = burst && !burst.down && burst.mod && burst.mod.session && burst.mod.session.context > 0 ? burst.mod.session : null
+  if (turnsSoFar.length === 0 && !(s.ctx > 0) && !sent) {
     out.push(T('No reply yet: the figures start with the first one.', { dimColor: true, wrap: 'wrap' }))
     return out
   }
@@ -322,8 +322,15 @@ function sessionSection(Box, T, d, W) {
     s.avg_session > 0 && s.cost != null && s.cost >= s.avg_session * 0.5 ? T('  ' + ratio(s.cost / s.avg_session) + ' avg', { dimColor: true }) : '',
   ], { wrap: 'truncate-end' }))
 
-  // Context gauge, with the panel's colour thresholds as ticks.
-  if (s.ctx > 0 && s.win > 0) {
+  // One context bar. With Claude Burst it is Burst's: what is really sent
+  // (after Burst's own compaction, which Claude Code's figure does not know
+  // about), by part, against the limit Burst compacts at. Otherwise the
+  // panel's gauge against the model's window, its colour thresholds as ticks.
+  if (sent) {
+    out.push(...sentBar(Box, T, sent, W))
+    if (s.compacting) out.push(T('  ⟳ a summary is ready: the next prompt compacts', { color: 'cyan' }))
+    else if (sent.state && sent.state !== 'ok') out.push(T('  ⟳ ' + sent.state, { color: 'cyan' }))
+  } else if (s.ctx > 0 && s.win > 0) {
     const th = d.thresholds || {}
     const pct = (s.ctx * 100) / s.win
     const label = k(s.ctx) + '/' + k(s.win) + ' ' + Math.round(pct) + '%'
@@ -386,7 +393,7 @@ function sessionSection(Box, T, d, W) {
   return out
 }
 
-// ---- Claude Burst: this session as its gateway sees it
+// ---- Claude Burst: this session's context as its gateway sends it
 
 // One colour per part, in the gateway's order.
 const PART_COLOURS = {
@@ -398,31 +405,9 @@ const PART_COLOURS = {
   'Tool results': 'green',
 }
 
-// The route, any problem still standing, and the context Burst really sends
-// (after its own compaction, which Claude Code's figure does not know about)
-// as a stacked bar against the compaction limit. Nothing without Burst.
-export function burstSection(Box, T, burst, W) {
-  if (!burst) return []
-  const m = burst.mod
-  if (burst.down || !m) return [heading(T, 'Claude Burst'), T('⚡ Burst down: its dashboard is not answering', { color: 'red', bold: true, wrap: 'wrap' })]
-  const failing = m.primary_failing > 0
-  const route = m.overflow ? 'SECONDARY' : failing ? 'PRIMARY failing' : 'PRIMARY'
-  const s = m.session
-  const out = [heading(T, 'Claude Burst', 'what it sends for this session')]
-  out.push(T([
-    T('⚡ ' + route, { bold: true, color: m.overflow ? 'yellow' : failing ? 'red' : 'green' }),
-    s && s.state && s.state !== 'ok' ? T('  ' + s.state, { color: 'cyan' }) : '',
-    // Claude Code's own history, which Burst's compaction never shrinks:
-    // what goes, uncached, if Burst drops out.
-    s && s.raw > 0 ? T('  CC holds ' + k(s.raw), { color: s.raw >= 800000 ? 'red' : s.raw >= 500000 ? 'yellow' : undefined, dimColor: s.raw < 500000 }) : '',
-  ], { wrap: 'truncate-end' }))
-  for (const p of m.problems || []) {
-    out.push(Box({ flexDirection: 'row', children: [T('⚠ ', { color: p.severity === 'error' ? 'red' : 'yellow' }), T(p.title, { color: p.severity === 'error' ? 'red' : 'yellow', bold: true, wrap: 'wrap' })] }))
-  }
-  if (!s || !(s.context > 0)) {
-    out.push(T('No request from this session yet.', { dimColor: true }))
-    return out
-  }
+// The context Burst sends for this session as a stacked bar, a legend under
+// it, and what Claude Code itself still holds when that is more.
+function sentBar(Box, T, s, W) {
   const limit = s.compact_at > 0 ? s.compact_at : 0
   const scale = Math.max(limit, s.context)
   const pct = Math.round((s.context * 100) / scale)
@@ -445,14 +430,30 @@ export function burstSection(Box, T, burst, W) {
     if (used < barW) cells.push(T('░'.repeat(barW - used), { dimColor: true }))
     bar = T(cells)
   }
-  out.push(Box({ flexDirection: 'row', columnGap: 1, children: [T('ctx   ', { dimColor: true }), bar, T(label, { color: colour })] }))
+  const out = [Box({ flexDirection: 'row', columnGap: 1, children: [T('ctx   ', { dimColor: true }), bar, T(label, { color: colour })] })]
   if (parts.length > 0) {
     out.push(Box({
       flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: parts.map((p) =>
         T([T('■ ', { color: PART_COLOURS[p.name] }), T(p.name + ' ' + k(p.tokens), { dimColor: true })])),
     }))
   }
+  // Claude Code's own history, which Burst's compaction never shrinks: what
+  // goes, uncached, if Burst drops out. Said only once the two have parted.
+  if (s.raw > s.context * 1.1) {
+    out.push(T('Claude Code holds ' + k(s.raw) + ': sent whole if Burst drops out', { color: s.raw >= 800000 ? 'red' : s.raw >= 500000 ? 'yellow' : undefined, dimColor: s.raw < 500000, wrap: 'wrap' }))
+  }
   return out
+}
+
+// Burst's rows for This Mac, under the panel's Proxy State: a dashboard that
+// is not answering, and each problem still standing.
+function burstRows(Box, T, burst) {
+  if (!burst) return []
+  if (burst.down || !burst.mod) return [T('⚡ Burst dashboard not answering', { color: 'red', bold: true, wrap: 'wrap' })]
+  return (burst.mod.problems || []).map((p) => {
+    const c = p.severity === 'error' ? 'red' : 'yellow'
+    return Box({ flexDirection: 'row', children: [T('⚠ ', { color: c }), T(p.title, { color: c, bold: true, wrap: 'wrap' })] })
+  })
 }
 
 // ---- today
