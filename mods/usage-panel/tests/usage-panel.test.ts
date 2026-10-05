@@ -270,7 +270,7 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(at('Messages 20k')).toBeLessThan(at('System tools 14k'))
   expect(at('System tools 14k')).toBeLessThan(at('System prompt 6k'))
   // The room left before Burst compacts has its own colour and is named, last.
-  expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'ansi256(237)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'ansi256(244)' })).toBeDefined()
   expect(at('Free 230k')).toBeGreaterThan(at('System prompt 6k'))
   // A part with nothing in it takes no room in the legend.
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()

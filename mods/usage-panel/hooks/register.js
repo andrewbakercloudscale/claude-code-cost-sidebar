@@ -397,7 +397,7 @@ function sessionSection(Box, T, d, W, burst) {
 
 // One colour per part, in the gateway's order.
 const PART_COLOURS = {
-  'System prompt': 'gray',
+  'System prompt': 'white',
   'System tools': 'cyan',
   'MCP tools': 'magenta',
   'Memory files': 'yellow',
@@ -405,9 +405,9 @@ const PART_COLOURS = {
   'Tool results': 'green',
 }
 
-// What is left of the bar: a dark track, far from System prompt's gray, so
-// it does not read as one more part.
-const FREE_COLOUR = 'ansi256(237)'
+// What is left of the bar: mid grey, light enough to see on a dark terminal
+// (237 vanished into the background). No part is grey, so it reads as empty.
+const FREE_COLOUR = 'ansi256(244)'
 
 // The context Burst sends for this session as a stacked bar, a legend under
 // it, and what Claude Code itself still holds when that is more.
