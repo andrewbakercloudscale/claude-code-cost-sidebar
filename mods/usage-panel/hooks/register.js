@@ -38,6 +38,8 @@ const CTX_AMBER = 0.4
 const CTX_RED = 0.7
 const LIMIT_WARN = 0.8 // a toast when a plan limit passes this, and again at
 const LIMIT_ALARM = 0.95
+const DAY_KEY = 'weekday' // the store's key for today's share of the weekly limit, shared by every session
+const DAY_SHARES = 2 // a toast when one day uses this many days' worth of the weekly limit
 const PIN_KEY = 'pinned'
 const LAYOUT_KEY = 'layout'
 // The sidebar's sections, most specific first. This Mac (proxy state,
@@ -301,6 +303,8 @@ async function readLimits($) {
     if (JSON.stringify(found) !== before) {
       try { await $.store.set(LIMITS_KEY, found) } catch (err) { $.ui.log('could not save the plan limits: ' + err) }
     }
+    const week = found.find((l) => l.key === '7d' && l.reset > now)
+    if (week) await dayPace($, week, now)
   } else if (limits === null) {
     try {
       const kept = await $.store.get(LIMITS_KEY)
@@ -412,6 +416,33 @@ function windowSeconds(key) {
 }
 
 // "5h", "weekly", "weekly opus".
+// How much of the weekly limit today has used, kept in the store so every
+// session counts the same day once: the first reading of the day is where
+// the day starts (yesterday's last, when there is one in the same week), and
+// what was used before a reset in the middle of the day is carried over.
+// One toast a day, from whichever session sees it first, when the day has
+// used DAY_SHARES days' worth: a week at that pace runs out days early.
+async function dayPace($, l, now) {
+  const t = new Date(now * 1000)
+  const day = t.getFullYear() + '-' + (t.getMonth() + 1) + '-' + t.getDate()
+  let s = null
+  try { s = await $.store.get(DAY_KEY) } catch (err) { s = null }
+  const ok = s && typeof s.day === 'string' && typeof s.base === 'number' && typeof s.last === 'number' && typeof s.reset === 'number'
+  const before = JSON.stringify(s)
+  const sameWeek = ok && Math.abs(l.reset - s.reset) < 3600
+  if (!ok || s.day !== day) s = { day, base: sameWeek ? s.last : l.util, reset: l.reset, carried: 0, last: l.util, warned: false }
+  else if (!sameWeek) s = { ...s, carried: s.carried + Math.max(0, s.last - s.base), base: 0, reset: l.reset }
+  s.last = l.util
+  const used = (s.carried || 0) + Math.max(0, l.util - s.base)
+  if (!s.warned && used >= DAY_SHARES / 7) {
+    s.warned = true
+    $.ui.toast('🟡 Plan pace: ' + Math.round(used * 100) + '% of the weekly limit used today, over ' + DAY_SHARES + " days' share (" + Math.round((DAY_SHARES * 100) / 7) + '%). ' + Math.round(l.util * 100) + '% used, resets ' + when(l.reset, now), { timeoutMs: 30000 })
+  }
+  if (JSON.stringify(s) !== before) {
+    try { await $.store.set(DAY_KEY, s) } catch (err) { $.ui.log("could not save today's share of the weekly limit: " + err) }
+  }
+}
+
 function limitName(key) {
   return key.replace(/^7d/, 'weekly').replace(/[-_]+/g, ' ')
 }
@@ -834,11 +865,13 @@ function savingsSection(Box, T, W, extra) {
     T('  ' + c.n + (c.n === 1 ? ' compaction' : ' compactions'), { dimColor: true }),
     c.n > 0 && c.net > 0 ? T('  ' + money(c.net / c.n, 2) + ' each', { dimColor: true }) : '',
   ], { wrap: 'truncate-end' }))
-  if (c.daily.length >= 2) {
+  // A bar per day, by its size: a day that lost is red, and a week with
+  // nothing either way has no chart (it was three blank rows).
+  if (c.daily.length >= 2 && c.daily.some((x) => x.net !== 0)) {
     const cw = Math.max(c.daily.length, W)
     const idx = stretch(c.daily.length, cw)
     const last = c.daily.length - 1
-    out.push(...bars(T, Box, idx.map((i) => Math.max(0, c.daily[i].net)), 3, (v, i) => (idx[i] === last ? 'cyan' : 'green')))
+    out.push(...bars(T, Box, idx.map((i) => Math.abs(c.daily[i].net)), 3, (v, i) => (c.daily[idx[i]].net < 0 ? 'red' : idx[i] === last ? 'cyan' : 'green')))
     out.push(T(axis([short(c.daily[0].d), 'today'], cw), { dimColor: true }))
   }
   const row = (label, value, colour) => Box({

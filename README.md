@@ -158,6 +158,8 @@ How close you are to your plan's limits. Anthropic states the figures itself, in
 
 **A warning before you hit a limit.** When a limit passes 80%, and again at 95%, the mod raises a toast in the session: `🟡 Plan limit: 81% of the 5h limit used, resets 16:17 (1h58m)`, with a yellow mark at 80% and a red one (`🔴`) at 95%. Once per level and window, in every open session, so it is not repeated each minute.
 
+**A warning when one day eats the week.** On the weekly limit, a day's fair share is a seventh (14%). When one day uses two days' worth (29%), one toast says so: `🟡 Plan pace: 30% of the weekly limit used today, over 2 days' share (29%). 60% used, resets Tue 04:00`. Once a day, from whichever session sees it first. The day starts at the first reading after midnight, so use before any session was open that day is not counted.
+
 <img src="docs/toast-limit.png" alt="The toast: usage-panel, a yellow mark, Plan limit: 82% of the 5h limit used, resets 16:17 (1h58m)" width="380">
 
 <sub>Claude Code draws the toast; this picture copies its look.</sub>
@@ -178,7 +180,7 @@ What Claude Burst's [pauseless compaction](#pauseless-compaction-with-claude-bur
 | `last 7 days` | The window Burst keeps these figures over. |
 | `$25.3 saved` | The net saving: green when compaction has paid for itself, red (`lost`) when it has not yet. |
 | `9 compactions  $2.81 each` | How many times Burst compacted, and the net saving per compaction. |
-| The bars | Net saving per day, oldest on the left, today in cyan. |
+| The bars | Net saving per day, oldest on the left, today in cyan. A day that lost money is a red bar of that size. No chart when no day saved or lost anything. |
 | `Not re-sent` | What the turns after each compaction would have cost with the full history still in the context. |
 | `Summaries` | What the background calls that wrote the summaries cost. |
 | `Cache rewrites` | Each compaction changes the context, so the next turn writes it to the cache once at the higher rate. |
