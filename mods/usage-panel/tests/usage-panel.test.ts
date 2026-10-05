@@ -91,6 +91,25 @@ test('a new session starts the headless panel for itself and opens the sidebar',
   expect((opened[0] as { focus?: boolean }).focus).toBeUndefined()
 })
 
+test('/show-cost-panel opens the sidebar beside the session and /hide-cost-panel closes it', async ($, on) => {
+  const opened: object[] = []
+  const closed: object[] = []
+  const store: Record<string, unknown> = { pinned: false }
+  stubs(on, [doc()], [], store, opened)
+  on('ui.close', ($, e) => { closed.push(e); return { value: {} } })
+  await start($)
+  expect(opened.length).toBe(0)
+  await $.command.run({ command: 'show-cost-panel', args: '' })
+  expect(opened.length).toBe(1)
+  expect(opened[0]).toMatchObject({ id: 'usage', title: 'Usage', columns: 58 })
+  expect((opened[0] as { focus?: boolean }).focus).toBeUndefined()
+  await $.command.run({ command: 'hide-cost-panel', args: '' })
+  expect(closed.length).toBe(1)
+  expect(closed[0]).toMatchObject({ id: 'usage' })
+  // Neither changes whether new sessions open it.
+  expect(store.pinned).toBe(false)
+})
+
 test('unpinned, a session does not open it; /usage pin puts it back', async ($, on) => {
   const opened: object[] = []
   const store: Record<string, unknown> = { pinned: false }

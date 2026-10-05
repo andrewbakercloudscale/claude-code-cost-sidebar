@@ -54,6 +54,8 @@ Each section is its own card, most specific first: this session, its turns, this
 
 | Command | |
 |---|---|
+| `/show-cost-panel` | Show the sidebar in this session, beside the transcript. |
+| `/hide-cost-panel` | Hide it in this session. New sessions still open it; `/usage-panel unpin` stops that. |
 | `/usage-panel` | Open the sidebar (or focus it). Esc puts you back in the prompt. |
 | `/usage-panel unpin` | Stop it opening by itself in new sessions. |
 | `/usage-panel pin` | Open it in every new session again (the default). |
