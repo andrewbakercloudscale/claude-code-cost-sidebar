@@ -167,6 +167,31 @@ STUB
   CLAUDE_PANEL_ALERTS=false gateway_alerts_tick
   bb_settle
   assert_eq "option off, nothing shown" "" "$(cat "$log")"
+
+  # Claude Burst's mod toasting in this session: its toast is the alert.
+  : > "$log"
+  ALERT_QUEUE=(); ALERT_STICKY=""; ALERT_HELD=()
+  mkdir -p "$HOME/.config/claude-panel/mod-toasts"
+  touch "$HOME/.config/claude-panel/mod-toasts/me"
+  write_notices \
+    "{\"id\":\"30\",\"kind\":\"network\",\"severity\":\"warn\",\"title\":\"Toasted by the mod\",\"ts\":$now}"
+  gateway_alerts_tick me; bb_settle
+  assert_eq "the mod toasts it: nothing floated" "" "$(cat "$log")"
+  # Another session's panel, with no mod of its own, still shows it (it is
+  # another process: its own start time, not the one the skip moved on).
+  ALERT_SINCE=$(( now - 120 ))
+  gateway_alerts_tick other; bb_settle
+  assert_contains "a session without the mod still gets the notice" "Toasted by the mod" "$(cat "$log")"
+  # The mod gone: later events come back to the panel, earlier ones do not.
+  : > "$log"
+  ALERT_QUEUE=(); ALERT_STICKY=""; ALERT_HELD=()
+  gateway_alerts_tick me; bb_settle
+  touch -t "$(date -v-5M +%Y%m%d%H%M.%S)" "$HOME/.config/claude-panel/mod-toasts/me"
+  write_notices \
+    "{\"id\":\"30\",\"kind\":\"network\",\"severity\":\"warn\",\"title\":\"Toasted by the mod\",\"ts\":$(( now - 5 ))}" \
+    "{\"id\":\"31\",\"kind\":\"network\",\"severity\":\"warn\",\"title\":\"After the mod went\",\"ts\":$(( $(panel_now) + 5 ))}"
+  gateway_alerts_tick me; bb_settle
+  assert_eq "the mod gone: only what came after is floated" "After the mod went" "$(cut -d'|' -f2 "$log" | paste -sd'|' -)"
   pkill -f "$HOME/.local/bin/claude-panel-overlay" 2>/dev/null
   return 0
 }
