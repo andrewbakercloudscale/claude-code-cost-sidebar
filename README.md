@@ -1,6 +1,10 @@
 # Claude Code Cost & Usage Panel
 
-Live, always-visible cost and token tracking for **[Claude Code](https://claude.com/claude-code)**, running in a right-hand [Ghostty](https://ghostty.org/) split next to your terminal session, so you can watch what a coding agent is actually costing you, turn by turn, instead of finding out at the end of the month.
+Live, always-visible cost and token tracking for **[Claude Code](https://claude.com/claude-code)**, in a sidebar docked inside the Claude Code session itself, so you can watch what a coding agent is actually costing you, turn by turn, instead of finding out at the end of the month.
+
+<p align="center"><img src="docs/usage-sidebar.png" alt="The usage sidebar: this session's cost, context and per-turn graphs, today against a typical day, the last 30 days by day and by model, projects, top sessions, insights and the turn table" width="460"></p>
+
+<sub>Figures in the screenshot are made up.</sub>
 
 This came out of a simple problem: AI coding agents burn tokens and money per turn, per session, per day, and none of that is visible while you're working. You only find out later, from a dashboard or an invoice, by which point the expensive session is long over and you've learned nothing you can act on. This repo is the fix: a live panel that sits next to your terminal and updates every few seconds.
 
@@ -9,6 +13,29 @@ The same panel for OpenCode lives in **[opencode-cost-usage-panel](https://githu
 Full write-up and motivation: **[AI coding costs are guesswork without this: instrumenting OpenCode and Claude Code](https://andrewbaker.ninja/2026/08/22/ai-coding-costs-are-guesswork-without-this-instrumenting-opencode-and-claude-code/)**
 
 ## What you get
+
+### The sidebar (Claude Code 2.1.287 and later)
+
+On a Claude Code that loads mods, setup installs the **usage-panel mod** (`mods/usage-panel`), and every new session opens the panel as a sidebar docked to the right of the transcript. Nothing is typed into your terminal and no Accessibility permission is needed: Claude Code draws it.
+
+- **This session:** model, cost and $/hr (traffic-lit against your 7-day average session), turn count, a context gauge with your 30/50/70% thresholds and the 400k restart line marked on it, and three graphs: context per turn (a compaction shows as a cyan drop), cost per turn (spikes in amber and red) and the cache hit rate.
+- **Today:** spent so far and the end-of-day forecast, a chart of a typical day by hour (30-day average) with the current hour highlighted, and the 5h block's time left and burn rate across all sessions.
+- **Last 30 days:** total and daily average against the 30 days before, a daily bar chart with expensive days in amber and red, the peak day, week and month, and a bar of each model's share.
+- **By project** and **top sessions today**, as bar charts, with this session's project and row highlighted.
+- **Insights:** a few plain sentences, only when there is something to say: when the context reaches the restart line at its current growth, a low cache hit rate, a turn that cost several times the median, a session far above your average, a busy or quiet day for this hour, a high burn rate, the project taking most of the month, your usual busiest hour.
+- **The turn table**, Proxy State and License rows, exactly as the panel draws them.
+
+| Command | |
+|---|---|
+| `/usage-panel` | Open the sidebar (or focus it). Esc puts you back in the prompt. |
+| `/usage-panel unpin` | Stop it opening by itself in new sessions. |
+| `/usage-panel pin` | Open it in every new session again (the default). |
+
+The numbers are the panel's own, not a second implementation: for each session the mod starts `ccusage-panel.sh` without a terminal (`PANEL_HEADLESS=1`, via `~/.local/bin/ccusage-panel-mod-start`), and it runs its usual two refresh tiers and writes what it would have drawn, as numbers, to `~/.cache/ccusage-panel-cache/mod/<session id>.json`. The mod reads that file every 5 seconds. When the session ends the mod stops saying it is there, and the headless panel exits by itself 90 seconds later. The floating alerts over Ghostty still come from it.
+
+While the mod is installed the Ghostty split below stands aside. Set `CLAUDE_PANEL_SPLIT=true` in the options file to have the split as well, or `CLAUDE_PANEL_MOD=no bash claude-panel-setup.sh` to install without the mod.
+
+### The panel
 
 `claude-panel-setup.sh` installs a live panel for Claude Code, built on top of [`ccusage`](https://github.com/ryoppippi/ccusage):
 
@@ -34,7 +61,7 @@ UserPromptSubmit says: 🟣 RUNAWAY COST: $61.00 this session, 7.4x your $8.20 a
 
 On Ghostty it also fires a real macOS desktop notification (OSC 777) alongside the chat line; every other terminal gets a bell. And it **pushes to Telegram**, which is the only one of the three channels that will reach a phone you aren't currently looking at, credentials come from the shared `~/Desktop/github/.creds` (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`), the same store the Pi watchdogs use. Setup turns the push on (`CLAUDE_PANEL_TELEGRAM=true` in `~/.config/claude-panel/options`) only when those credentials already exist, so a fresh machine gets no Telegram and no nagging about it; flip the option to change that, or set `CLAUDE_COST_ALERT_TELEGRAM=0`/`1` in the environment to override it; `bash check-panel-status.sh` reports whether it's configured and whether any sends have failed.
 
-### Launching
+### Launching (the Ghostty split, without the mod)
 
 - **Auto-launch on first use per window.** A `preexec` hook in `~/.zshrc` watches for the first `claude...` command typed in a terminal window and opens the panel automatically, you never have to remember to start it.
 - **tmux-aware.** If you're inside a tmux session, the launcher uses tmux's own `split-window` instead of driving Ghostty via AppleScript, no Accessibility permission or keystroke simulation needed. This matters because tmux overrides `$TERM_PROGRAM` to `tmux` regardless of the outer terminal, so without this check the Ghostty path below would silently fail to detect Ghostty even when Ghostty is the real host.
@@ -90,6 +117,7 @@ The installer lays down a **panel script** (the thing that renders live stats in
 
 ## Requirements
 
+- Claude Code 2.1.287 or later for the sidebar (any terminal). Older versions get the split instead.
 - macOS + [Ghostty](https://ghostty.org/) for the auto-split part, unless you run inside tmux, in which case tmux's own split is used instead and Ghostty isn't required. The panel script itself works in any terminal if you just run it manually.
 - `jq`
 - Node.js (for [`ccusage`](https://github.com/ryoppippi/ccusage), which setup installs with `npm install -g ccusage` when it is missing, and stops if it cannot) and Python 3
@@ -111,7 +139,7 @@ bash deploy.sh
 
 `deploy.sh` doesn't do anything the installer above doesn't already do on its own, there's no remote server for this repo, so "deploy" means re-running the installer to pick up the latest script changes on this machine. It's just a single command to re-run after pulling changes, mirroring the `deploy-*.sh` convention used elsewhere. Safe to re-run any time; the installer is idempotent. `bash deploy.sh claude` still works too, the argument existed while this repo also held the OpenCode panel, and quietly ignoring a word that used to mean something is the failure this project is about.
 
-Then open a **new** terminal window/tab (or `source ~/.zshrc`) and type a `claude...` command, the panel opens automatically in a right-hand split.
+Then start a new Claude Code session: with the mod installed (Claude Code 2.1.287 or later) the sidebar opens by itself. Without it, open a **new** terminal window/tab (or `source ~/.zshrc`) and type a `claude...` command, and the panel opens automatically in a right-hand split.
 
 You can also run the panel manually at any time, in any terminal:
 
@@ -127,6 +155,7 @@ You can also run the panel manually at any time, in any terminal:
 |---|---|
 | `CLAUDE_PANEL_REMOTE_CONTROL` | Interactive `claude` launches (the `~/.zshrc` wrapper and `ghostty-claude-launcher`) start with `--remote-control`, named after the folder (`claude-burst`, then `claude-burst 2` when a running session already has that name). Skipped for subcommands, a positional prompt, `-p`, `--help`/`--version`, or when you pass `--remote-control` yourself. |
 | `CLAUDE_PANEL_BYPASS_PERMISSIONS` | Only `ghostty-claude-launcher`: `true` starts its sessions with `--dangerously-skip-permissions`, `false` without. With the key absent the launcher keeps whatever it did before setup (some launchers hard-code the flag). Typed `claude` sessions follow `permissions.defaultMode` in `~/.claude/settings.json` instead; Claude Burst's dashboard sets both from one checkbox. |
+| `CLAUDE_PANEL_SPLIT` | With the usage-panel mod installed, open the Ghostty split as well. Without the mod the split always opens. |
 | `CLAUDE_PANEL_CAFFEINATE` | Each panel runs `caffeinate -i -w <panel pid>`, keeping the Mac awake while the panel is open. |
 | `CLAUDE_PANEL_LOADING_OVERLAY` | Default `true`. While the launcher opens the panel split, focus is on the new split and typing is blocked for a few seconds. A small floating notice ("Loading usage panel... wait to type") sits over the top of the Ghostty window and turns to "Ready: start typing" the moment focus is back on the claude pane. It never takes focus, ignores the mouse, and closes itself after 10s at most. Set `false` to turn it off. Built by the installer as `~/.local/bin/claude-panel-overlay` (needs clang). |
 | `CLAUDE_PANEL_COMPACTION_OVERLAY` | Default `true`. With Claude Burst, while it summarises this session in the background (pauseless compaction), the same floating notice reads "Async Compaction In Progress" and turns to "Async Compaction Finished" when the summary is done. It shows only while Ghostty is the app in front, never takes focus, and closes itself after 10 minutes at most. Set `false` to turn it off. |
@@ -172,7 +201,7 @@ bash claude-panel-uninstall.sh --dry-run   # list what would change
 bash claude-panel-uninstall.sh             # remove it
 ```
 
-It removes exactly what `claude-panel-setup.sh` installed: the scripts and helpers in `~/.local/bin`, the autolaunch block in `~/.zshrc`, the panel's two hooks in `~/.claude/settings.json`, its patch to `~/.local/bin/ghostty-claude-launcher`, `~/.config/claude-panel` and the panel's caches and logs. Everything else in those files is left as it was, and each edited file is backed up beside itself first (`*.bak-ccusage-uninstall-<time>`). A block or launcher that has been hand-edited is left alone with a warning. The Ghostty `resize_split` keybinds stay (they are harmless and may predate the panel).
+It removes exactly what `claude-panel-setup.sh` installed: the usage-panel mod, the scripts and helpers in `~/.local/bin`, the autolaunch block in `~/.zshrc`, the panel's two hooks in `~/.claude/settings.json`, its patch to `~/.local/bin/ghostty-claude-launcher`, `~/.config/claude-panel` and the panel's caches and logs. Everything else in those files is left as it was, and each edited file is backed up beside itself first (`*.bak-ccusage-uninstall-<time>`). A block or launcher that has been hand-edited is left alone with a warning. The Ghostty `resize_split` keybinds stay (they are harmless and may predate the panel).
 
 - **Remote Control:** the launcher's `--remote-control` option belongs to the panel's patch, so uninstalling removes it. Add `--remote-control` to the launcher yourself if you still want it.
 - Panels already open keep running until their split is closed.
