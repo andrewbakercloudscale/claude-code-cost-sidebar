@@ -1,12 +1,23 @@
 # Claude Code Cost & Usage Panel
 
-Live, always-visible cost and token tracking for **[Claude Code](https://claude.com/claude-code)**, in a sidebar docked inside the Claude Code session itself, so you can watch what a coding agent is actually costing you, turn by turn, instead of finding out at the end of the month.
+Live, always-visible cost and token tracking for **[Claude Code](https://claude.com/claude-code)**, as a **mod**: a sidebar Claude Code itself draws beside the transcript, so you can watch what a coding agent is actually costing you, turn by turn, instead of finding out at the end of the month.
 
-<p align="center"><img src="docs/usage-sidebar.png" alt="The usage sidebar: this session's cost, its context as one bar by part against Claude Burst's compaction limit, per-turn graphs and the turn table, today against a typical day, sessions today, the last 30 days by day and by model, projects, insights and this Mac's set-up" width="460"></p>
+<table>
+<tr>
+<td valign="top"><img src="docs/sidebar-top.png" alt="The top of the usage sidebar: this session's model, cost and burn rate, its context as one bar by part against Claude Burst's compaction limit, graphs of context, cost and cache per turn, the turn table with a pauseless compaction's Started and Finished rows, and this Mac's proxy state and licence" width="400"></td>
+<td valign="top"><img src="docs/sidebar-scrolled.png" alt="The usage sidebar scrolled down: today against a typical day by hour and the 5h block, sessions today, the last 30 days by day and by model, and spend by project" width="400"></td>
+</tr>
+<tr>
+<td align="center"><sub>What a session opens with</sub></td>
+<td align="center"><sub>Scrolled down</sub></td>
+</tr>
+</table>
 
-<sub>Figures in the screenshot are made up.</sub>
+<sub>Every figure in the screenshots is made up. They are drawn by the mod's own code from invented numbers (`docs/render-screenshots.mjs`); the whole sidebar in one picture is [`docs/usage-sidebar.png`](docs/usage-sidebar.png).</sub>
 
-This came out of a simple problem: AI coding agents burn tokens and money per turn, per session, per day, and none of that is visible while you're working. You only find out later, from a dashboard or an invoice, by which point the expensive session is long over and you've learned nothing you can act on. This repo is the fix: a live panel that sits next to your terminal and updates every few seconds.
+This came out of a simple problem: AI coding agents burn tokens and money per turn, per session, per day, and none of that is visible while you're working. You only find out later, from a dashboard or an invoice, by which point the expensive session is long over and you've learned nothing you can act on. This repo is the fix: a live panel that sits next to your session and updates every few seconds.
+
+> **Companion tool: [Claude Burst](https://github.com/andrewbakercloudscale/claude-burst).** A local gateway for Claude Code (subscription-first routing with failover, pauseless compaction, session coordination, a dashboard). Each works without the other. Together, the sidebar shows the context Burst really sends and marks every pauseless compaction as it happens: see [Pauseless compaction](#pauseless-compaction-with-claude-burst).
 
 The same panel for OpenCode lives in **[opencode-cost-usage-panel](https://github.com/andrewbakercloudscale/opencode-cost-usage-panel)**: the two were one repo until they were split apart, which is why the design notes here and there cross-reference each other.
 
@@ -14,18 +25,11 @@ Full write-up and motivation: **[AI coding costs are guesswork without this: ins
 
 ## What you get
 
-### The sidebar (Claude Code 2.1.287 and later)
+### The sidebar: a Claude Code mod (2.1.287 and later)
 
-On a Claude Code that loads mods, setup installs the **usage-panel mod** (`mods/usage-panel`), and every new session opens the panel as a sidebar docked to the right of the transcript. Nothing is typed into your terminal and no Accessibility permission is needed: Claude Code draws it.
+A mod is a Claude Code plugin that draws inside the session. On a Claude Code that loads mods, setup installs the **usage-panel mod** (`mods/usage-panel`), and every new session opens the panel as a sidebar docked to the right of the transcript. Nothing is typed into your terminal, no Accessibility permission is needed and it works in any terminal: Claude Code draws it. Before the mod, the panel was a Ghostty split that a launcher opened by typing keystrokes; that split is still here for older versions (see [The panel](#the-panel)).
 
-Each section is its own card, and they run from the most specific to the most general: this session, today across your sessions, the last 30 days and your projects, then this Mac's set-up. Each section's insights sit under it.
-
-- **This session:** model, cost and $/hr (traffic-lit against your 7-day average session), turn count, a context gauge with your 30/50/70% thresholds and the 400k restart line marked on it, and three graphs: context per turn (a compaction shows as a cyan drop), cost per turn (spikes in amber and red) and the cache hit rate.
-- **Today:** spent so far and the end-of-day forecast, a chart of a typical day by hour (30-day average) with the current hour highlighted, and the 5h block's time left and burn rate across all sessions.
-- **Last 30 days:** total and daily average against the 30 days before, a daily bar chart with expensive days in amber and red, the peak day, week and month, and a bar of each model's share.
-- **By project** and **top sessions today**, as bar charts, with this session's project and row highlighted.
-- **Insights:** a few plain sentences, only when there is something to say: when the context reaches the restart line at its current growth, a low cache hit rate, a turn that cost several times the median, a session far above your average, a busy or quiet day for this hour, a high burn rate, the project taking most of the month, your usual busiest hour.
-- **The turn table**, straight under the session graphs, then **This Mac**: the Proxy State and License rows exactly as the panel draws them, above the charts so a problem there is seen.
+Each section is its own card, most specific first: this session, its turns, this Mac, today across your sessions, sessions today, the last 30 days, your projects. The sidebar scrolls, so the lower cards are a scroll away, and each can be hidden or moved. [Reading the sidebar](#reading-the-sidebar) goes through every card.
 
 | Command | |
 |---|---|
@@ -35,16 +39,139 @@ Each section is its own card, and they run from the most specific to the most ge
 | `/usage-panel hide <section>` / `show <section>` | Hide a section, or bring it back. Sections: `session`, `turns`, `mac`, `today`, `sessions`, `days`, `projects`. |
 | `/usage-panel up` / `down` / `top` / `bottom <section>` | Move a section. The layout is kept for every new session. |
 | `/usage-panel sections` / `reset` | Show the current order (hidden ones in brackets), or go back to the default. |
-| The ctx bar with Claude Burst | The session's one context bar becomes Burst's: the context it really sends (after its own compaction) as a stacked bar by part (system prompt, tools, memory files, messages, tool results) against the limit it compacts at, read from Burst's dashboard every 5 seconds. Burst's standing problems are listed in This Mac, under Proxy State. Without Burst the bar is the panel's own, against the model's window. |
 | `v` (in the sidebar) | With Claude Burst installed: open its dashboard, or its support console when the dashboard is down. The same button is in the This Mac card to click. |
 
 The numbers are the panel's own, not a second implementation: for each session the mod starts `ccusage-panel.sh` without a terminal (`PANEL_HEADLESS=1`, via `~/.local/bin/ccusage-panel-mod-start`), and it runs its usual two refresh tiers and writes what it would have drawn, as numbers, to `~/.cache/ccusage-panel-cache/mod/<session id>.json`. The mod reads that file every 5 seconds. When the session ends the mod stops saying it is there, and the headless panel exits by itself 90 seconds later. The floating alerts over Ghostty still come from it.
 
 While the mod is installed the Ghostty split below stands aside. Set `CLAUDE_PANEL_SPLIT=true` in the options file to have the split as well, or `CLAUDE_PANEL_MOD=no bash claude-panel-setup.sh` to install without the mod.
 
-### The panel
+## Reading the sidebar
 
-`claude-panel-setup.sh` installs a live panel for Claude Code, built on top of [`ccusage`](https://github.com/ryoppippi/ccusage):
+Every dollar figure is tokens counted on this Mac, priced at pay-as-you-go API rates. On a Pro or Max plan that is a measure of use, not a bill. The top line of the sidebar reads `live · 14:19`, the time the figures were last written; it turns to a red `stopped 4m ago` when they are more than 3 minutes old.
+
+Colours mean the same thing everywhere: green is normal, yellow is raised, red is high, purple is far out of range, and cyan marks "this one" (this session, this hour, today, this project).
+
+### This session
+
+<img src="docs/card-session.png" alt="The This session card" width="460">
+
+| On screen | What it is |
+|---|---|
+| `*e7d21 · my-app` | The last five characters of the session id, and the folder it runs in. |
+| `Opus 5.5` | The model of the latest turn, read from the transcript. |
+| `$14.62` | What this session has cost so far, coloured against your 7-day average session. |
+| `$3.10/hr` | This session's burn rate. |
+| `149 turns` | Replies from the model so far. |
+| `2.4× avg` | This session against your 7-day average session, shown once it has reached half of it. |
+| `ctx` bar and `86k/300k 29%` | How full the context is. With Claude Burst this is the context Burst really sends, against the limit it compacts at; the label turns yellow at 80% and red at 100%. Without Burst it is the transcript's context against the model's window, with ticks at your 30/50/70% thresholds and the restart line. |
+| The coloured parts and their key | With Burst, what the context is made of, largest first: messages, tool results, system tools, MCP tools, memory files (CLAUDE.md and the like), the system prompt. Grey is `Free`: the room left before Burst compacts. |
+| `Claude Code holds 320k: ...` | Claude Code's own history, which Burst's compaction never shrinks. It is what would be sent, uncached, if Burst dropped out of the path. Shown once it is more than 10% above what Burst sends. |
+| `growth` | Context size, one bar per turn, oldest on the left. Blue, then yellow, red and purple past the 30/50/70% thresholds. A cyan bar is a turn where the context fell to under 60% of the turn before: a compaction. |
+| `$/turn` | Cost, one bar per turn. Yellow is over 2× the median turn, red over 4×. The yellow bar here is the turn after the compaction, which wrote the smaller context to the cache once. |
+| `cache` and `94% hit` | The share of input read from the prompt cache, averaged over the last 20 turns. Green from 90%, yellow from 75%, red below. A cache read costs a tenth of fresh input, so this is the figure that keeps long sessions cheap. |
+| Lines starting `↗ ◇ ▲ $ !` | Insights, at most three, only when there is something to say: how many turns until the restart line at the current growth, the median turn, a turn that cost over 4× the median, a session over 3× your average, a cache hit rate under 85%. |
+
+### Turns
+
+<img src="docs/card-turns.png" alt="The Turns card: the per-turn table with a pauseless compaction's rows" width="460">
+
+The last 12 turns of this session, newest first. `all sessions $4.10/hr` beside the heading is the burn rate of the current 5h block across every session, not just this one.
+
+| Column | What it is |
+|---|---|
+| `Turn` | The turn's number in this session. |
+| `Model` | The model that answered, per turn, from the transcript. A `*` after it means the turn was served by Claude Burst's secondary provider; its cache and cost cells then show `--` and the gateway's own figure, or `?`. |
+| `Input` | The whole context sent for that turn (input plus cache reads and writes). Coloured by how full the model's window is: yellow past 30%, red past 50%, purple past 70%. |
+| `(Δ)` | What the turn added to the context. When the context shrank by a fifth or more, it is how much went, negative and in green: `64k (-232k)` is a compaction. |
+| `Cache` | The share of that turn's input read from the prompt cache. Green from 95%, red below, purple below 90%. A low figure straight after a compaction is expected. |
+| `Cost` | That turn at the model's published rates, cache reads and writes included. `?` is a model with no known price. |
+
+A turn that added far more than the session's average, or one past 50% of the window, has its whole row coloured. The `*** Async Compaction ... ***` rows are Claude Burst's: see [Pauseless compaction](#pauseless-compaction-with-claude-burst).
+
+### This Mac
+
+<img src="docs/card-mac.png" alt="The This Mac card" width="460">
+
+| On screen | What it is |
+|---|---|
+| `Proxy State` | With Claude Burst: where requests are going. `PRIMARY (oauth)` in green is your subscription; `SECONDARY (...)` in yellow is the overflow provider; `NOT IN USE` in red means Burst is installed but out of the path. Absent without Burst. |
+| `License` | The plan Claude Code is signed in with, or `API key` when it is metered. |
+| `⚠` rows | With Burst, each of its standing problems (yellow is a warning, red an error), and `⚡ Burst dashboard not answering` when it is down. |
+| `▸ Open the Claude Burst dashboard  v` | Click it, or press `v` with the sidebar focused. |
+| Red `!` rows | The panel's own errors (a `ccusage` call that failed, a model it has no price for), so a figure that is missing is explained. |
+
+This card sits third so a problem is not under a screen of charts.
+
+### Today
+
+<img src="docs/card-today.png" alt="The Today card" width="460">
+
+| On screen | What it is |
+|---|---|
+| `$31.40` | Spent today across all sessions on this Mac. |
+| `→ $44.90 by end of day` | The forecast, from your own hour-by-hour pattern scaled by today's pace. It is not shown early in the day, before there is enough to go on. |
+| `By hour` | A typical day: your average spend in each hour over the last 30 days. Blue hours are gone, cyan is this hour, grey are still to come. |
+| `5h block  1h58m left` | The current 5-hour usage block and when it resets. The bar is how much of the block has passed. |
+| `$12.8  $4.10/hr elevated` | Spent in this block, and its burn rate across all sessions, with the panel's word for it. |
+| Lines starting `◔ ≋` | Insights: a busy day (1.5× a typical day by this hour or more) or a quiet one (half or less), and a raised burn rate. |
+
+### Sessions today
+
+<img src="docs/card-sessions.png" alt="The Sessions today card" width="460">
+
+The five most expensive sessions today: the end of each session's id, its cost, a bar against the most expensive, and when it was last active. This session is in cyan with a `◀`.
+
+### Last 30 days
+
+<img src="docs/card-days.png" alt="The Last 30 days card" width="460">
+
+| On screen | What it is |
+|---|---|
+| `$806` | Spent in the last 30 days. |
+| `$27.8/day` | The daily average. |
+| `▲ 1.1× vs prior` | Against the 30 days before that. `▼` and green when it fell, yellow from 1.5×. |
+| The bar chart | One bar per day. Green is ordinary, yellow is over 1.5× the daily average, red over 2×, cyan is today. |
+| `peak $65.0 26 Sep` | The most expensive day. |
+| `this week $118` / `Oct $132` | This week and this calendar month so far. |
+| `By model` | Each model's share of the 30 days' spend, as one bar with a key. |
+
+### Projects
+
+<img src="docs/card-projects.png" alt="The Projects card" width="460">
+
+Spend by project folder over 30 days, largest first, with this session's project in cyan. Under it, two general insights: the project taking 30% or more of the spend, and your usual busiest hour.
+
+## Pauseless compaction, with Claude Burst
+
+[Claude Burst](https://github.com/andrewbakercloudscale/claude-burst) is the companion to this panel: a local gateway between Claude Code and Anthropic. One of the things it does is **pauseless compaction**. Claude Code's own `/compact` stops the session while it summarises. Burst writes the summary in the background while you keep working and swaps it in on your next prompt, so the context shrinks without a pause ([how it works](https://github.com/andrewbakercloudscale/claude-burst/blob/main/docs/compaction.md)).
+
+Burst does the compacting; this panel is where you see it. One compaction, in three steps:
+
+<table>
+<tr>
+<td valign="top"><img src="docs/compaction-1-started.png" alt="Compaction started: the ctx bar at 293k of 300k in yellow, a summarising line, and an Async Compaction Started row at the top of the turn table" width="280"></td>
+<td valign="top"><img src="docs/compaction-2-pending.png" alt="Compaction pending: a line saying a summary is ready and the next prompt compacts, and an Async Compaction Pending row at the top of the turn table" width="280"></td>
+<td valign="top"><img src="docs/compaction-3-finished.png" alt="Compaction finished: the ctx bar at 64k of 300k, a compacted line, a cyan drop at the end of the growth graph, and a turn row reading 64k (-232k) above an Async Compaction Finished row" width="280"></td>
+</tr>
+<tr>
+<td valign="top"><sub><b>1. Started.</b> The context reaches Burst's limit (300k here). The ctx label is yellow, the session says <code>summarising</code>, and a yellow <code>Async Compaction Started</code> row sits above the turn it began beside. You keep working.</sub></td>
+<td valign="top"><sub><b>2. Pending.</b> The summary is written and waits. The session says <code>a summary is ready: the next prompt compacts</code>, and the table has a blue <code>Pending (next prompt)</code> row. Turn 142 ran while the summary was being written.</sub></td>
+<td valign="top"><sub><b>3. Finished.</b> The next prompt went out with the summary in place of the history: <code>64k (-232k)</code> in green, a green <code>Finished</code> row with what the summary cost, and a cyan drop at the end of <code>growth</code>. Cache is 19% for that one turn, then recovers.</sub></td>
+</tr>
+</table>
+
+What to look for:
+
+- **The ctx bar is Burst's.** It is the context Burst sends after its own compaction, by part, against the limit it compacts at, read from Burst's dashboard every 5 seconds. Claude Code's own figure does not know a compaction happened, which is what the `Claude Code holds 299k` line is for.
+- **The three marker rows** come from Burst's `~/.config/claude-burst/metrics.jsonl`. Each is drawn between the two turns it happened between. A Pending whose Finished landed before another turn ran is not drawn: the Finished says it all.
+- **The green negative delta** is on the first turn sent with the summary. That turn's cache hit is low and its cost is up, because the smaller context is written to the cache once. It is the expected price of the compaction, so it never colours the row as a spike.
+- **Notices.** Where Burst's own `burst-band` mod is installed, it shows each step as a toast inside the session. Without it, on Ghostty, a small floating notice reads "Async Compaction In Progress", then "Async Compaction Finished" (`CLAUDE_PANEL_COMPACTION_OVERLAY`).
+
+Without Burst none of this appears: the ctx bar is the panel's own gauge against the model's window, and the marker rows never show. Burst's installer offers to install this panel, and this panel finds Burst by itself; neither needs the other.
+
+## The panel
+
+`claude-panel-setup.sh` installs the panel itself, built on top of [`ccusage`](https://github.com/ryoppippi/ccusage). It is what computes every figure the sidebar draws, and on a Claude Code too old for mods (or with `CLAUDE_PANEL_SPLIT=true`) it draws them itself, as text in a Ghostty or tmux split:
 
 - **Per-turn breakdown of the current session**: turn number, model, context size, context growth (Δ) since the last turn, cache hit %, and estimated cost per turn, read straight out of the session transcript and priced against Anthropic's published per-model rates (including cache read/write multipliers).
 - **Live status line**: current session value, today's value, active-block burn rate, 7-day average session cost, 30-day value, and the current project folder. ("Value" because these are priced at pay-as-you-go API rates regardless of what plan you're actually on, see note below.)
@@ -68,7 +195,7 @@ UserPromptSubmit says: 🟣 RUNAWAY COST: $61.00 this session, 7.4x your $8.20 a
 
 On Ghostty it also fires a real macOS desktop notification (OSC 777) alongside the chat line; every other terminal gets a bell. And it **pushes to Telegram**, which is the only one of the three channels that will reach a phone you aren't currently looking at, credentials come from the shared `~/Desktop/github/.creds` (`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`), the same store the Pi watchdogs use. Setup turns the push on (`CLAUDE_PANEL_TELEGRAM=true` in `~/.config/claude-panel/options`) only when those credentials already exist, so a fresh machine gets no Telegram and no nagging about it; flip the option to change that, or set `CLAUDE_COST_ALERT_TELEGRAM=0`/`1` in the environment to override it; `bash check-panel-status.sh` reports whether it's configured and whether any sends have failed.
 
-### Launching (the Ghostty split, without the mod)
+### Launching the split (without the mod)
 
 - **Auto-launch on first use per window.** A `preexec` hook in `~/.zshrc` watches for the first `claude...` command typed in a terminal window and opens the panel automatically, you never have to remember to start it.
 - **tmux-aware.** If you're inside a tmux session, the launcher uses tmux's own `split-window` instead of driving Ghostty via AppleScript, no Accessibility permission or keystroke simulation needed. This matters because tmux overrides `$TERM_PROGRAM` to `tmux` regardless of the outer terminal, so without this check the Ghostty path below would silently fail to detect Ghostty even when Ghostty is the real host.
@@ -142,7 +269,7 @@ Or via the wrapper script:
 bash deploy.sh
 ```
 
-**With Claude Burst.** [Claude Burst](https://github.com/andrewbakercloudscale/claude-burst) is a separate, optional local gateway for Claude Code. Its installer offers to install this panel too. When it is present, the turn table reads its `~/.config/claude-burst/metrics.jsonl` and marks each Pauseless Compaction: a Started row, a Pending row once the summary is ready and waiting for your next prompt, a Finished row with the summary's cost, and a green negative delta on the turn where the context dropped. Without it those rows simply never appear.
+**With Claude Burst.** [Claude Burst](https://github.com/andrewbakercloudscale/claude-burst), the companion gateway, is separate and optional. Its installer offers to install this panel too, and this panel needs no setting to find it. What the two show together is in [Pauseless compaction](#pauseless-compaction-with-claude-burst).
 
 `deploy.sh` doesn't do anything the installer above doesn't already do on its own, there's no remote server for this repo, so "deploy" means re-running the installer to pick up the latest script changes on this machine. It's just a single command to re-run after pulling changes, mirroring the `deploy-*.sh` convention used elsewhere. Safe to re-run any time; the installer is idempotent. `bash deploy.sh claude` still works too, the argument existed while this repo also held the OpenCode panel, and quietly ignoring a word that used to mean something is the failure this project is about.
 
