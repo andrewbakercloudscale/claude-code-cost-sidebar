@@ -53,9 +53,9 @@ Every dollar figure is tokens counted on this Mac, priced at pay-as-you-go API r
 
 Colours mean the same thing everywhere: green is normal, yellow is raised, red is high, purple is far out of range, and cyan marks "this one" (this session, this hour, today, this project).
 
-### This session
+### Session
 
-<img src="docs/card-session.png" alt="The This session card" width="460">
+<img src="docs/card-session.png" alt="The Session card" width="460">
 
 | On screen | What it is |
 |---|---|
@@ -76,7 +76,7 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 
 #### The context bar without Claude Burst
 
-<img src="docs/card-session-no-burst.png" alt="The This session card without Claude Burst: the ctx bar at 522k, 52% of a 1M window, in amber, ticks named expensive from 400k and wasteful from 700k, and a line saying it is getting expensive, with /compact and /clear" width="460">
+<img src="docs/card-session-no-burst.png" alt="The Session card without Claude Burst: the ctx bar at 522k, 52% of a 1M window, in amber, ticks named expensive from 400k and wasteful from 700k, and a line saying it is getting expensive, with /compact and /clear" width="460">
 
 Nothing compacts for you, so the bar is a traffic light on the transcript's own context, and it tells you when to act.
 
