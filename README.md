@@ -10,7 +10,16 @@ if [ -d "$D/.git" ]; then git -C "$D" pull --ff-only; else git clone https://git
   && bash "$D/claude-panel-setup.sh"
 ```
 
-Then start a new Claude Code session and the sidebar opens by itself. It needs Claude Code 2.1.287 or later, `git`, `jq` and Node.js ([Requirements](#requirements)). Keep the `~/claude-code-cost-sidebar` folder: the sidebar is installed from it. Pasting the same lines again updates it, and [Uninstall](#uninstall) removes it.
+Then start a new Claude Code session and the sidebar opens by itself. It needs Claude Code 2.1.287 or later, `git`, `jq` and Node.js ([Requirements](#requirements)). Keep the `~/claude-code-cost-sidebar` folder: the sidebar is installed from it. Pasting the same lines again updates it.
+
+**Uninstall.** One paste removes everything setup installed, then the folder:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/andrewbakercloudscale/claude-code-cost-sidebar/main/claude-panel-uninstall.sh | bash \
+  && rm -rf "$HOME/claude-code-cost-sidebar"
+```
+
+What it removes, and a dry run that only lists it, are under [Uninstall](#uninstall).
 
 Live, always-visible cost and token tracking for **[Claude Code](https://claude.com/claude-code)**, as a **mod**: a sidebar Claude Code itself draws beside the transcript, so you can watch what a coding agent is actually costing you, turn by turn, instead of finding out at the end of the month.
 
@@ -75,7 +84,7 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 | `$3.10/hr` | This session's burn rate. |
 | `149 turns` | Replies from the model so far. |
 | `2.4× avg` | This session against your 7-day average session, shown once it has reached half of it. |
-| `ctx` bar and `86k/1M 9%` | How full the context is, against the model's whole window. With Claude Burst this is the context Burst really sends, and a thin red line with an arrow (`▕◀`) on the bar shows where Burst compacts (`Burst compacts at 300k` underneath), read from Burst's settings; that limit is your setting, not the room there is. The label turns yellow as it nears the line (at Burst's warning level) and red past it. Without Burst, see [below](#the-context-bar-without-claude-burst). |
+| `ctx` bar and `86k/1M 9%` | How full the context is, against the model's whole window. With Claude Burst this is the context Burst really sends, and a thin red line with an arrow (`▕◀`) on the bar shows where Burst compacts (`Burst compacts at 300k` underneath), asked from Burst for the folder the session runs in (`GetAutoCompactionThreshold`), and marked `(learned)` when Burst's Intelligent Compaction Mode chose it for that repository; that limit is your setting, not the room there is. The label turns yellow as it nears the line (at Burst's warning level) and red past it. Without Burst, see [below](#the-context-bar-without-claude-burst). |
 | The coloured parts and their key | With Burst, what the context is made of, largest first: messages, tool results, system tools, MCP tools, memory files (CLAUDE.md and the like), the system prompt. White is `Free`: the room left in the window. What is used takes its true share of the bar, so a part smaller than one cell is in the key but not on the bar. |
 | `Claude Code Cache Size: 320k` | Claude Code's own history, which Burst's compaction never shrinks. The gap to the `ctx` figure is what Burst saves on every turn. For information, in orange: never a warning. Shown only once it is more than a tenth above what Burst sends. |
 | `growth` | Context size, one bar per turn, oldest on the left. Blue, then yellow past 40% of the model's window and red past 70%. A cyan bar is a turn where the context fell to under 60% of the turn before: a compaction. |
@@ -417,6 +426,14 @@ derived locally from the block's own start/end timestamps, so they keep
 moving between fetches without one.
 
 ## Uninstall
+
+The one paste at the [top of this page](#claude-code-cost-sidebar) does it without a checkout. To see what it would change first, without changing anything:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/andrewbakercloudscale/claude-code-cost-sidebar/main/claude-panel-uninstall.sh | bash -s -- --dry-run
+```
+
+From a checkout:
 
 ```bash
 bash claude-panel-uninstall.sh --dry-run   # list what would change
