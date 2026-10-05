@@ -520,7 +520,9 @@ function sessionSection(Box, T, d, W, burst, warnPct) {
     out.push(...sentBar(Box, T, sent, W, s.win || 0, warnPct))
     if (s.compacting) out.push(T('  ⟳ a summary is ready: the next prompt compacts', { color: 'cyan' }))
     else if (sent.state === 'warning') out.push(T('! Close to the limit: Burst compacts at ' + k(sent.compact_at) + '.', { color: 'yellow', wrap: 'wrap' }))
-    else if (sent.state && sent.state !== 'ok') out.push(T('⟳ ' + sent.state, { color: 'cyan', wrap: 'wrap' }))
+    // "compacted" is not said: it stays for the rest of the session and the
+    // bar, the growth chart and the turn table already show it.
+    else if (sent.state && sent.state !== 'ok' && sent.state !== 'compacted') out.push(T('⟳ ' + sent.state, { color: 'cyan', wrap: 'wrap' }))
   } else if (s.ctx > 0 && s.win > 0) {
     const pct = (s.ctx * 100) / s.win
     const label = k(s.ctx) + '/' + k(s.win) + ' ' + Math.round(pct) + '%'
@@ -786,10 +788,11 @@ function savingsSection(Box, T, W, extra) {
   if (c.tokens > 0) out.push(T(big(c.tokens) + ' tokens not re-sent' + (c.before > c.after && c.after > 0 ? ', largest ' + k(c.before) + ' → ' + k(c.after) : ''), { dimColor: true, wrap: 'truncate-end' }))
   const mine = extra.saved
   if (mine && mine.n > 0) {
+    const one = mine.n === 1
     out.push(T([
-      T('This session: ', { dimColor: true }),
-      T(money(Math.abs(mine.net), 2) + (mine.net >= 0 ? ' saved' : ' lost so far'), { color: mine.net >= 0 ? 'green' : 'yellow' }),
-      T(', ' + mine.n + (mine.n === 1 ? ' compaction' : ' compactions'), { dimColor: true }),
+      T(mine.n + (one ? ' compaction ' : ' compactions ') + (one ? 'has ' : 'have ') + (mine.net >= 0 ? 'saved ' : 'lost '), { dimColor: true }),
+      T(money(Math.abs(mine.net), 2), { color: mine.net >= 0 ? 'green' : 'yellow' }),
+      T(mine.net >= 0 ? ' this session' : ' so far this session', { dimColor: true }),
     ], { wrap: 'truncate-end' }))
   }
   return out

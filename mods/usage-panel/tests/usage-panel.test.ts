@@ -317,6 +317,12 @@ test('over the limit the bar is red, a compaction under way is named, and a sile
   expect(await ui.find({ type: 'Text', text: /^Free/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Claude Code Cache Size/ })).toBeUndefined()
   await ui.unmount()
+  // Once it is done there is no line left saying so for the rest of the session.
+  answer = mod({ route: 'SECONDARY', session: { session: 'S', context: 64_000, state: 'compacted', compact_at: 300_000 } })
+  await clock.advance(5000)
+  ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: /compacted/ })).toBeUndefined()
+  await ui.unmount()
   answer = null
   await clock.advance(5000)
   ui = await $.ui.mount(PANE)
@@ -463,8 +469,9 @@ test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, a
   expect(drawn).toContain('"   -$9.83"')
   expect(drawn).toContain('"1.49B tokens not re-sent, largest 946k → 60k"')
   // This session's own share, and no other's.
-  expect(drawn).toContain('"$3.19 saved"')
-  expect(drawn).toContain('", 2 compactions"')
+  expect(drawn).toContain('"2 compactions have saved "')
+  expect(drawn).toContain('"$3.19"')
+  expect(drawn).toContain('" this session"')
   // Under Plan Utilisation, above Today; and it can be hidden like the rest.
   expect(drawn.indexOf('"Pauseless Compaction"')).toBeGreaterThan(drawn.indexOf('"Plan Utilisation"'))
   expect(drawn.indexOf('"Pauseless Compaction"')).toBeLessThan(drawn.indexOf('"Today"'))
