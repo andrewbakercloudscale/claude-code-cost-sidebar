@@ -880,7 +880,8 @@ function daysSection(Box, T, d, W) {
       flexDirection: 'row', columnGap: 2, children: [
         Box({ flexDirection: 'column', children: pie(T, slices.map((x) => [x.colour, x.cost]), PIE_ROWS) }),
         Box({
-          flexDirection: 'column', children: slices.map((x) =>
+          // A slice under half a percent is not on the pie: no "0%" row.
+          flexDirection: 'column', children: slices.filter((x) => Math.round((x.cost * 100) / total) >= 1).map((x) =>
             T([T('■ ', { color: x.colour }), T(lpad(Math.round((x.cost * 100) / total) + '%', 4) + ' ' + x.name, { dimColor: true })], { wrap: 'truncate-end' })),
         }),
       ],
@@ -1080,13 +1081,11 @@ function turnsTable(T, d) {
   const lines = parseAnsi(d.table || '')
   if (lines.length === 0) return []
   const b = d.block || {}
-  // Beside the heading: this session's average cost per turn (one turn is
-  // one API reply), and the burn rate of the 5h block across every session.
-  const s = d.session || {}
-  const all = (d.turns && d.turns.turns) || []
-  const n = all.length > 0 ? all[all.length - 1][0] : 0
+  // Beside the heading, both for every session: today's average cost per
+  // turn (one turn is one API reply), and the burn rate of the 5h block.
+  const t = d.today || {}
   const notes = []
-  if (s.cost > 0 && n > 0) notes.push('Avg API: ' + money(s.cost / n, 2))
+  if (t.turns > 0 && t.turns_usd > 0) notes.push('Avg API: ' + money(t.turns_usd / t.turns, 2))
   if (b.active) notes.push('All: ' + money(b.cph, 2) + '/hr')
   const out = [heading(T, 'Turns', notes.join('  '))]
   for (const line of lines.slice(0, 13)) out.push(lineText(T, line))
@@ -1110,12 +1109,14 @@ function footer(Box, T, d) {
 
 // ---- drawing helpers
 
-const PIE_ROWS = 7
+const PIE_ROWS = 8
 
 // A pie in `rows` rows of text, twice as many cells wide (a cell is about
 // twice as tall as it is wide). Slices are [colour, amount], drawn clockwise
-// from twelve o'clock in the order given. Each cell takes the colour of the
-// slice at its middle; at the rim a half block keeps the outline round.
+// from twelve o'clock in the order given. Each cell is four quarters, drawn
+// with a quadrant block in one slice's colour on another's (or on nothing,
+// at the rim), so the outline and the cuts are twice as fine as the cells.
+const QUADS = [' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█']
 export function pie(T, slices, rows) {
   const total = slices.reduce((a, [, v]) => a + v, 0)
   if (!(total > 0) || rows < 3) return []
@@ -1137,16 +1138,23 @@ export function pie(T, slices, rows) {
   for (let row = 0; row < rows; row++) {
     const segs = []
     for (let col = 0; col < rows * 2; col++) {
-      const x = (col + 0.5) / 2
-      const top = at(x, row + 0.25)
-      const low = at(x, row + 0.75)
-      const ch = top && low ? '█' : top ? '▀' : low ? '▄' : ' '
-      const c = top && low ? at(x, row + 0.5) || top : top || low || undefined
+      // Top left, top right, bottom left, bottom right.
+      const q = [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]].map(([qx, qy]) => at((col + qx) / 2, row + qy))
+      const count = {}
+      for (const c of q) if (c) count[c] = (count[c] || 0) + 1
+      const ranked = Object.keys(count).sort((x, y) => count[y] - count[x])
+      const fg = ranked[0]
+      // At the rim the other colour is the terminal's own; inside, the
+      // second slice's. A third slice in one cell goes with the second.
+      const bg = q.includes(null) ? undefined : ranked[1]
+      let bits = 0
+      q.forEach((c, i) => { if (c && (c === fg || bg === undefined)) bits |= 1 << i })
+      const key = (fg || '') + '/' + (bg || '')
       const last = segs[segs.length - 1]
-      if (last && last.c === c) last.text += ch
-      else segs.push({ c, text: ch })
+      if (last && last.key === key) last.text += QUADS[bits]
+      else segs.push({ key, fg, bg, text: QUADS[bits] })
     }
-    out.push(T(segs.map((g) => T(g.text, { color: g.c }))))
+    out.push(T(segs.map((g) => T(g.text, g.bg ? { color: g.fg, backgroundColor: g.bg } : { color: g.fg }))))
   }
   return out
 }

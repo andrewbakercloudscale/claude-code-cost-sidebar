@@ -94,7 +94,7 @@ Nothing compacts for you, so the bar is a traffic light on the transcript's own 
 
 <img src="docs/card-turns.png" alt="The Turns card: the per-turn table with a pauseless compaction's rows" width="460">
 
-The last 12 turns of this session, newest first. Beside the heading: `Avg API: $0.10` is this session's average cost per turn (one turn is one API reply: the session's cost over its turns), and `All: $4.10/hr` is the burn rate of the current 5h block across every session, not just this one.
+The last 12 turns of this session, newest first. Beside the heading, both across every session: `Avg API: $0.12` is today's average cost per turn (one turn is one API reply: today's turns and what they cost, read from today's transcripts), and `All: $4.10/hr` is the burn rate of the current 5h block.
 
 | Column | What it is |
 |---|---|
