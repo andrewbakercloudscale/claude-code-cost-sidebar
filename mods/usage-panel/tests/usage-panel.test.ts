@@ -288,8 +288,10 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(at('Free 930k')).toBeGreaterThan(at('System prompt 6k'))
   // The bar is the model's whole window; where Burst compacts is a line on
   // it, named underneath.
-  // One whole red cell, so the bar is not cut into bands.
-  expect(await ui.find({ type: 'Text', text: '█', color: 'red' })).toBeDefined()
+  // A thin red line and an arrow at it, on the bar's own colour, so the bar
+  // is not cut into bands.
+  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["▏"]')
+  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["◀"]')
   expect(drawn).toContain('"Burst compacts at 300k"')
   expect(drawn).not.toContain('warns at')
   // A part with nothing in it takes no room in the legend.
@@ -345,7 +347,7 @@ test('sections can be hidden, shown and moved, and the layout is kept', async ($
 test('a stored layout is made whole: unknown names go, new sections come back', () => {
   expect(layoutOf({ order: ['days', 'gone', 'session'], hidden: ['gone', 'turns'] })).toEqual({
     // A returning section goes back beside its default neighbour.
-    order: ['days', 'projects', 'session', 'turns', 'mac', 'plan', 'today', 'sessions'],
+    order: ['days', 'projects', 'session', 'turns', 'mac', 'plan', 'savings', 'today', 'sessions'],
     hidden: ['turns'],
   })
   expect(relayout(null, 'hide', 'nope')).toContain('Sections: session')
@@ -437,6 +439,47 @@ test('Plan Utilisation draws each limit with Claude Burst, and says where they c
   expect(await hidden.find({ type: 'Text', text: 'Plan Utilisation' })).toBeUndefined()
 })
 
+test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, and this session\'s share', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const stats = {
+    compactions: 45, saved_usd: 298.47, summary_usd: 12.59, rewrite_usd: 9.83, net_usd: 276.05,
+    tokens_not_resent: 1_492_358_786, largest_before: 945_748, largest_after: 60_359,
+    sessions: [{ session: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c', net_usd: 3.19, compactions: 2 }, { session: 'other', net_usd: 9, compactions: 1 }],
+    daily: [{ date: '2026-10-03', net_usd: 92.7, compactions: 11 }, { date: '2026-10-04', net_usd: 46.6, compactions: 6 }, { date: '2026-10-05', net_usd: 26.7, compactions: 6 }],
+  }
+  const state = { context: { window_days: 7, compaction: { warn_at_percent: 80 }, compaction_stats: stats }, today: { SecondaryRequests: 0 } }
+  dashboard(on, { state })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(await ui.find({ type: 'Text', text: 'Pauseless Compaction' })).toBeDefined()
+  expect(drawn).toContain('"  last 7 days"')
+  expect(drawn).toContain('{"bold":true,"color":"green"},"children":["$276"]')
+  expect(drawn).toContain('"  45 compactions"')
+  expect(drawn).toContain('"  $298.47"')
+  expect(drawn).toContain('"  -$12.59"')
+  expect(drawn).toContain('"   -$9.83"')
+  expect(drawn).toContain('"1.49B tokens not re-sent, largest 946k → 60k"')
+  // This session's own share, and no other's.
+  expect(drawn).toContain('"$3.19 saved"')
+  expect(drawn).toContain('", 2 compactions"')
+  // Under Plan Utilisation, above Today; and it can be hidden like the rest.
+  expect(drawn.indexOf('"Pauseless Compaction"')).toBeGreaterThan(drawn.indexOf('"Plan Utilisation"'))
+  expect(drawn.indexOf('"Pauseless Compaction"')).toBeLessThan(drawn.indexOf('"Today"'))
+  await ui.unmount()
+  await $.command.run({ command: 'usage-panel', args: 'hide savings' })
+  const hidden = await $.ui.mount(PANE)
+  expect(await hidden.find({ type: 'Text', text: 'Pauseless Compaction' })).toBeUndefined()
+})
+
+test('without Burst, or before Burst has compacted anything, there is no Pauseless Compaction card', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  dashboard(on, { state: { context: { compaction_stats: { compactions: 0, sessions: [], daily: [] } } } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: 'Pauseless Compaction' })).toBeUndefined()
+})
+
 test('a reading another session took is shown until this one has its own', async ($, on) => {
   // Burst lists its last 20 replies of any kind: a model reply is soon gone.
   const saved: Record<string, unknown> = { limits: [{ key: '5h', util: 0.3, reset: NOW + 6060 }] }
@@ -493,7 +536,7 @@ test('a plan limit that is close is toasted, once at 80% and once at 95%', async
   expect(limit().length).toBe(2)
 })
 
-test('insights from Claude Burst: the limit at this pace, compaction savings, what fills the context, the secondary', () => {
+test('insights from Claude Burst: the limit at this pace, what fills the context, the secondary', () => {
   const d = doc({ burst: BURST })
   // 60% of the 5-hour limit with 3h20m still to run: used up well before it resets.
   const limits = [{ key: '5h', util: 0.6, reset: NOW + 12000 }, { key: '7d', util: 0.35, reset: NOW + 3 * 86400 }]
@@ -503,15 +546,12 @@ test('insights from Claude Burst: the limit at this pace, compaction savings, wh
   const text = (scope: string) => tips.filter((t) => t.scope === scope).map((t) => t.text)
   expect(text('plan').length).toBe(1)
   expect(text('plan')[0]).toMatch(/^At this pace the 5h limit is reached \d\d:\d\d \(1h07m\), 2h13m before it resets\.$/)
-  expect(text('burst')).toEqual(['Compaction has saved $3.19 net this session (2 compactions).', 'Tool results are 65% of the context sent.'])
+  expect(text('burst')).toEqual(['Tool results are 65% of the context sent.'])
   expect(text('today').some((t) => t === '4 requests went to the secondary today (together): $0.37 on top of the plan.')).toBe(true)
   // A limit that is gone says so; one barely started says nothing.
   const gone = insights(d, NOW, [{ key: '7d', util: 1, reset: NOW + 86400 }], null, null).filter((t) => t.scope === 'plan')
   expect(gone[0].text).toMatch(/^The weekly limit is used up: resets /)
   expect(insights(d, NOW, [{ key: '5h', util: 0.04, reset: NOW + 17000 }], null, null).filter((t) => t.scope === 'plan')).toEqual([])
-  // Compaction that has not paid for itself yet is said as plainly.
-  const cost = insights(d, NOW, null, { saved: { net: -0.4, n: 1 }, secondary: null }, null).filter((t) => t.scope === 'burst')
-  expect(cost[0].text).toBe('Compaction has cost $0.40 more than it has saved so far (1 compaction).')
 })
 
 test('a turn made dear by a pause that let the cache go is named as that', () => {
