@@ -346,13 +346,14 @@ test('over the limit the bar is red, a compaction under way is named, and a sile
   expect(await ui.find({ type: 'Text', text: '310k/1M 31%', color: 'red' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '⟳ summarising' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Free/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^Uncompacted Size/ })).toBeUndefined()
+  // Not compacted yet: Claude Code holds what Burst sends, and the line says so.
+  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 310k', color: 'ansi256(208)' })).toBeDefined()
   await ui.unmount()
   // Once it is done there is no line left saying so for the rest of the session.
   answer = mod({ route: 'SECONDARY', session: { session: 'S', context: 64_000, state: 'compacted', compact_at: 300_000 } })
   await clock.advance(5000)
   ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: /compacted/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /(^|[^n])compacted/ })).toBeUndefined()
   await ui.unmount()
   answer = null
   await clock.advance(5000)
