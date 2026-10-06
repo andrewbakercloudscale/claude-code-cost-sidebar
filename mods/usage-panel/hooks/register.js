@@ -57,6 +57,10 @@ let data = null // the panel's last mod/<sid>.json
 let raw = ''
 let feedError = ''
 let pinned = true
+// The sidebar has been open in this session: where it is then closed, a
+// button above the prompt brings it back. A session that never had it (the
+// pin is off) is left without one.
+let wanted = false
 let layout = null // { order, hidden } as the person left it
 let burst = null // { down, mod }: Burst's /api/mod answer; null without Burst
 let burstRaw = ''
@@ -135,6 +139,7 @@ export function register(on) {
       $.ui.log('could not add /' + SHOW_COMMAND + ' and /' + HIDE_COMMAND + ': ' + err)
     }
     if (pinned) {
+      wanted = true
       try {
         await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS })
       } catch (err) {
@@ -144,15 +149,35 @@ export function register(on) {
     return next(e)
   })
 
-  // Beside the session, like the one a new session opens: no focus taken.
+  // Closed by the person's own close mark or key too: the button above the
+  // prompt is drawn from whether the sidebar is up.
+  // The close itself is never held up by it.
+  on('ui.close', ($, e, next) => {
+    const out = next(e)
+    if (e && e.id === PANE) Promise.resolve(out).then(() => $.ui.invalidate('ui.render')).catch(() => {})
+    return out
+  })
+
+  // While the sidebar is closed, or waits undrawn on a terminal too narrow
+  // for one nobody asked for: one button, under whatever else is there.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const theirs = await next(e)
+    if (!wanted || (e.props && e.props.hasSurvey)) return theirs
+    let up = false
+    try { up = (await $.ui.panes()).some((x) => x.id === PANE && x.isPlaced) } catch (err) { return theirs }
+    if (up) return theirs
+    const { Box, Button } = $.ui.resolve(e)
+    const ours = Box({ flexDirection: 'row', children: [Button({ key: 'usage-show', label: 'Show usage sidebar', onPress: () => showPane($) })] })
+    return theirs ? Box({ flexDirection: 'column', children: [theirs, ours] }) : ours
+  })
+
   on('command.run', { command: SHOW_COMMAND }, async ($) => {
-    try { await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS }) } catch (err) { $.ui.toast('could not open the usage sidebar') }
+    await showPane($)
     return {}
   })
 
-  // This session only: /usage-panel unpin stops it opening in new ones.
   on('command.run', { command: HIDE_COMMAND }, async ($) => {
-    try { await $.ui.close({ id: PANE }) } catch (err) { $.ui.log('could not close the usage sidebar: ' + err) }
+    await hidePane($)
     return {}
   })
 
@@ -162,7 +187,7 @@ export function register(on) {
       pinned = arg === 'pin'
       try { await $.store.set(PIN_KEY, pinned) } catch (err) { $.ui.log('could not save the pin: ' + err) }
       $.ui.toast(pinned ? 'Usage panel opens in every new session' : 'Usage panel opens only with /' + COMMAND)
-      if (pinned) await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS })
+      if (pinned) await showPane($)
       return {}
     }
     const [verb, name] = arg.split(/\s+/)
@@ -182,7 +207,9 @@ export function register(on) {
       $.ui.toast(lay.order.map((x) => (lay.hidden.includes(x) ? '(' + x + ')' : x)).join(' · '))
       return {}
     }
+    wanted = true
     await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS, focus: true, closeOnEscape: true })
+    $.ui.invalidate('ui.render')
     return {}
   })
 
@@ -212,8 +239,26 @@ export function register(on) {
       }))
     }
     const rows = panel(Box, Text, data, width, now, feedError, layout, extras, burst, limits, extra)
-    return Box({ flexDirection: 'column', children: rows })
+    // At the top right, where a close mark is looked for. The button above
+    // the prompt brings the sidebar back.
+    const top = Box({ flexDirection: 'row', justifyContent: 'flex-end', children: [Button({ key: 'usage-hide', label: 'Hide', role: 'dismiss', onPress: () => hidePane($) })] })
+    return Box({ flexDirection: 'column', children: [top, ...rows] })
   })
+}
+
+// Opens the sidebar beside the session, where a new session opens it: no
+// focus taken. The button above the prompt goes as it does.
+async function showPane($) {
+  wanted = true
+  try { await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS }) } catch (err) { $.ui.toast('could not open the usage sidebar') }
+  $.ui.invalidate('ui.render')
+}
+
+// Closes it, for this session only: /usage-panel unpin stops it opening in
+// new ones.
+async function hidePane($) {
+  try { await $.ui.close({ id: PANE }) } catch (err) { $.ui.log('could not close the usage sidebar: ' + err) }
+  $.ui.invalidate('ui.render')
 }
 
 // Starts the headless panel when it is not running, and says this session

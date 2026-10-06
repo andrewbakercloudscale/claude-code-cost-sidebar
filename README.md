@@ -64,6 +64,8 @@ Each section is its own card, most specific first: this session, its turns, this
 | `/usage-panel sections` / `reset` | Show the current order (hidden ones in brackets), or go back to the default. |
 | `v` (in the sidebar) | With Claude Burst installed: open its dashboard, or its support console when the dashboard is down. The same button is in the This Mac card to click. |
 
+The sidebar has a **Hide** button at its top right, which does what `/hide-cost-panel` does. While it is closed, a **Show usage sidebar** button sits in the row above the prompt and opens it again; that row is there only while the sidebar is closed, and not in a session that never had one (the pin is off and nothing opened it).
+
 The numbers are the panel's own, not a second implementation: for each session the mod starts `ccusage-panel.sh` without a terminal (`PANEL_HEADLESS=1`, via `~/.local/bin/ccusage-panel-mod-start`), and it runs its usual two refresh tiers and writes what it would have drawn, as numbers, to `~/.cache/ccusage-panel-cache/mod/<session id>.json`. The mod reads that file every 5 seconds. When the session ends the mod stops saying it is there, and the headless panel exits by itself 90 seconds later. The floating alerts over Ghostty still come from it.
 
 While the mod is installed the Ghostty split below stands aside. Set `CLAUDE_PANEL_SPLIT=true` in the options file to have the split as well, or `CLAUDE_PANEL_MOD=no bash claude-panel-setup.sh` to install without the mod.
