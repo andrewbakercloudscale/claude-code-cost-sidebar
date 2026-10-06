@@ -1,6 +1,6 @@
 {
   "name": "usage-panel",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "The usage panel in a sidebar inside Claude Code: this session, today, the last 30 days, projects, top sessions, the day's costliest turns with why each was dear, what pauses cost in cache written again, and insights, with graphs, and, where Claude Burst is installed, the context it really sends by part and Plan Utilisation: how much of the plan's 5-hour and weekly limits is used and which projects used it, with a warning as one gets close. /usage-panel opens it, /usage-panel pin and /usage-panel unpin choose whether every session opens it",
   "author": { "name": "Andrew Baker" }
 }

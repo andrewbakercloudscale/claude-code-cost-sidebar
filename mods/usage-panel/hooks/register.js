@@ -726,16 +726,15 @@ function learnedLimit(s) {
 }
 
 // "Auto Compact at 300k", the fixed limit and a learned one alike: a
-// learned one is told apart by its colour and the line under it.
+// learned one is told apart by its colour and the word beside it.
 function limitLabel(s) {
   return 'Auto Compact at ' + k(compactAt(s))
 }
 
-// What stands beside the limit: where it comes from when it is learned.
-// '' for the fixed one.
+// What stands beside the limit when it is learned: Burst's Intelligent
+// Compaction Mode chose it. '' for the fixed one.
 function limitNote(s) {
-  const buffer = ((extra && extra.auto) || {}).buffer || (s && s.buffer_percent) || 0
-  return learnedLimit(s) ? 'learned for this repo' + (buffer > 0 ? ', ' + buffer + '% buffer' : '') : ''
+  return learnedLimit(s) ? '(Intelligent)' : ''
 }
 
 // The context Burst sends for this session as a stacked bar against the
@@ -803,7 +802,7 @@ function sentBar(Box, T, s, W, win, warnPct) {
   }
   if (whole) {
     out.push(Box({
-      flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [
+      flexDirection: 'row', flexWrap: 'wrap', columnGap: 1, children: [
         T([T('▕◀ ', { color: 'red' }), T(limitLabel(s), learnedLimit(s) ? { color: 'cyan' } : { dimColor: true })]),
         ...(limitNote(s) ? [T(limitNote(s), { dimColor: true })] : []),
       ],
