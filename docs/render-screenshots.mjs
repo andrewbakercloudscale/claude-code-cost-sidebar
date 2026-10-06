@@ -97,7 +97,7 @@ function doc(turns, marks, over = {}) {
       cost, tier: 'yellow', rate: 3.1, rate_tier: 'yellow', started: NOW - 4 * 3600, avg_session: 6.1,
       ctx: last[1], win: 1000000, ctx_tier: 'green', compacting: false, restart_tokens: 400000,
     },
-    today: { cost: 31.4, tier: 'green', pred: 44.9, pred_tier: 'green', unpriced: '', typical_so_far: 27, turns: 262, turns_usd: 31.4 },
+    today: { cost: 31.4, tier: 'green', pred: 44.9, pred_tier: 'green', unpriced: '', typical_so_far: 27, turns: 262, turns_usd: 31.4, cache_loss: 1.84, cache_loss_turns: 6, cache_loss_30: 12.4, cache_loss_days: 9 },
     block: { active: true, cost: 12.8, cph: 4.1, rem: 118, label: 'Elevated', tier: 'yellow' },
     days30: { spend: 806, prev: 733, tier: 'green', avg: 27.8, prev_avg: 24.4, avg_tier: 'green' },
     week: 118, month: 132,
@@ -114,11 +114,11 @@ function doc(turns, marks, over = {}) {
       { sid: 'aaaaaaaa-0000-0000-0000-00000000c7e2', cost: 4.31, tokens: 8e6, last: new Date((NOW - 219 * 60) * 1000).toISOString() },
     ],
     top_turns: [
-      { sid: 'aaaaaaaa-0000-0000-0000-000000091b04', folder: 'api-server', turn: 61, cost: 1.92, ctx: 268000, at: NOW - 171 * 60 },
-      { sid: SID, folder: 'my-app', turn: 118, cost: 0.84, ctx: 221000, at: NOW - 96 * 60 },
-      { sid: 'aaaaaaaa-0000-0000-0000-00000000c7e2', folder: 'infra-terraform', turn: 34, cost: 0.71, ctx: 143000, at: NOW - 247 * 60 },
-      { sid: SID, folder: 'my-app', turn: 143, cost: 0.38, ctx: 64000, at: NOW - 21 * 60 },
-      { sid: 'aaaaaaaa-0000-0000-0000-000000091b04', folder: 'api-server', turn: 77, cost: 0.36, ctx: 291000, at: NOW - 104 * 60 },
+      { sid: 'aaaaaaaa-0000-0000-0000-000000091b04', folder: 'api-server', turn: 61, cost: 1.92, ctx: 268000, at: NOW - 171 * 60, cache: 1, delta: 265000, gap: 1260, prev: 266000, out: 700 },
+      { sid: SID, folder: 'my-app', turn: 118, cost: 0.84, ctx: 221000, at: NOW - 96 * 60, cache: 61, delta: 86000, gap: 40, prev: 135000, out: 900 },
+      { sid: 'aaaaaaaa-0000-0000-0000-00000000c7e2', folder: 'infra-terraform', turn: 34, cost: 0.71, ctx: 143000, at: NOW - 247 * 60, cache: 97, delta: 3000, gap: 25, prev: 140000, out: 14000 },
+      { sid: SID, folder: 'my-app', turn: 143, cost: 0.38, ctx: 64000, at: NOW - 21 * 60, cache: 4, delta: 61000, gap: 30, prev: 299000, out: 400 },
+      { sid: 'aaaaaaaa-0000-0000-0000-000000091b04', folder: 'api-server', turn: 77, cost: 0.36, ctx: 291000, at: NOW - 104 * 60, cache: 99, delta: 2000, gap: 20, prev: 289000, out: 500 },
     ],
     turns: { turns, markers: [], avg_delta: 3000 },
     burst: { dashboard: 'http://127.0.0.1:7788/', console: 'http://127.0.0.1:7789/' },
@@ -153,8 +153,16 @@ function burst(context, state, raw, problems = []) {
 // The plan's limits as Anthropic's replies report them (Burst keeps the
 // latest), and what Burst's compaction has saved this session.
 const LIMITS = [{ key: '5h', util: 0.82, reset: NOW + 118 * 60 }, { key: '7d', util: 0.58, reset: NOW + 2 * 86400 + 11 * 3600 + 41 * 60 }]
+// And what used each limit, by project, with the last 7 days: led by a
+// project other than the one that leads the 30.
+const BY = (rows) => ({ rows: rows.map(([name, usd]) => ({ name, usd })), total: rows.reduce((a, r) => a + r[1], 0) })
 const SAVED = {
   saved: { net: 2.84, n: 1 }, secondary: null, warn: 80,
+  by: {
+    '5h': BY([['my-app', 9.1], ['api-server', 2.9], ['infra-terraform', 0.8]]),
+    '7d': BY([['api-server', 54.2], ['my-app', 41.6], ['infra-terraform', 12.3], ['docs-site', 6.1], ['scratch', 3.8]]),
+  },
+  week: { ...BY([['api-server', 54.2], ['my-app', 41.6], ['infra-terraform', 12.3], ['docs-site', 6.1], ['scratch', 3.8]]), repos: ['my-app', 'api-server', 'infra-terraform', 'docs-site', 'scratch'] },
   comp: {
     days: 7, n: 9, saved: 31.62, summary: 3.47, rewrite: 2.9, net: 25.25, tokens: 158400000, before: 300400, after: 61200,
     daily: [['2026-09-29', 2.1], ['2026-09-30', 4.6], ['2026-10-01', 3.2], ['2026-10-02', 0.4], ['2026-10-03', 6.9], ['2026-10-04', 5.21], ['2026-10-05', 2.84]].map(([d, net]) => ({ d, net, n: 1 })),
