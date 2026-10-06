@@ -170,6 +170,14 @@ export function register(on) {
     return out
   })
 
+  // The way back, on the line under the prompt: the band above it can be
+  // folded away by the person, and the button below with it.
+  on('ui.render', { component: 'PromptHint' }, ($, e, next) => {
+    if (!wanted || up) return next(e)
+    const before = e.props && e.props.tail ? e.props.tail + ' · ' : ''
+    return next({ ...e, props: { ...e.props, tail: before + '/' + SHOW_COMMAND + ' for the usage sidebar' } })
+  })
+
   // While the sidebar is closed, or waits undrawn on a terminal too narrow
   // for one nobody asked for: one button, under whatever else is there.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
