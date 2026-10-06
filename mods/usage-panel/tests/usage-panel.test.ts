@@ -548,6 +548,26 @@ test('the compaction limit is the one GetAutoCompactionThreshold gives for this 
   expect(await coloured(ui, '! Close to the limit: Auto Compact at 155k.', 'yellow')).toBe(true)
 })
 
+test('a learned limit that is the fixed one is drawn as the fixed one', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const urls: string[] = []
+  on('http.fetch', ($, e) => {
+    urls.push(e.url)
+    const body = e.url.includes('/api/GetAutoCompactionThreshold')
+      ? { folder: '/work', repo: 'work', threshold: 300_000, source: 'learned', intelligent: true, enabled: true, fixed: 300_000, floor: 100_000, target: 300_000, delay_minutes: 30, buffer_percent: 20, failures: { unpaid: 2, attempts: 28 } }
+      : e.url.includes('/api/state') || e.url.includes('/api/responses') || e.url.includes('/api/usage') ? {}
+        : mod({ session: { ...mod().session, context: 110_000, state: 'warning' } })
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
+  })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  // Intelligent Compaction Mode went back to the fixed Compact at.
+  expect(drawn).toContain('"Auto Compact at 300k"')
+  expect(await coloured(ui, 'Auto Compact at 300k', 'cyan')).toBe(false)
+  expect(drawn).not.toContain('(Intelligent)')
+})
+
 test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, and this session\'s share', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   const stats = {
