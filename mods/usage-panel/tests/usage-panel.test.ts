@@ -59,6 +59,10 @@ async function coloured(ui, text: string | RegExp, color: string) {
   return (await ui.findAll({ type: 'Text', text })).some((n) => n.props && n.props.color === color)
 }
 
+// What ui.open answers: false is a sidebar that waits undrawn, on a terminal
+// too narrow for one nobody asked for.
+let seated = true
+
 // Burst's ~/.config/claude-burst/mod.json; null is no file, its defaults.
 let burstMod: object | null = null
 
@@ -71,7 +75,7 @@ function stubs(on, files: Array<object | null>, runs: string[][] = [], store: Re
   on('session.id', () => ({ value: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c' }))
   on('session.cwd', () => ({ value: '/work' }))
   on('command.register', () => ({ value: undefined }))
-  on('ui.open', ($, e) => { opened.push(e); return { value: { isPlaced: true } } })
+  on('ui.open', ($, e) => { opened.push(e); return { value: { isPlaced: seated } } })
   on('ui.toast', ($, e) => { toasts.push(JSON.stringify(e)); return { value: undefined } })
   on('store.get', ($, e) => (e.key in store ? { value: store[e.key] } : { value: undefined }))
   on('store.set', ($, e) => { store[e.key] = e.value; return { value: undefined } })
@@ -978,11 +982,9 @@ test('the sidebar has a Hide button, and while it is closed a button above the p
   const opened: object[] = []
   const closed: object[] = []
   stubs(on, [doc()], [], {}, opened)
-  let up = true
-  on('ui.close', ($, e) => { closed.push(e); up = false; return { value: {} } })
+  on('ui.close', ($, e) => { closed.push(e); return { value: {} } })
   // What the engine draws above the prompt beneath the mods: nothing.
   on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
-  on('ui.panes', () => ({ value: up ? [{ id: 'usage', title: 'Usage', isShown: true, isFocused: false, isPlaced: true }] : [] }))
   await start($)
   expect(opened.length).toBe(1)
   // Up: nothing above the prompt.
@@ -1007,17 +1009,22 @@ test('the sidebar has a Hide button, and while it is closed a button above the p
 test('the button above the prompt is there for a sidebar that waits undrawn, and not for a session that never had one', async ($, on) => {
   const store: Record<string, unknown> = { pinned: false }
   stubs(on, [doc()], [], store)
-  let panes: object[] = []
   on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
-  on('ui.panes', () => ({ value: panes }))
   await start($)
   // The pin is off and nothing opened it: no button.
   let band = await $.ui.mount(BAND)
   expect(await band.find({ key: 'usage-show' })).toBeUndefined()
   await band.unmount()
   // Opened, and waiting on a terminal too narrow for one nobody asked for.
+  seated = false
   await $.command.run({ command: 'show-cost-panel', args: '' })
-  panes = [{ id: 'usage', title: 'Usage', isShown: false, isFocused: false, isPlaced: false }]
+  seated = true
   band = await $.ui.mount(BAND)
   expect(await band.find({ key: 'usage-show' })).toBeDefined()
+  await band.unmount()
+  // The terminal is widened and the sidebar is drawn: the button goes.
+  const pane = await $.ui.mount(PANE)
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ key: 'usage-show' })).toBeUndefined()
+  await pane.unmount()
 })
