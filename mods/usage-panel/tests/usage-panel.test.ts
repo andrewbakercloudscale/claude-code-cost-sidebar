@@ -538,10 +538,11 @@ test('the compaction limit is the one GetAutoCompactionThreshold gives for this 
   const ui = await $.ui.mount(PANE)
   const drawn = JSON.stringify(await ui.drawn())
   // The gateway's answer for the folder, not the 300k the session's own figures carry.
-  // A learned limit reads as automatic, in its own colour, with where it
-  // comes from and how often a session may be compacted beside it.
+  // A learned limit reads as automatic, in its own colour, with
+  // (Intelligent) beside it.
   expect(await coloured(ui, 'Auto Compact at 155k', 'cyan')).toBe(true)
-  expect(drawn).toContain('"learned for this repo, 20% buffer"')
+  expect(drawn).toContain('"(Intelligent)"')
+  expect(drawn).not.toContain('learned for this repo')
   expect(drawn).not.toContain('max 1 per')
   expect(drawn).not.toContain('compacts at 300k')
   expect(await coloured(ui, '! Close to the limit: Auto Compact at 155k.', 'yellow')).toBe(true)
