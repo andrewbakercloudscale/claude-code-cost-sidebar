@@ -2101,8 +2101,15 @@ for line in lines:
         cost = float(sec_usd)
     else:
         cost = None
+    # What this turn's cache writes cost over reading the same tokens from
+    # cache: the price of a prompt whose cache had expired, which is what the
+    # mod's "cache lost" figures are made of. None where there is no price.
+    premium = None
+    if model in PRICES:
+        premium = (cw_1h * price_in * CACHE_WRITE_1H_MULT + cw_5m * price_in * CACHE_WRITE_5M_MULT
+                   - cc_tok * price_cr) / 1_000_000
 
-    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model, is_secondary, is_unpriced, sec_route, turn_ts))
+    turns.append((model_label(model), total_ctx, cc_tok, cache_pct, cost, model, is_secondary, is_unpriced, sec_route, turn_ts, out_tok, premium))
 
 total_n = len(turns)
 shown = turns[-max_rows:]
@@ -2132,13 +2139,15 @@ print(f"#META\t{sess_total}\t{turns[-1][1] if turns else 0}"
       f"\t{int(compaction_supersedes(COMPACTION_MARKERS, turns[-1][9] if turns else None))}")
 # The same turns as numbers, for the Claude Code mod's graphs: the newest 300,
 # each [turn number, context, context written (the delta), cache hit %, cost
-# or null, epoch or null, served by a secondary], and the compaction markers
+# or null, epoch or null, served by a secondary, output tokens, what the
+# cache writes cost over cache reads or null], and the compaction markers
 # as [epoch, kind, usd or null]. One line, stripped by the shell like #META.
 series_from = max(0, total_n - 300)
 print("#SERIES\t" + json.dumps({
     "turns": [[series_from + k + 1, t[1], t[2], round(t[3], 1),
                None if t[4] is None else round(t[4], 6),
-               None if t[9] is None else int(t[9]), bool(t[6])]
+               None if t[9] is None else int(t[9]), bool(t[6]), int(t[10]),
+               None if t[11] is None else round(t[11], 6)]
               for k, t in enumerate(turns[series_from:])],
     "markers": [[int(m[0]), m[1], m[2]] for m in COMPACTION_MARKERS],
     "avg_delta": round(avg_delta),
@@ -2186,7 +2195,7 @@ if shown:
 
     print_markers(len(shown))
     for i in reversed(range(len(shown))):
-        label, total_ctx, delta, cache_pct, cost, model, is_secondary, is_unpriced, route, _ = shown[i]
+        label, total_ctx, delta, cache_pct, cost, model, is_secondary, is_unpriced, route, _ = shown[i][:10]
         turn_no = start_idx + i
         # The Δ is normally what this turn added (its cache write). When the
         # context SHRANK, a compaction happened (Claude Code's or the
@@ -2324,14 +2333,33 @@ turn_table_series() { # $1 = transcript path
 # only: the split has no room for it. Turns served by a secondary are left
 # out, as they are from the session total. The series holds a session's
 # newest 300 turns, so a longer day in one session is read from there on.
+#
+# Each row carries what the mod needs to say why the turn was dear: its cache
+# hit, the context it wrote, its reply's size, and the turn before it in the
+# same session (how long before, and at what context).
+#
+# The same pass adds up what the day's pauses cost: a turn that came more
+# than five minutes after the one before it, with the context still there
+# and under half of it read from cache, wrote again what it would have read.
+# The loss is what those tokens cost to write over what they cost to read.
+# The day's figure is kept in CACHE_LOSS_FILE, one line a day for 30 days,
+# so the 30-day total costs no scan of old transcripts; it starts from the
+# day this was installed.
 TOP_TURNS_JSON="[]"
 TODAY_TURNS=""; TODAY_TURNS_USD=""
+CACHE_LOSS_USD=""; CACHE_LOSS_TURNS=""; CACHE_LOSS_30=""; CACHE_LOSS_DAYS=""
+CACHE_LOSS_FILE="${CACHE_LOSS_FILE:-$HOME/.cache/ccusage-panel-cache/cache-loss-days.tsv}"
+CACHE_LOSS_GAP=300
 TOP_TURNS_FILES="${TOP_TURNS_FILES:-60}"
 top_turns_refresh() {
-  local files f out series tmp picked sid path turn cost ctx at folder json="[]"
+  local files f out series tmp picked sid path turn cost ctx at cache delta gap prev reply folder json="[]"
   files=$(find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' \
     -newermt "$(date '+%Y-%m-%d 00:00:00')" 2>/dev/null)
-  if [ -z "$files" ]; then TOP_TURNS_JSON="[]"; TODAY_TURNS=""; TODAY_TURNS_USD=""; return 0; fi
+  if [ -z "$files" ]; then
+    TOP_TURNS_JSON="[]"; TODAY_TURNS=""; TODAY_TURNS_USD=""
+    CACHE_LOSS_USD=""; CACHE_LOSS_TURNS=""; CACHE_LOSS_30=""; CACHE_LOSS_DAYS=""
+    return 0
+  fi
   tmp=$(mktemp "${TMPDIR:-/tmp}/ccusage-top-turns.XXXXXX") || return 0
   while IFS= read -r f; do
     [ -f "$f" ] || continue
@@ -2341,11 +2369,12 @@ top_turns_refresh() {
       '#SERIES'*) printf '%s\t%s\n' "$f" "${series#*$'\t'}" >> "$tmp" ;;
     esac
   done < <(printf '%s\n' "$files" | tr '\n' '\0' | xargs -0 ls -t 2>/dev/null | head -n "$TOP_TURNS_FILES")
-  picked=$(python3 - "$tmp" <<'TOPTURNS_PYEOF' 2>/dev/null
+  picked=$(python3 - "$tmp" "$CACHE_LOSS_FILE" "$CACHE_LOSS_GAP" <<'TOPTURNS_PYEOF' 2>/dev/null
 import json, os, sys, time
 
 lt = time.localtime()
 midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+loss_file, loss_gap = sys.argv[2], float(sys.argv[3])
 rows = []
 for line in open(sys.argv[1]):
     path, _, raw = line.rstrip("\n").partition("\t")
@@ -2354,10 +2383,21 @@ for line in open(sys.argv[1]):
     except ValueError:
         continue
     sid = os.path.basename(path)[:-len(".jsonl")]
-    for t in turns:
+    for i, t in enumerate(turns):
         if len(t) < 7 or t[4] is None or t[5] is None or t[6] or t[5] < midnight:
             continue
-        rows.append((t[4], sid, path, t[0], t[1], t[5]))
+        # The turn before it in this session, when the series still has it.
+        p = turns[i - 1] if i > 0 and len(turns[i - 1]) >= 7 else None
+        gap = int(t[5] - p[5]) if p and p[5] is not None else None
+        prev = int(p[1]) if p else (0 if t[0] == 1 else None)
+        reply = int(t[7]) if len(t) > 7 and t[7] is not None else None
+        loss = 0.0
+        if (len(t) > 8 and t[8] and t[2] > 0 and gap is not None and gap > loss_gap
+                and t[3] < 50 and prev and t[1] >= prev * 0.8):
+            # Only what was there before the pause was lost: what the turn
+            # added it would have written anyway.
+            loss = t[8] * min(t[2], prev) / t[2]
+        rows.append((t[4], sid, path, t[0], t[1], t[5], t[3], t[2], gap, prev, reply, loss))
 # A resumed or forked session carries the turns of the one it came from. The
 # files arrive newest first, so the turn is kept under the session still
 # being written to and not listed twice.
@@ -2371,19 +2411,54 @@ rows = sorted(once, key=lambda r: -r[0])
 # First, how many turns today and what they cost together: the day's average
 # cost per API reply, from the same turns the list is picked from.
 print(f"#N\t{len(rows)}\t{sum(r[0] for r in rows):.6f}")
-for cost, sid, path, turn, ctx, at in rows[:5]:
-    print(f"{sid}\t{path}\t{turn}\t{cost:.6f}\t{int(ctx)}\t{int(at)}")
+# Then the day's cache loss, and with it the days kept on file. A day's
+# figure only grows: a session past its newest 300 turns drops the early
+# ones from the series, and what they lost was still lost.
+lost = [r[11] for r in rows if r[11] > 0]
+today = time.strftime("%Y-%m-%d", lt)
+days = {}
+try:
+    for line in open(loss_file):
+        f = line.split("\t")
+        if len(f) >= 3:
+            days[f[0]] = (int(f[1]), float(f[2]))
+except (OSError, ValueError):
+    pass
+had = days.get(today, (0, 0.0))
+days[today] = (len(lost), sum(lost)) if sum(lost) >= had[1] else had
+keep = sorted(days)[-30:]
+try:
+    os.makedirs(os.path.dirname(loss_file), exist_ok=True)
+    part = f"{loss_file}.{os.getpid()}.tmp"
+    with open(part, "w") as fh:
+        for d in keep:
+            fh.write(f"{d}\t{days[d][0]}\t{days[d][1]:.6f}\n")
+    os.replace(part, loss_file)
+except OSError:
+    pass
+print(f"#LOSS\t{days[today][0]}\t{days[today][1]:.6f}\t{sum(days[d][1] for d in keep):.6f}\t{len(keep)}")
+none = lambda v: "null" if v is None else v
+for cost, sid, path, turn, ctx, at, cache, delta, gap, prev, reply, loss in rows[:5]:
+    print(f"{sid}\t{path}\t{turn}\t{cost:.6f}\t{int(ctx)}\t{int(at)}"
+          f"\t{cache}\t{int(delta)}\t{none(gap)}\t{none(prev)}\t{none(reply)}")
 TOPTURNS_PYEOF
 )
   rm -f "$tmp"
   TODAY_TURNS=""; TODAY_TURNS_USD=""
-  while IFS=$'\t' read -r sid path turn cost ctx at; do
+  CACHE_LOSS_USD=""; CACHE_LOSS_TURNS=""; CACHE_LOSS_30=""; CACHE_LOSS_DAYS=""
+  while IFS=$'\t' read -r sid path turn cost ctx at cache delta gap prev reply; do
     [ -n "$sid" ] || continue
     if [ "$sid" = "#N" ]; then TODAY_TURNS="$path"; TODAY_TURNS_USD="$turn"; continue; fi
+    if [ "$sid" = "#LOSS" ]; then
+      CACHE_LOSS_TURNS="$path"; CACHE_LOSS_USD="$turn"; CACHE_LOSS_30="$cost"; CACHE_LOSS_DAYS="$ctx"
+      continue
+    fi
     folder=$(session_identity_cached "$path" 2>/dev/null | cut -f4)
     json=$(jq -c --arg sid "$sid" --arg folder "$folder" --argjson turn "$turn" --argjson cost "$cost" \
-      --argjson ctx "$ctx" --argjson at "$at" \
-      '. + [{sid: $sid, folder: $folder, turn: $turn, cost: $cost, ctx: $ctx, at: $at}]' <<<"$json" 2>/dev/null) || json="[]"
+      --argjson ctx "$ctx" --argjson at "$at" --argjson cache "$cache" --argjson delta "$delta" \
+      --argjson gap "$gap" --argjson prev "$prev" --argjson reply "$reply" \
+      '. + [{sid: $sid, folder: $folder, turn: $turn, cost: $cost, ctx: $ctx, at: $at,
+             cache: $cache, delta: $delta, gap: $gap, prev: $prev, out: $reply}]' <<<"$json" 2>/dev/null) || json="[]"
   done <<<"$picked"
   TOP_TURNS_JSON="${json:-[]}"
 }
@@ -4583,6 +4658,8 @@ mod_json_write() { # $1 = session id
   MJ_WEEK="${week_cost:-0}" MJ_MONTH="${month_cost:-0}" \
   MJ_TOP="${top_rows:-}" MJ_SERIES="$SESS_SERIES" MJ_TOP_TURNS="${TOP_TURNS_JSON:-[]}" \
   MJ_TODAY_TURNS="${TODAY_TURNS:-}" MJ_TODAY_TURNS_USD="${TODAY_TURNS_USD:-}" \
+  MJ_CACHE_LOSS="${CACHE_LOSS_USD:-}" MJ_CACHE_LOSS_TURNS="${CACHE_LOSS_TURNS:-}" \
+  MJ_CACHE_LOSS_30="${CACHE_LOSS_30:-}" MJ_CACHE_LOSS_DAYS="${CACHE_LOSS_DAYS:-}" \
   MJ_SUMMARY="${summary_block:-}" MJ_TABLE="$SESS_TABLE" \
   MJ_ERRORS="$(sort -u "$errs_file" 2>/dev/null | head -5)" \
   MJ_THRESHOLDS="$CTX_YELLOW $CTX_RED $CTX_PURPLE $BURN_YELLOW $BURN_RED $TIER_YELLOW_MULT $TIER_RED_MULT" \
@@ -4713,6 +4790,10 @@ doc = {
         "pred": num("MJ_PRED"), "pred_tier": text("MJ_PRED_TIER"),
         "unpriced": text("MJ_TODAY_UNPRICED").strip(), "typical_so_far": num("MJ_TYPICAL_SO_FAR"),
         "turns": int(num("MJ_TODAY_TURNS") or 0) or None, "turns_usd": num("MJ_TODAY_TURNS_USD"),
+        # What pauses cost: cache written again after it expired, today and
+        # over the days kept on file (30 at most).
+        "cache_loss": num("MJ_CACHE_LOSS"), "cache_loss_turns": int(num("MJ_CACHE_LOSS_TURNS") or 0),
+        "cache_loss_30": num("MJ_CACHE_LOSS_30"), "cache_loss_days": int(num("MJ_CACHE_LOSS_DAYS") or 0),
     },
     "block": {
         "active": text("MJ_BLOCK") == "1", "cost": num("MJ_BLK_COST"), "cph": num("MJ_BLK_CPH"),

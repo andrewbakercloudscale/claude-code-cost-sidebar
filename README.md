@@ -144,7 +144,7 @@ This card sits third so a problem is not under a screen of charts.
 
 ### Plan Utilisation
 
-<img src="docs/card-plan.png" alt="The Plan Utilisation card: the 5-hour limit at 82% in yellow, the weekly limit at 58%, the month's use at API rates beside the plan's price, and when the 5-hour limit will be reached at this pace" width="460">
+<img src="docs/card-plan.png" alt="The Plan Utilisation card: the 5-hour limit at 82% in yellow, the weekly limit at 58%, which projects used each limit, the month's use at API rates beside the plan's price, and when the 5-hour limit will be reached at this pace" width="460">
 
 How close you are to your plan's limits. Anthropic states the figures itself, in headers on every reply; Claude Burst keeps the latest and the sidebar reads them from its dashboard every 15 seconds. They are Anthropic's numbers, not an estimate from token counts.
 
@@ -154,7 +154,10 @@ How close you are to your plan's limits. Anthropic states the figures itself, in
 | `5h` bar, `82%  resets 16:17 (1h58m)` | The share of the 5-hour limit used, and when the window resets. Green, yellow from 80%, red from 95%. The tick on the bar is the 80% mark. |
 | `weekly` bar, `58%  resets Thu 02:00` | The same for the 7-day limit. Any other window Anthropic reports (a per-model weekly limit, for one) gets a row of its own. |
 | `$132 at API rates this month ($200 plan)` | What this month's use would have cost pay-as-you-go, beside the plan's flat price. Shown for Pro ($20), Max 5x ($100) and Max 20x ($200). |
+| `What used the weekly limit` | The limit's reading shared out by project: the three projects that spent most since the window opened, and the rest as `other`, each with its part of the limit in points (a project at `31%` of a limit that reads `58%` used a little over half of what is gone). This session's project is in cyan. One block for the 5-hour limit and one for the weekly. |
 | Lines starting `↗ !` | `↗`: at the pace of this window so far, the limit is reached before it resets, with when and by how much. `!`: a limit is used up, and when it comes back. |
+
+**What used a limit is an estimate.** Anthropic says how much of a limit is used, not what used it, and does not publish how it weighs tokens against a limit. The sidebar shares the reading out by each project's cost at API rates in Claude Burst's log over the same window, which is the nearest public measure. Read it as "which project", not as a figure to the point.
 
 **A warning before you hit a limit.** When a limit passes 80%, and again at 95%, the mod raises a toast in the session: `🟡 Plan limit: 81% of the 5h limit used, resets 16:17 (1h58m)`, with a yellow mark at 80% and a red one (`🔴`) at 95%. Once per level and window, in every open session, so it is not repeated each minute.
 
@@ -196,10 +199,11 @@ What Claude Burst's [pauseless compaction](#pauseless-compaction-with-claude-bur
 |---|---|
 | `$31.40` | Spent today across all sessions on this Mac. |
 | `→ $44.90 by end of day` | The forecast, from your own hour-by-hour pattern scaled by today's pace. It is not shown early in the day, before there is enough to go on. |
+| `$1.84 re-written after 6 pauses, $12.40 in 9 days` | What pauses cost. The prompt cache expires after five minutes idle, and the turn after a longer pause writes the context to the cache again at about 25 times the price of reading it. This is that difference, for today's turns in every session, and over the days the panel has on file (30 at most, counted from the day this was installed). Not shown until there is a loss on file. |
 | `By hour` | A typical day: your average spend in each hour over the last 30 days. Blue hours are gone, cyan is this hour, grey are still to come. |
 | `5h block  1h58m left` | The current 5-hour usage block and when it resets. The bar is how much of the block has passed. |
 | `$12.8  $4.10/hr elevated` | Spent in this block, and its burn rate across all sessions, with the panel's word for it. |
-| Lines starting `◔ ≋ ⇄` | Insights: a busy day (1.5× a typical day by this hour or more) or a quiet one (half or less), and a raised burn rate. With Claude Burst, `⇄` says how many requests went to the secondary provider today, which one, and what they cost on top of the plan. |
+| Lines starting `◔ ◴ ≋ ⇄` | Insights: a busy day (1.5× a typical day by this hour or more) or a quiet one (half or less), pauses that cost a tenth of the day or more (`◴`), and a raised burn rate. With Claude Burst, `⇄` says how many requests went to the secondary provider today, which one, and what they cost on top of the plan. |
 
 ### Sessions today
 
@@ -217,8 +221,20 @@ The five most expensive sessions today: the end of each session's id, its cost, 
 | `268k` | The context it sent. |
 | `11:28` | When. |
 | `api-server` | The folder that session runs in. |
+| `↳ cache lost after a 21m pause` | Why the turn was dear, on a line under it. |
 
-One turn is usually dear for one of three reasons: a large context written to the cache for the first time, a pause that let the cache expire, or a long reply. A session resumed from another repeats its turns in its own transcript; each is listed once. A session's newest 300 turns are read, and turns served by a secondary provider are left out, as they are from the session total.
+The reason is worked out from the turn and the one before it in its session:
+
+| Reason | What happened |
+|---|---|
+| `cache lost after a 21m pause` | The turn came more than five minutes after the one before it and wrote again context that was already there: the cache had expired. |
+| `cache missed: 197k written again` | The same with no pause: something early in the prompt changed (a model switch, an edited system prompt), so the cache did not match. |
+| `cache re-written after compaction` | The context shrank and the shorter prompt was written to the cache. Expected, once per compaction. |
+| `first turn: 38k written to cache` | A session's first turn has nothing to read from cache. |
+| `+86k context` | The turn added that much: a large file read or tool result. |
+| `14k reply` | A long reply. Output costs five times what input does. |
+
+No line means nothing stood out: the turn was dear because the whole context is large. A session resumed from another repeats its turns in its own transcript; each is listed once. A session's newest 300 turns are read, and turns served by a secondary provider are left out, as they are from the session total.
 
 ### Last 30 days
 
@@ -238,7 +254,10 @@ One turn is usually dear for one of three reasons: a large context written to th
 
 <img src="docs/card-projects.png" alt="The Projects card" width="460">
 
-Spend by project folder over 30 days, largest first, with this session's project in cyan. Under it, two general insights: the project taking 30% or more of the spend, and your usual busiest hour.
+Spend by project folder over 30 days, largest first, with this session's project in cyan. Under it, two general insights, each shown only when something has changed (a line that is always there is not read):
+
+- `▣ New top project: api-server is 46% of the last 7 days (my-app leads the 30).` The project that leads the last 7 days, with 30% of the spend or more, is not the one that leads the 30. Needs Claude Burst, whose log the 7 days are read from.
+- `◷ Unusual hour: 23:00 averages $0.40/hr, against $5.10 at 10:00.` This session is working at an hour that averages under a tenth of your busiest one.
 
 ## Pauseless compaction, with Claude Burst
 

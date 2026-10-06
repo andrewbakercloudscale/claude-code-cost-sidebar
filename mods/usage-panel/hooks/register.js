@@ -39,6 +39,7 @@ const CTX_RED = 0.7
 const LIMIT_WARN = 0.8 // a toast when a plan limit passes this, and again at
 const LIMIT_ALARM = 0.95
 const DAY_KEY = 'weekday' // the store's key for today's share of the weekly limit, shared by every session
+const PAUSE = 300 // seconds idle after which the prompt cache has expired
 const DAY_SHARES = 2 // a toast when one day uses this many days' worth of the weekly limit
 const PIN_KEY = 'pinned'
 const LAYOUT_KEY = 'layout'
@@ -357,7 +358,7 @@ async function readExtras($) {
   const before = JSON.stringify(extra)
   const now = Math.floor((await $.clock.now()) / 1000)
   const state = await get('/api/state')
-  const next = { saved: null, secondary: null, warn: 0, comp: null, auto: null, over: null }
+  const next = { saved: null, secondary: null, warn: 0, comp: null, auto: null, over: null, by: null, week: null }
   // Where Burst compacts sessions in this folder: one fixed size, the
   // person's own for the repository, or the one Intelligent Compaction Mode
   // has learned for it.
@@ -398,7 +399,27 @@ async function readExtras($) {
     const others = ((usage && usage.by_provider) || []).filter((x) => x && x.key !== 'anthropic' && x.requests > 0)
     if (others.length > 0) next.secondary = { requests: others.reduce((a, x) => a + x.requests, 0), usd: others.reduce((a, x) => a + (x.usd || 0), 0), names: others.map((x) => x.key) }
   }
-  extra = next.saved || next.secondary || next.warn || next.comp || next.auto || next.over ? next : null
+  // What used each of the plan's limits, by project: Anthropic's spend in
+  // Burst's log since the window opened. Only the plain windows (5h, 7d): a
+  // per-model one is a part of the weekly.
+  const iso = (sec) => new Date(sec * 1000).toISOString().slice(0, 19) + 'Z'
+  const byRepo = (u) => {
+    const rows = ((u && u.by_repo) || []).filter((x) => x && x.usd > 0).map((x) => ({ name: x.key || 'no folder', usd: x.usd })).sort((a, b) => b.usd - a.usd)
+    return rows.length > 0 ? { rows: rows.slice(0, 8), total: rows.reduce((a, x) => a + x.usd, 0) } : null
+  }
+  for (const l of limits || []) {
+    const len = windowSeconds(l.key)
+    if (!/^\d+[hd]$/.test(l.key) || !len || !(l.reset > now) || !(l.util > 0)) continue
+    const found = byRepo(await get('/api/usage?range=custom&limit=1&provider=anthropic&from=' + iso(l.reset - len) + '&to=' + iso(now)))
+    if (found) next.by = { ...(next.by || {}), [l.key]: found }
+  }
+  // And the last 7 days by project, to say when the project that leads the
+  // 30 days is no longer the one that leads the week. With the names Burst
+  // knows, so a project it names differently is not taken for a new one.
+  const week = await get('/api/usage?range=7d&limit=1&provider=anthropic')
+  const found = byRepo(week)
+  if (found) next.week = { ...found, repos: ((week.options && week.options.repos) || []).filter((x) => typeof x === 'string') }
+  extra = next.saved || next.secondary || next.warn || next.comp || next.auto || next.over || next.by || next.week ? next : null
   return JSON.stringify(extra) !== before
 }
 
@@ -533,7 +554,7 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
     },
     turns: () => turnsTable(T, d),
     plan: () => {
-      const body = planSection(Box, T, d, IW, now, limits)
+      const body = planSection(Box, T, d, IW, now, limits, extra)
       return body.length > 0 ? [...body, ...notes('plan')] : []
     },
     savings: () => [...savingsSection(Box, T, IW, extra), ...overflowSection(Box, T, IW, extra)],
@@ -851,7 +872,7 @@ function burstRows(Box, T, burst) {
 
 // ---- plan utilisation: the plan's limits, and what the month's use is worth
 
-function planSection(Box, T, d, W, now, limits) {
+function planSection(Box, T, d, W, now, limits, extra) {
   const plan = planOf(d.summary)
   const rows = (limits || []).filter((l) => l.reset > now)
   const hasBurst = !!(d.burst && d.burst.dashboard)
@@ -872,6 +893,7 @@ function planSection(Box, T, d, W, now, limits) {
       ],
     }))
   }
+  out.push(...limitShares(Box, T, d, W, rows, extra))
   if (rows.length === 0) {
     out.push(T(hasBurst ? 'No limit reading yet: it comes with the next reply.' : 'How much of the limits is used comes from Claude Burst, which reads it off Anthropic\'s replies.', { dimColor: true, wrap: 'wrap' }))
   }
@@ -881,6 +903,38 @@ function planSection(Box, T, d, W, now, limits) {
       T(money(d.month), { bold: true }),
       T(' at API rates this month (' + money(plan.price) + ' plan)', { dimColor: true }),
     ], { wrap: 'wrap' }))
+  }
+  return out
+}
+
+// What used each limit, by project: the limit's reading shared out by each
+// project's cost at API rates since the window opened. An estimate, and
+// said to be: Anthropic does not publish how it weighs tokens against a
+// limit. The three largest and the rest, this session's project in cyan.
+function limitShares(Box, T, d, W, rows, extra) {
+  const out = []
+  const here = (d.session && d.session.folder) || ''
+  for (const l of rows) {
+    const by = extra && extra.by && extra.by[l.key]
+    if (!by || !(by.total > 0)) continue
+    const top = by.rows.slice(0, 3)
+    const rest = by.total - top.reduce((a, x) => a + x.usd, 0)
+    const list = rest / by.total >= 0.005 ? [...top, { name: 'other', usd: rest, other: true }] : top
+    const nameW = Math.min(20, Math.max(...list.map((x) => x.name.length)))
+    const barW = Math.max(4, W - nameW - 6)
+    out.push(sub(T, 'What used the ' + limitName(l.key) + ' limit', 'est. by cost'))
+    for (const x of list) {
+      const pts = (x.usd / by.total) * l.util * 100
+      const n = Math.max(1, Math.round((x.usd / top[0].usd) * barW))
+      const mine = !x.other && x.name === here
+      out.push(Box({
+        flexDirection: 'row', columnGap: 1, children: [
+          T(pad(cut(x.name, nameW), nameW), { bold: mine, color: mine ? ACCENT : undefined, dimColor: !!x.other }),
+          T('█'.repeat(Math.min(n, barW)) + ' '.repeat(Math.max(0, barW - n)), { color: mine ? ACCENT : x.other ? 'gray' : 'blue' }),
+          T(lpad(pts < 1 ? '<1%' : Math.round(pts) + '%', 4)),
+        ],
+      }))
+    }
   }
   return out
 }
@@ -982,6 +1036,16 @@ function todaySection(Box, T, d, W, now) {
       t.pred != null ? T(money(t.pred, 2), { color: TIER[t.pred_tier] }) : '',
       t.pred != null ? T(' by end of day', { dimColor: true }) : '',
     ], { wrap: 'truncate-end' }))
+  }
+  // What pauses cost: turns that came after the cache had expired and wrote
+  // again what they would have read. The longer figure is the days on file.
+  if (t.cache_loss_30 >= 0.01) {
+    const n = t.cache_loss_turns || 0
+    out.push(T([
+      t.cache_loss >= 0.01 ? T(money(t.cache_loss, 2), { color: 'yellow' }) : T('Nothing', { color: 'green' }),
+      T(' re-written after ' + (t.cache_loss >= 0.01 ? n + (n === 1 ? ' pause' : ' pauses') : 'a pause today'), { dimColor: true }),
+      t.cache_loss_days > 1 ? T(', ' + money(t.cache_loss_30, 2) + ' in ' + t.cache_loss_days + ' days', { dimColor: true }) : '',
+    ], { wrap: 'wrap' }))
   }
   // A typical day by hour (30-day average), this hour highlighted.
   if (Array.isArray(d.hourly_avg) && d.hourly_avg.some((v) => v > 0)) {
@@ -1121,9 +1185,36 @@ function topSection(Box, T, d, W) {
           T(cut(r.folder || '', Math.max(4, W - 33)), { dimColor: true }),
         ],
       }))
+      const why = whyDear(r)
+      if (why) out.push(T('       ↳ ' + why, { dimColor: true, wrap: 'truncate-end' }))
     }
   }
   return out
+}
+
+// Why a turn was dear, in a few words, from the turn and the one before it
+// in its session: r is { ctx, delta (the context it wrote to the cache),
+// cache (hit %), out (the reply's tokens), gap (seconds since the turn
+// before), prev (that turn's context; 0 for a session's first turn) }.
+// '' when the figures are not there (a feed older than this) or nothing
+// stands out. What it wrote again, as against what it added, is what a lost
+// cache looks like: the context was there before and was paid for twice.
+export function whyDear(r) {
+  if (!r || r.cache == null || r.delta == null || !(r.ctx > 0)) return ''
+  const pause = (sec) => (sec < 3600 ? Math.round(sec / 60) + 'm' : hm(sec / 60))
+  if (r.prev === 0 && r.delta >= r.ctx * 0.3 && r.delta >= 5000) return 'first turn: ' + k(r.delta) + ' written to cache'
+  if (r.prev > 0) {
+    const again = r.delta - Math.max(0, r.ctx - r.prev)
+    if (again >= r.ctx * 0.3 && again >= 5000) {
+      if (r.ctx < r.prev * 0.6) return 'cache re-written after compaction'
+      if (r.gap > PAUSE) return 'cache lost after a ' + pause(r.gap) + ' pause'
+      return 'cache missed: ' + k(again) + ' written again'
+    }
+  }
+  // A reply's tokens cost four times what a cache write's do.
+  if (r.out >= 2000 && r.out * 4 >= r.delta) return k(r.out) + ' reply'
+  if (r.delta >= 10000) return '+' + k(r.delta) + ' context'
+  return ''
 }
 
 // ---- insights: a few plain sentences, only when there is something to say
@@ -1166,7 +1257,7 @@ export function insights(d, now, limits = null, extra = null, burst = null) {
     for (let i = recent.length - 1; i >= 1; i--) {
       const a = recent[i - 1]
       const t = recent[i]
-      if (!(a[5] && t[5] && t[5] - a[5] > 300 && t[3] < 50 && t[1] >= a[1] * 0.8 && t[4] != null)) continue
+      if (!(a[5] && t[5] && t[5] - a[5] > PAUSE && t[3] < 50 && t[1] >= a[1] * 0.8 && t[4] != null)) continue
       if (med > 0 && t[4] >= med * 2) {
         gapTurn = t[0]
         const pause = t[5] - a[5]
@@ -1191,7 +1282,11 @@ export function insights(d, now, limits = null, extra = null, burst = null) {
     for (let i = 1; i < turns.length; i++) if (turns[i][1] < turns[i - 1][1] * 0.6) compacted.add(turns[i][0])
     const worst = all.filter((x) => !compacted.has(x[0])).reduce((a, x) => (a == null || x[4] > a[4] ? x : a), null)
     if (worst && worst[0] !== gapTurn && med > 0 && worst[4] > med * 4 && worst[4] >= 0.05) {
-      out.push({ scope: 'session', tier: 'yellow', icon: '▲', text: 'Turn ' + worst[0] + ': ' + money(worst[4], 2) + ', ' + Math.round(worst[4] / med) + '× median, +' + k(worst[2]) + ' context.' })
+      // Why, when the feed carries the reply's size (it is as old as that
+      // otherwise, and what the turn wrote is all there is to say).
+      const before = turns[turns.indexOf(worst) - 1]
+      const why = worst.length > 7 ? whyDear({ ctx: worst[1], delta: worst[2], cache: worst[3], out: worst[7], gap: before && before[5] && worst[5] ? worst[5] - before[5] : null, prev: before ? before[1] : worst[0] === 1 ? 0 : null }) : ''
+      out.push({ scope: 'session', tier: 'yellow', icon: '▲', text: 'Turn ' + worst[0] + ': ' + money(worst[4], 2) + ', ' + Math.round(worst[4] / med) + '× median, ' + (why || '+' + k(worst[2]) + ' context') + '.' })
     }
   }
 
@@ -1230,20 +1325,38 @@ export function insights(d, now, limits = null, extra = null, burst = null) {
     else if (pace <= 0.5) out.push({ scope: 'today', tier: 'green', icon: '◔', text: 'Quiet: ' + Math.round(pace * 100) + '% of a typical day by this hour.' })
   }
 
+  // What the day's pauses cost, when it is a tenth of the day or more.
+  if (t.cache_loss >= 0.5 && t.cost > 0 && t.cache_loss >= t.cost * 0.1) {
+    out.push({ scope: 'today', tier: 'yellow', icon: '◴', text: 'Pauses cost ' + money(t.cache_loss, 2) + ' today, ' + Math.round((t.cache_loss * 100) / t.cost) + '% of the day: the cache expires after 5 min idle.' })
+  }
+
   if (b.active && (b.tier === 'red' || b.tier === 'yellow')) {
     out.push({ scope: 'today', tier: b.tier, icon: '≋', text: 'Burning ' + money(b.cph, 2) + '/hr (' + (b.label || '').toLowerCase() + '); block resets in ' + hm(b.rem) + '.' })
   }
 
+  // The two general notes are said only on a change: which project leads
+  // and which hour is busiest are the same every day, and a line that is
+  // always there is not read.
+  // A new top project: the one that leads the last 7 days (Burst's log) is
+  // not the one that leads the 30. Only when Burst knows the 30-day leader
+  // by the same name, so two spellings of one project are not a change.
   const ps = d.projects || []
-  const ptotal = ps.reduce((a, p) => a + p.cost, 0)
-  if (ps.length > 1 && ptotal > 0 && ps[0].cost / ptotal >= 0.3) {
-    out.push({ scope: 'general', tier: 'cyan', icon: '▣', text: ps[0].name + ': ' + Math.round((ps[0].cost * 100) / ptotal) + '% of project spend.' })
+  const wk = extra && extra.week
+  if (wk && wk.total > 0 && ps.length > 0 && wk.rows[0].name !== ps[0].name && wk.rows[0].usd / wk.total >= 0.3 && (wk.repos || []).includes(ps[0].name)) {
+    out.push({ scope: 'general', tier: 'cyan', icon: '▣', text: 'New top project: ' + wk.rows[0].name + ' is ' + Math.round((wk.rows[0].usd * 100) / wk.total) + '% of the last 7 days (' + ps[0].name + ' leads the 30).' })
   }
 
-  if (Array.isArray(d.hourly_avg)) {
+  // An unusual hour: this session is working (a turn in the last 15
+  // minutes) at an hour that averages under a tenth of the busiest one.
+  const last = turns.length > 0 ? turns[turns.length - 1][5] : 0
+  if (Array.isArray(d.hourly_avg) && d.hourly_avg.length === 24 && last && now - last < 900) {
+    const hour = new Date(now * 1000).getHours()
     let best = 0
     d.hourly_avg.forEach((v, h) => { if (v > d.hourly_avg[best]) best = h })
-    if (d.hourly_avg[best] > 0) out.push({ scope: 'general', tier: 'cyan', icon: '◷', text: 'Busiest hour: ' + String(best).padStart(2, '0') + ':00, ~' + money(d.hourly_avg[best]) + '/hr.' })
+    const h2 = (h) => String(h).padStart(2, '0') + ':00'
+    if (d.hourly_avg[best] > 0 && d.hourly_avg[hour] < d.hourly_avg[best] * 0.1) {
+      out.push({ scope: 'general', tier: 'cyan', icon: '◷', text: 'Unusual hour: ' + h2(hour) + ' averages ' + money(d.hourly_avg[hour], 2) + '/hr, against ' + money(d.hourly_avg[best]) + ' at ' + h2(best) + '.' })
+    }
   }
   // At most three per block, most urgent first, so each block's notes stay
   // a glance rather than a list.

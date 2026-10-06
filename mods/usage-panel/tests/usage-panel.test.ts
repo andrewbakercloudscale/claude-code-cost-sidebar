@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { axis, insights, k, layoutOf, limitsOf, modelName, money, pie, planOf, relayout, share } from '../hooks/register.js'
+import { axis, insights, k, layoutOf, limitsOf, modelName, money, pie, planOf, relayout, share, whyDear } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'usage-panel',
@@ -146,7 +146,8 @@ test('the sidebar draws the session, today, 30 days, projects, top sessions and 
   expect(await ui.find({ type: 'Text', text: '206k/1M 21%' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Last 30 days' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^\$5,363$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^wordpress-cyber-devtools/ })).toBeDefined()
+  // A project's row: a long name keeps its end.
+  expect(await ui.find({ type: 'Text', text: /^….*-cyber-devtools$/ })).toBeDefined()
   // Beside Turns: today's average cost per API reply, and the burn rate, both for all sessions.
   expect(JSON.stringify(await ui.drawn())).toContain('"  Avg API: $0.08  All: $7.28/hr"')
   // This session is marked among today's top sessions.
@@ -166,7 +167,6 @@ test('the sidebar draws the session, today, 30 days, projects, top sessions and 
   expect(at('"Sessions today"')).toBeGreaterThan(at('Quiet:'))
   expect(at('"Last 30 days"')).toBeGreaterThan(at('"Sessions today"'))
   expect(at('"Projects"')).toBeGreaterThan(at('"Last 30 days"'))
-  expect(at('Busiest hour')).toBeGreaterThan(at('"Projects"'))
   // This Mac is third, under the turn table and above the charts.
   expect(at('Proxy State')).toBeGreaterThan(at('1039 Opus 5.5'))
   expect(at('Proxy State')).toBeLessThan(at('"Today"'))
@@ -223,11 +223,12 @@ test('insights say what matters and nothing when there is nothing', () => {
   expect(tips.some((t) => t.startsWith('32× your average session'))).toBe(true)
   expect(tips.some((t) => t.startsWith('Quiet: 8%'))).toBe(true)
   expect(tips.some((t) => t.startsWith('Burning $7.28/hr (high)'))).toBe(true)
-  expect(tips.some((t) => t.startsWith('wordpress-cyber-devtools: 64%'))).toBe(true)
-  expect(tips.some((t) => t.startsWith('Busiest hour: 10:00'))).toBe(true)
+  // Which project leads and which hour is busiest are the same every day:
+  // neither is said until it changes.
+  expect(tips.some((t) => t.includes('of project spend') || t.startsWith('Busiest hour'))).toBe(false)
   // Each insight belongs to the block it is about.
   const scopes = insights(doc(), NOW).map((t) => t.scope)
-  expect(scopes).toEqual(['session', 'session', 'session', 'today', 'today', 'general', 'general'])
+  expect(scopes).toEqual(['session', 'session', 'session', 'today', 'today'])
   // Three at most per block, most urgent first.
   const crowded = doc({ session: { ...doc().session, ctx: 450_000, avg_session: 1 }, turns: { turns: turns(40, 100_000, 2_000).map((x, i) => (i === 39 ? [x[0], x[1], 30_000, 60, 2.5, x[5], false] : [x[0], x[1], x[2], 60, x[4], x[5], x[6]])), markers: [], avg_delta: 3000 } })
   const s = insights(crowded, NOW).filter((t) => t.scope === 'session')
@@ -469,12 +470,12 @@ function reply(five: number, week: number, time = '2026-10-05T14:00:00+02:00') {
   }
 }
 
-function dashboard(on, answers: { responses?: () => unknown, state?: unknown, usage?: unknown, session?: unknown }, urls: string[] = []) {
+function dashboard(on, answers: { responses?: () => unknown, state?: unknown, usage?: unknown | ((url: string) => unknown), session?: unknown }, urls: string[] = []) {
   on('http.fetch', ($, e) => {
     urls.push(e.url)
     const body = e.url.includes('/api/responses') ? (answers.responses ? answers.responses() : [])
       : e.url.includes('/api/state') ? (answers.state || {})
-        : e.url.includes('/api/usage') ? (answers.usage || {})
+        : e.url.includes('/api/usage') ? ((typeof answers.usage === 'function' ? answers.usage(e.url) : answers.usage) || {})
           : (answers.session || mod())
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } }
   })
@@ -794,6 +795,107 @@ test('the costliest turns today are listed under the top sessions, from any sess
   // A long folder keeps its end, as the project rows do.
   expect(drawn).toContain('"…s-cyber-devtools"')
   expect(drawn.indexOf('"#212 "')).toBeLessThan(drawn.indexOf('"#1031"'))
+  await ui.unmount()
+})
+
+test('a costly turn says why it was dear, from the turn and the one before it', async ($, on) => {
+  // Wrote again what was there before, after a pause: the cache had expired.
+  expect(whyDear({ ctx: 200_000, delta: 198_000, cache: 1, out: 300, gap: 1260, prev: 199_000 })).toBe('cache lost after a 21m pause')
+  expect(whyDear({ ctx: 200_000, delta: 198_000, cache: 1, out: 300, gap: 9000, prev: 199_000 })).toBe('cache lost after a 2h30m pause')
+  // The same with no pause is a miss, and after the context shrank, a compaction's rewrite.
+  expect(whyDear({ ctx: 200_000, delta: 198_000, cache: 1, out: 300, gap: 20, prev: 199_000 })).toBe('cache missed: 197k written again')
+  expect(whyDear({ ctx: 60_000, delta: 58_000, cache: 3, out: 300, gap: 20, prev: 300_000 })).toBe('cache re-written after compaction')
+  expect(whyDear({ ctx: 40_000, delta: 38_000, cache: 5, out: 300, gap: null, prev: 0 })).toBe('first turn: 38k written to cache')
+  // What it added is not what it lost: a large tool result, or a long reply.
+  expect(whyDear({ ctx: 290_000, delta: 86_000, cache: 70, out: 300, gap: 20, prev: 204_000 })).toBe('+86k context')
+  expect(whyDear({ ctx: 100_000, delta: 2_000, cache: 98, out: 14_000, gap: 20, prev: 98_000 })).toBe('14k reply')
+  // Nothing stands out, or a feed from before the figures were there: no tag.
+  expect(whyDear({ ctx: 100_000, delta: 2_000, cache: 98, out: 300, gap: 20, prev: 98_000 })).toBe('')
+  expect(whyDear({ ctx: 100_000 })).toBe('')
+
+  stubs(on, [doc({ top_turns: [
+    { sid: 'ffffffff-0000-1111-2222-333333312345', folder: 'tools', turn: 212, cost: 6.81, ctx: 849_740, at: NOW - 3600, cache: 2, delta: 830_000, gap: 2700, prev: 845_000, out: 900 },
+    { sid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c', folder: 'claude-burst', turn: 1031, cost: 2.1, ctx: 286_963, at: NOW - 600 },
+  ] })])
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('↳ cache lost after a 45m pause')
+  // One row has a reason and the other, from an older feed, has none.
+  expect(drawn.split('↳').length - 1).toBe(1)
+  await ui.unmount()
+  // The session's own dearest turn says why in its note.
+  const dear = turns(40).map((x, i) => (i === 30 ? [x[0], x[1], x[2], 98, 2.5, x[5], false, 60_000, 0.01] : [...x, 200, 0.01]))
+  expect(insights(doc({ turns: { turns: dear, markers: [], avg_delta: 3000 } }), NOW).map((t) => t.text)).toContain('Turn 1030: $2.50, 50× median, 60k reply.')
+})
+
+test('what the day\'s pauses cost is under Today, with the days on file, and is a note when it is a tenth of the day', async ($, on) => {
+  const day = { ...doc().today, cost: 20, cache_loss: 3.2, cache_loss_turns: 4, cache_loss_30: 41.5, cache_loss_days: 12 }
+  stubs(on, [doc({ today: day })])
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(await coloured(ui, /^\$3\.20$/, 'yellow')).toBe(true)
+  expect(drawn).toContain('" re-written after 4 pauses"')
+  expect(drawn).toContain('", $41.50 in 12 days"')
+  expect(drawn).toContain('Pauses cost $3.20 today, 16% of the day')
+  await ui.unmount()
+  // A small share of the day is a line, not a note; a first day has no total to add.
+  const small = insights(doc({ today: { ...day, cost: 80 } }), NOW).map((t) => t.text)
+  expect(small.some((t) => t.startsWith('Pauses cost'))).toBe(false)
+  // Nothing on file (a feed from before this): no line.
+  expect(drawn.indexOf('re-written after')).toBeGreaterThan(drawn.indexOf('"Today"'))
+})
+
+test('the general notes are said only on a change: a new top project, an unusual hour', () => {
+  const hour = new Date(NOW * 1000).getHours()
+  const peak = (hour + 12) % 24
+  const usual = Array.from({ length: 24 }, (_, h) => (h === peak ? 20 : 8))
+  const rare = Array.from({ length: 24 }, (_, h) => (h === peak ? 20 : h === hour ? 0.4 : 8))
+  const p2 = (h: number) => String(h).padStart(2, '0') + ':00'
+  const general = (d: unknown, extra: unknown = null) => insights(d as any, NOW, null, extra as any).filter((t) => t.scope === 'general').map((t) => t.text)
+  expect(general(doc({ hourly_avg: usual }))).toEqual([])
+  expect(general(doc({ hourly_avg: rare }))).toEqual(['Unusual hour: ' + p2(hour) + ' averages $0.40/hr, against $20.0 at ' + p2(peak) + '.'])
+  // Only while this session is working: its last turn an hour ago is not now.
+  const idle = turns(40).map((x) => [x[0], x[1], x[2], x[3], x[4], (x[5] as number) - 3600, x[6]])
+  expect(general(doc({ hourly_avg: rare, turns: { turns: idle, markers: [], avg_delta: 3000 } }))).toEqual([])
+
+  // The 30 days are led by wordpress-cyber-devtools; the last 7 by claude-burst.
+  const week = { rows: [{ name: 'claude-burst', usd: 60 }, { name: 'wordpress-cyber-devtools', usd: 30 }, { name: 'tools', usd: 10 }], total: 100, repos: ['claude-burst', 'wordpress-cyber-devtools', 'tools'] }
+  expect(general(doc({ hourly_avg: usual }), { week })).toEqual(['New top project: claude-burst is 60% of the last 7 days (wordpress-cyber-devtools leads the 30).'])
+  // The same leader, a week with no clear leader, or a 30-day leader Burst
+  // does not know by that name: nothing to say.
+  expect(general(doc({ hourly_avg: usual }), { week: { ...week, rows: [...week.rows].sort((a, b) => (a.name === 'wordpress-cyber-devtools' ? -1 : 1)) } })).toEqual([])
+  expect(general(doc({ hourly_avg: usual }), { week: { ...week, total: 400 } })).toEqual([])
+  expect(general(doc({ hourly_avg: usual }), { week: { ...week, repos: ['claude-burst', 'tools'] } })).toEqual([])
+})
+
+test('Plan Utilisation says what used each limit, by project, from Burst\'s log since the window opened', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const urls: string[] = []
+  const usage = (url: string) => (url.includes('range=custom') && url.includes('provider=anthropic') ? {
+    by_repo: [{ key: 'tools', usd: 5 }, { key: 'claude-burst', usd: 30 }, { key: 'wp-plugins', usd: 10 }, { key: 'scratch', usd: 3 }, { key: 'notes', usd: 2 }, { key: 'idle', usd: 0 }],
+  } : {})
+  dashboard(on, { responses: () => [reply(0.42, 0.8)], usage }, urls)
+  await start($)
+  const iso = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 19) + 'Z'
+  // From when each window opened (its reset less its length) to now.
+  expect(urls).toContain('http://127.0.0.1:7788/api/usage?range=custom&limit=1&provider=anthropic&from=' + iso(NOW + 6060 - 18000) + '&to=' + iso(NOW))
+  expect(urls).toContain('http://127.0.0.1:7788/api/usage?range=custom&limit=1&provider=anthropic&from=' + iso(NOW + 3 * 86400 - 7 * 86400) + '&to=' + iso(NOW))
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('"What used the 5h limit"')
+  expect(drawn).toContain('"What used the weekly limit"')
+  expect(drawn).toContain('"  est. by cost"')
+  // The weekly limit is at 80% and this project spent $30 of the $50: 48 points of it.
+  const at = (x: string) => drawn.indexOf(x, drawn.indexOf('"What used the weekly limit"'))
+  expect(at('" 48%"')).toBeGreaterThan(0)
+  expect(at('" 16%"')).toBeGreaterThan(at('" 48%"'))
+  // The three largest, then the rest as one row.
+  expect(at('"other ')).toBeGreaterThan(at('" 16%"'))
+  expect(drawn).not.toContain('"scratch')
+  // This session's project is in cyan, as in Projects.
+  expect(await coloured(ui, /^claude-burst$/, 'cyan')).toBe(true)
   await ui.unmount()
 })
 
