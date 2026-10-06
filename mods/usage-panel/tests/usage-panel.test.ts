@@ -52,6 +52,13 @@ function doc(over: Record<string, unknown> = {}) {
   }
 }
 
+// Whether a Text showing `text` is drawn in `color`. find() and findAll()
+// match on type, key and text alone: a colour put in the query is ignored,
+// so it has to be read off what they return.
+async function coloured(ui, text: string | RegExp, color: string) {
+  return (await ui.findAll({ type: 'Text', text })).some((n) => n.props && n.props.color === color)
+}
+
 // Burst's ~/.config/claude-burst/mod.json; null is no file, its defaults.
 let burstMod: object | null = null
 
@@ -165,7 +172,7 @@ test('the sidebar draws the session, today, 30 days, projects, top sessions and 
   expect(at('Proxy State')).toBeLessThan(at('"Today"'))
   expect(await ui.find({ type: 'Text', text: /^178k$/ })).toBeDefined()
   // Graphs: the 30-day bars mark the outlier day red.
-  expect(await ui.find({ type: 'Text', text: /█/, color: 'red' })).toBeDefined()
+  expect(await coloured(ui, /█/, 'red')).toBe(true)
 })
 
 test('before the first figures, the sidebar says it is starting', async ($, on) => {
@@ -301,7 +308,7 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(await ui.find({ type: 'Text', text: '206k/1M 21%' })).toBeUndefined()
   const drawn = JSON.stringify(await ui.drawn())
   expect(drawn.split('"ctx   "').length - 1).toBe(1)
-  expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'green' })).toBeDefined()
+  expect(await coloured(ui, /^█+$/, 'green')).toBe(true)
   expect(await ui.find({ type: 'Text', text: 'Tool results 30k' })).toBeDefined()
   // Largest first, in the bar and in the legend.
   const at = (x: string) => drawn.indexOf(x)
@@ -309,7 +316,7 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(at('Messages 20k')).toBeLessThan(at('System tools 14k'))
   expect(at('System tools 14k')).toBeLessThan(at('System prompt 6k'))
   // The room left before Burst compacts has its own colour and is named, last.
-  expect(await ui.find({ type: 'Text', text: /^█+$/, color: 'white' })).toBeDefined()
+  expect(await coloured(ui, /^█+$/, 'white')).toBe(true)
   expect(at('Free 930k')).toBeGreaterThan(at('System prompt 6k'))
   // The bar is the model's whole window; where Burst compacts is a line on
   // it, named underneath.
@@ -323,10 +330,10 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
   // What Claude Code holds beyond that: 300k or more with a summary in force
   // is red, since opening the session again compacts it with that summary.
-  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 620k', color: 'red' })).toBeDefined()
+  expect(await coloured(ui, 'Uncompacted Size: 620k', 'red')).toBe(true)
   // The bar is in the session card; a standing problem is with Proxy State.
   expect(drawn.indexOf('70k/1M 7%')).toBeLessThan(drawn.indexOf('"Turns"'))
-  expect(await ui.find({ type: 'Text', text: 'Keep-awake turned off', color: 'yellow' })).toBeDefined()
+  expect(await coloured(ui, 'Keep-awake turned off', 'yellow')).toBe(true)
   expect(drawn.indexOf('Keep-awake turned off')).toBeGreaterThan(drawn.indexOf('Proxy State'))
 })
 
@@ -348,11 +355,11 @@ test('over the limit the bar is red, a compaction under way is named, and a sile
   on('http.fetch', () => (answer ? { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(answer) } } : { deny: 'connection refused' }))
   await start($)
   let ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '310k/1M 31%', color: 'red' })).toBeDefined()
+  expect(await coloured(ui, '310k/1M 31%', 'red')).toBe(true)
   expect(await ui.find({ type: 'Text', text: '⟳ summarising' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Free/ })).toBeUndefined()
   // Not compacted yet: Claude Code holds what Burst sends, and the line says so.
-  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 310k', color: 'green' })).toBeDefined()
+  expect(await coloured(ui, 'Uncompacted Size: 310k', 'green')).toBe(true)
   await ui.unmount()
   // Once it is done there is no line left saying so for the rest of the session.
   answer = mod({ route: 'SECONDARY', session: { session: 'S', context: 64_000, state: 'compacted', compact_at: 300_000 } })
@@ -363,7 +370,7 @@ test('over the limit the bar is red, a compaction under way is named, and a sile
   answer = null
   await clock.advance(5000)
   ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '⚡ Burst dashboard not answering', color: 'red' })).toBeDefined()
+  expect(await coloured(ui, '⚡ Burst dashboard not answering', 'red')).toBe(true)
   expect(await ui.find({ type: 'Text', text: '206k/1M 21%' })).toBeDefined()
 })
 
@@ -445,7 +452,7 @@ test('close to the limit, the session says what Burst will do, not "warning"', a
   on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(mod({ session: { ...mod().session, context: 287_000, state: 'warning' } })) } }))
   await start($)
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Auto Compact at 300k.', color: 'yellow' })).toBeDefined()
+  expect(await coloured(ui, '! Close to the limit: Auto Compact at 300k.', 'yellow')).toBe(true)
   expect(await ui.find({ type: 'Text', text: /warning/ })).toBeUndefined()
 })
 
@@ -532,11 +539,11 @@ test('the compaction limit is the one GetAutoCompactionThreshold gives for this 
   // The gateway's answer for the folder, not the 300k the session's own figures carry.
   // A learned limit reads as automatic, in its own colour, with where it
   // comes from and how often a session may be compacted beside it.
-  expect(await ui.find({ type: 'Text', text: 'Auto Compact at 155k', color: 'cyan' })).toBeDefined()
+  expect(await coloured(ui, 'Auto Compact at 155k', 'cyan')).toBe(true)
   expect(drawn).toContain('"learned for this repo, 20% buffer"')
   expect(drawn).not.toContain('max 1 per')
   expect(drawn).not.toContain('compacts at 300k')
-  expect(await ui.find({ type: 'Text', text: '! Close to the limit: Auto Compact at 155k.', color: 'yellow' })).toBeDefined()
+  expect(await coloured(ui, '! Close to the limit: Auto Compact at 155k.', 'yellow')).toBe(true)
 })
 
 test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, and this session\'s share', async ($, on) => {
