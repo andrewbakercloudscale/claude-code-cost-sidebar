@@ -122,7 +122,7 @@ The last 12 turns of this session, newest first. Beside the heading, both across
 | `Turn` | The turn's number in this session. |
 | `Model` | The model that answered, per turn, from the transcript. A `*` after it means the turn was served by Claude Burst's secondary provider; its cache and cost cells then show `--` and the gateway's own figure, or `?`. |
 | `Input` | The whole context sent for that turn (input plus cache reads and writes). Coloured by how full the model's window is: yellow past 30%, red past 50%, purple past 70%. |
-| `(Δ)` | What the turn added to the context. When the context shrank by a fifth or more, it is how much went, negative and in green: `64k (-232k)` is a compaction. |
+| `(Δ)` | What the turn added to the context. When the context shrank by a fifth or more, it is how much went, negative and in green: `64k (-232k)` is a compaction. When it rose by far more than the turn wrote, it is the rise, in yellow, over a `*** Replayed in full: 102k sent again ***` row: Claude Code sent its whole conversation again, which it does when Anthropic no longer holds the thread (after a pause, say). |
 | `Cache` | The share of that turn's input read from the prompt cache. Green from 95%, red below, purple below 90%. A low figure straight after a compaction is expected. |
 | `Cost` | That turn at the model's published rates, cache reads and writes included. `?` is a model with no known price. |
 
