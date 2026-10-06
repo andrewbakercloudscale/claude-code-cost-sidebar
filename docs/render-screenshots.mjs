@@ -72,9 +72,13 @@ function table(turns, marks) {
     const shrank = prev && ctx < prev * 0.8
     const cell = shrank ? `${kk(ctx)} (-${kk(prev - ctx)})` : `${kk(ctx)} (+${kk(delta)})`
     const pad = ' '.repeat(Math.max(0, 12 - cell.length))
-    const input = shrank ? `${G}${kk(ctx)}${X} (${G}-${kk(prev - ctx)}${X})` : `${G}${kk(ctx)}${X} (+${G}${kk(delta)}${X})`
+    // A turn that sent the whole conversation again: the rise in yellow,
+    // and the same figure in the row under it.
+    const again = marks.replayed && marks.replayed[n]
+    const input = shrank ? `${G}${kk(ctx)}${X} (${G}-${kk(prev - ctx)}${X})` : again ? `${G}${kk(ctx)}${X} (+${Y}${kk(delta)}${X})` : `${G}${kk(ctx)}${X} (+${G}${kk(delta)}${X})`
     const cc = hit < 90 ? M : hit < 95 ? R : G
     rows.push(`  ${String(n).padEnd(5)}${'Opus 5.5'.padEnd(10)}${pad}${input}${cc}${(hit + '%').padStart(6)}${X}${('$' + cost.toFixed(2)).padStart(8)}`)
+    if (again) rows.push(`  ${Y}*** Replayed in full: ${kk(delta)} sent again ***${X}`)
     for (const m of (marks.under && marks.under[n]) || []) rows.push(m)
   }
   return rows.slice(0, 13).join('\n')
@@ -132,7 +136,7 @@ function doc(turns, marks, over = {}) {
 
 // What Claude Burst's dashboard says of the session: the context it sends,
 // by part, against the limit it compacts at.
-function burst(context, state, raw, problems = []) {
+function burst(context, state, raw, problems = [], at = 300000) {
   const fixed = 2000 + 9000 + 6000 + 4000
   const rest = context - fixed
   return {
@@ -140,7 +144,7 @@ function burst(context, state, raw, problems = []) {
     mod: {
       route: 'PRIMARY', problems,
       session: {
-        context, state, raw, compact_at: 300000,
+        context, state, raw, compact_at: at, learned: at !== 300000,
         parts: [
           { name: 'System prompt', tokens: 2000 }, { name: 'System tools', tokens: 9000 }, { name: 'MCP tools', tokens: 6000 },
           { name: 'Memory files', tokens: 4000 }, { name: 'Messages', tokens: Math.round(rest * 0.7) }, { name: 'Tool results', tokens: Math.round(rest * 0.3) },
@@ -183,6 +187,25 @@ const scenes = {}
   const d = doc(t, {}, { burst: null, summary: `  📜 License: ${C}Max (20x)${X}` })
   d.session.cost = 31.07
   scenes.alone = { d, b: null }
+}
+{
+  // Burst's Intelligent Compaction Mode chose a limit for this repository,
+  // under the fixed 300k.
+  const t = allTurns(113)
+  scenes.intelligent = { d: doc(t, {}), b: burst(t[t.length - 1][1], 'ok', t[t.length - 1][1], [], 240000), x: { ...SAVED, auto: { at: 240000, source: 'learned', fixed: 300000, target: 240000, delay: 0, buffer: 0, lost: 0 } } }
+}
+{
+  // Compacted by Burst more than once, and Claude Code still holds all of
+  // it: over half the model's window, so the button is beside the figure.
+  const t = allTurns(149)
+  scenes.held = { d: doc(t, { under: { 143: [FINISHED], 142: [STARTED] } }), b: burst(t[t.length - 1][1], 'compacted', 539000), x: SAVED }
+}
+{
+  // After a pause Anthropic no longer held the thread, and Claude Code sent
+  // the whole conversation again: one turn's context rose by far more than
+  // the turn wrote.
+  const t = allTurns(120).map((x) => (x[0] < 118 ? x : [x[0], x[1] + 102000, x[0] === 118 ? 102000 + x[2] : x[2], x[0] === 118 ? 57 : x[3], x[0] === 118 ? 0.84 : x[4], x[5], x[6]]))
+  scenes.replayed = { d: doc(t, { replayed: { 118: true } }), b: burst(t[t.length - 1][1], 'ok', t[t.length - 1][1]) }
 }
 {
   // 1. Over the limit: Burst starts the summary in the background.
@@ -246,20 +269,24 @@ function Box(p) {
 
 // Claude Code draws a button as its label in square brackets.
 const button = Text({ bold: true, children: ['[ Open Claude Burst dashboard ↗ ]'] })
+// The mod's own first row, drawn by its Pane hook over what panel() returns.
+const full = Text({ bold: true, children: ['[ Full Async Compaction ]'] })
+const hide = Box({ flexDirection: 'row', justifyContent: 'flex-end', children: [Text({ bold: true, children: ['[ Hide ]'] })] })
 
 function page(scene) {
-  const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, scene.b ? [button] : [], scene.b, scene.b ? LIMITS : null, scene.x || null)
+  const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, scene.b ? [button] : [], scene.b, scene.b ? LIMITS : null, scene.x || null, full)
   return `<!doctype html><meta charset="utf-8"><style>
   html, body { margin: 0; background: #1f2029; }
   #pane { display: inline-block; padding: 14px 18px 18px; background: #1f2029; color: #d7dae0;
     font: 15px/16px Menlo, 'SF Mono', monospace; font-variant-ligatures: none; }
   #title { display: flex; justify-content: space-between; opacity: .62; margin-bottom: .35lh; }
+  #hide { width: ${WIDTH}ch; }
   #body { width: ${WIDTH}ch; display: flex; flex-direction: column; }
   #body > div:first-child { margin-bottom: .5lh; }
   span { white-space: pre; }
   .card { box-sizing: border-box; width: ${WIDTH}ch; margin: .5lh 0; padding: .3lh calc(2ch - 3px);
     border: 1px solid #4a4d5e; border-radius: 6px; }
-  </style><div id="pane"><div id="title"><span>Usage</span><span>×</span></div><div id="body">${rows.map((r) => r.html).join('')}</div></div>`
+  </style><div id="pane"><div id="title"><span>Usage</span><span>×</span></div><div id="hide">${hide.html}</div><div id="body">${rows.map((r) => r.html).join('')}</div></div>`
 }
 
 // ---- photographs -------------------------------------------------------------
@@ -301,6 +328,18 @@ const card = (file, pane, box) => clip(file, pane, box.y - PAD, box.y + box.heig
   const { pane, cards } = await show('alone')
   await card('card-session-no-burst.png', pane, cards.session)
 }
+{
+  const { pane, cards } = await show('intelligent')
+  await clip('card-session-intelligent.png', pane, pane.y, cards.session.y + cards.session.height + PAD)
+}
+{
+  const { pane, cards } = await show('held')
+  await card('card-session-held.png', pane, cards.session)
+}
+{
+  const { pane, cards } = await show('replayed')
+  await card('card-turns-replayed.png', pane, cards.turns)
+}
 for (const [i, name] of ['started', 'pending', 'finished'].entries()) {
   const { pane, cards } = await show(name)
   await clip(`compaction-${i + 1}-${name}.png`, pane, pane.y, cards.turns.y + cards.turns.height + PAD)
@@ -318,6 +357,34 @@ for (const [i, name] of ['started', 'pending', 'finished'].entries()) {
   </style><div id="pane"><div id="toast"><div>usage-panel</div><div>🟡 Plan limit: 82% of the 5h limit used, resets 16:17 (1h58m)</div></div></div>`)
   const pane = await tab.locator('#pane').boundingBox()
   await clip('toast-limit.png', pane, pane.y, pane.y + pane.height)
+}
+
+// The sidebar hidden. Claude Code draws all of this itself: the band above
+// the prompt with the mod's button in it (and its own [-], which folds the
+// band to one line), the prompt, and the hint line under it, where the mod
+// adds its words dim at the end. This copies that.
+{
+  const line = (inner) => `<div class="row">${inner}</div>`
+  const foot = `${line('<span class="rule"></span><span class="dim"> my-app ─</span>')}${line('<span>❯ </span><span class="caret"> </span>')}${line('<span class="rule"></span>')}
+    ${line('<span class="red">⏵⏵ bypass permissions on</span><span class="dim"> (shift+tab to cycle) · ← for agents · /show-cost-panel for the usage sidebar</span>')}`
+  await tab.setContent(`<!doctype html><meta charset="utf-8"><style>
+  html, body { margin: 0; background: #1f2029; }
+  #pane { display: inline-block; padding: 16px 18px; background: #1f2029; color: #d7dae0;
+    font: 15px/20px Menlo, 'SF Mono', monospace; font-variant-ligatures: none; }
+  .shot { width: 100ch; }
+  .shot + .shot { margin-top: 1.4lh; }
+  .row { display: flex; white-space: pre; }
+  .rule { flex: 1; border-top: 1px solid #4a4d5e; margin-top: .5lh; }
+  .dim { opacity: .62; } .red { color: #e5534b; } .b { font-weight: 700; }
+  .caret { background: #4f6ef7; }
+  .cap { opacity: .62; margin-bottom: .4lh; font-style: italic; }
+  .end { margin-left: auto; }
+  </style><div id="pane">
+  <div class="shot"><div class="cap">The band above the prompt, open</div>${line('<span class="b">[ Show usage sidebar ]</span><span class="dim end">[-]</span>')}${foot}</div>
+  <div class="shot"><div class="cap">The band folded away</div>${line('<span class="dim">▸ plugin panel hidden · ctrl+x ctrl+a or click to show</span>')}${foot}</div>
+  </div>`)
+  const pane = await tab.locator('#pane').boundingBox()
+  await clip('sidebar-hidden.png', pane, pane.y, pane.y + pane.height)
 }
 
 await browser.close()
