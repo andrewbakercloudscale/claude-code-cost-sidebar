@@ -1065,3 +1065,26 @@ test('while the sidebar is closed the line under the prompt names the command th
   hint = await $.ui.mount(HINT)
   expect(tails[tails.length - 1]).toBeUndefined()
 })
+
+test('Full Async Compaction is beside Uncompacted Size from half the window held, and runs Burst\'s /compact-async-full', async ($, on) => {
+  const clock = stubs(on, [doc({ burst: BURST })])
+  // 620k held of a 1M window, Burst sending 70k.
+  let answer: object = mod()
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(answer) } }))
+  const ran: { command: string }[] = []
+  on('command.run', ($, e) => { ran.push(e); return { value: {} } })
+  await start($)
+  let ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 620k' })).toBeDefined()
+  expect(await ui.find({ key: 'usage-full-compact' })).toBeDefined()
+  await ui.press({ key: 'usage-full-compact' })
+  expect(ran.map((e) => e.command)).toEqual(['compact-async-full'])
+  await ui.unmount()
+
+  // Under half the window: the line alone.
+  answer = mod({ session: { session: 'S', context: 70_000, state: 'ok', compact_at: 300_000, raw: 480_000 } })
+  await clock.advance(5000)
+  ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 480k' })).toBeDefined()
+  expect(await ui.find({ key: 'usage-full-compact' })).toBeUndefined()
+})

@@ -261,7 +261,10 @@ export function register(on) {
         },
       }))
     }
-    const rows = panel(Box, Text, data, width, now, feedError, layout, extras, burst, limits, extra)
+    // Beside Uncompacted Size, where Claude Code holds half the window or
+    // more: Burst's /compact-async-full, pressed.
+    const full = Button({ key: 'usage-full-compact', label: 'Full Async Compaction', onPress: () => fullCompact($) })
+    const rows = panel(Box, Text, data, width, now, feedError, layout, extras, burst, limits, extra, full)
     // At the top right, where a close mark is looked for. The button above
     // the prompt brings the sidebar back.
     const top = Box({ flexDirection: 'row', justifyContent: 'flex-end', children: [Button({ key: 'usage-hide', label: 'Hide', role: 'dismiss', onPress: () => hidePane($) })] })
@@ -275,6 +278,19 @@ async function showPane($) {
   wanted = true
   try { up = seat(await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS })) } catch (err) { $.ui.toast('could not open the usage sidebar') }
   $.ui.invalidate('ui.render')
+}
+
+// Burst's /compact-async-full: Claude Code's own history replaced with the
+// summary Burst already wrote, no summary request and no pause. The command
+// is Burst's mod's (burst-session), and says for itself when it has nothing
+// to hand over.
+const FULL_COMMAND = 'compact-async-full'
+async function fullCompact($) {
+  try {
+    await $.command.run({ command: FULL_COMMAND, args: '' })
+  } catch (err) {
+    $.ui.toast('/' + FULL_COMMAND + ' did not run: it is Claude Burst\'s mod\'s command (' + err + ')')
+  }
 }
 
 // Whether the sidebar is drawn, from what $.ui.open answered: not when it
@@ -597,7 +613,7 @@ const TIER = { green: 'green', yellow: 'yellow', red: 'red', purple: 'magenta', 
 const ACCENT = 'cyan'
 const BLOCKS = ' ▁▂▃▄▅▆▇█'
 
-export function panel(Box, Text, d, width, now, feedError, layout, extras = [], burst = null, limits = null, extra = null) {
+export function panel(Box, Text, d, width, now, feedError, layout, extras = [], burst = null, limits = null, extra = null, full = null) {
   const T = (children, props = {}) => Text({ ...props, children: Array.isArray(children) ? children : [children] })
   const rows = []
   if (!d) {
@@ -630,7 +646,7 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
   // one ends and the next starts is plain. The border and padding take 4.
   const IW = Math.max(26, W - 4)
   const draw = {
-    session: () => [...sessionSection(Box, T, d, IW, burst, extra && extra.warn), ...notes('session'), ...notes('burst')],
+    session: () => [...sessionSection(Box, T, d, IW, burst, extra && extra.warn, full), ...notes('session'), ...notes('burst')],
     mac: () => {
       const foot = [...footer(Box, T, d), ...burstRows(Box, T, burst), ...extras]
       return foot.length > 0 ? [heading(T, 'This Mac'), ...foot] : []
@@ -672,7 +688,7 @@ function sub(T, title, note) {
 
 // ---- this session
 
-function sessionSection(Box, T, d, W, burst, warnPct) {
+function sessionSection(Box, T, d, W, burst, warnPct, full) {
   const s = d.session || {}
   // A long folder loses its start, not its end: the end is what tells two
   // repos apart.
@@ -704,7 +720,7 @@ function sessionSection(Box, T, d, W, burst, warnPct) {
   // compaction lines marked. Otherwise the
   // panel's gauge against the model's window, its colour thresholds as ticks.
   if (sent) {
-    out.push(...sentBar(Box, T, sent, W, s.win || 0, warnPct))
+    out.push(...sentBar(Box, T, sent, W, s.win || 0, warnPct, full))
     if (s.compacting) out.push(T('  ⟳ a summary is ready: the next prompt compacts', { color: 'cyan' }))
     else if (sent.state === 'warning') out.push(T('! Close to the limit: ' + limitLabel(sent) + '.', { color: 'yellow', wrap: 'wrap' }))
     // "compacted" is not said: it stays for the rest of the session and the
@@ -828,7 +844,7 @@ function limitNote(s) {
 // not the room there is), a legend under it, and
 // what Claude Code itself still holds when that is more. Without a window
 // the bar is against the compaction limit alone.
-function sentBar(Box, T, s, W, win, warnPct) {
+function sentBar(Box, T, s, W, win, warnPct, full) {
   const limit = compactAt(s)
   const warn = limit ? Math.round((limit * (warnPct > 0 && warnPct < 100 ? warnPct : 80)) / 100) : 0
   const whole = win > limit && win >= s.context
@@ -900,7 +916,10 @@ function sentBar(Box, T, s, W, win, warnPct) {
   // two have parted, and what a restart will do about it.
   const held = Math.max(s.raw || 0, s.context || 0)
   if (held > 0) {
-    out.push(T('Uncompacted Size: ' + k(held), { color: heldColour(s, held) }))
+    const size = T('Uncompacted Size: ' + k(held), { color: heldColour(s, held) })
+    // The button only where there is enough held for it to be worth a press.
+    if (full && win > 0 && held >= win * FULL_FROM) out.push(Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [size, full] }))
+    else out.push(size)
   }
   return out
 }
@@ -928,6 +947,10 @@ export function share(amounts, width) {
   }
   return out
 }
+
+// The share of the model's window Claude Code must hold before the Full
+// Async Compaction button is drawn beside Uncompacted Size.
+const FULL_FROM = 0.5
 
 // Where Burst's mod (burst-session, HANDOFF_AT) compacts a session opened
 // again with the summary Burst already wrote.
@@ -1244,7 +1267,8 @@ function topSection(Box, T, d, W) {
   for (const r of top) {
     const mine = r.sid === d.sid
     const barW = Math.max(4, W - 26)
-    const n = Math.max(1, Math.round((r.cost / max) * barW))
+    // Never past the bar, should the list come other than largest first.
+    const n = Math.min(barW, Math.max(1, Math.round((r.cost / max) * barW)))
     out.push(Box({
       flexDirection: 'row', columnGap: 1, children: [
         T('*' + r.sid.slice(-5), { bold: mine, color: mine ? ACCENT : undefined }),
