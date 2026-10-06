@@ -365,7 +365,7 @@ async function readExtras($) {
   const at = cwd ? await get('/api/GetAutoCompactionThreshold?folder=' + encodeURIComponent(cwd)) : null
   if (at && typeof at.threshold === 'number' && typeof at.source === 'string') {
     const f = at.failures || {}
-    next.auto = { at: at.threshold, source: at.source, target: at.target || 0, delay: at.delay_minutes || 0, buffer: at.buffer_percent || 0, lost: (f.unpaid || 0) + (f.summary_failed || 0) + (f.unused || 0), attempts: f.attempts || 0 }
+    next.auto = { at: at.threshold, source: at.source, fixed: at.fixed || 0, target: at.target || 0, delay: at.delay_minutes || 0, buffer: at.buffer_percent || 0, lost: (f.unpaid || 0) + (f.summary_failed || 0) + (f.unused || 0), attempts: f.attempts || 0 }
   }
   const cfg = state && state.context && state.context.compaction
   if (cfg && cfg.warn_at_percent > 0) next.warn = cfg.warn_at_percent
@@ -718,10 +718,13 @@ function compactAt(s) {
 
 // Whether the limit is one Intelligent Compaction Mode learned for this
 // repository, not the fixed setting: by GetAutoCompactionThreshold, and
-// until it has answered, by the session's own figures.
+// until it has answered, by the session's own figures. A learned limit
+// that is the fixed one is the fixed one: Intelligent Compaction Mode goes
+// back to it when compacting sooner does not pay, and "Auto Compact at
+// 300k (Intelligent)" then named a size nobody learned.
 function learnedLimit(s) {
   const a = extra && extra.auto
-  if (a) return a.source === 'learned' && a.at > 0
+  if (a) return a.source === 'learned' && a.at > 0 && !(a.fixed > 0 && a.at >= a.fixed)
   return !!(s && s.learned)
 }
 
