@@ -1848,6 +1848,18 @@ def delta_color(d, avg):
         return col_mid_tier
     return col_input
 
+# How much of a turn's context was sent again rather than added: the context
+# rose by far more than the turn wrote to the cache, so the rest was already
+# there. Claude Code does this when Anthropic no longer holds the thread (a
+# 404 thread_not_found after a pause): it sends its whole own copy, summary
+# or no summary, and the row read "240k (+5)" on 2026-10-06 for a turn that
+# was 102k larger than the one before. 0 when it is ordinary growth.
+def replayed_tokens(prev_ctx, total_ctx, delta):
+    if not prev_ctx:
+        return 0
+    extra = total_ctx - prev_ctx - delta
+    return total_ctx - prev_ctx if extra >= 20000 and extra >= prev_ctx * 0.2 else 0
+
 # Ranks the two independent per-cell colors above (context %, delta vs
 # session average) onto one scale so a row can be colored as a whole by
 # whichever signal is worse, instead of only the one cell that tripped it,
@@ -2209,6 +2221,11 @@ if shown:
         sign = "+"
         if shrank:
             sign, delta_str = "-", fmt_k(prev_ctx - total_ctx)
+        # The other way: the rise is what was sent again, and the line under
+        # the row says so, since "+102k" alone reads as 102k of new work.
+        replayed = 0 if is_secondary or (idx > 0 and turns[idx - 1][6]) else replayed_tokens(prev_ctx, total_ctx, delta)
+        if replayed:
+            delta_str = fmt_k(replayed)
         plain_cell = f"{total_str} ({sign}{delta_str})"
         pad = " " * max(0, 12 - len(plain_cell))
         if is_secondary:
@@ -2247,6 +2264,8 @@ if shown:
         ctx_c, delta_c = ctx_pct_color(ctx_pct), delta_color(delta, avg_delta)
         if shrank:
             delta_c = col_input
+        if replayed:
+            delta_c = col_mid_tier
         # Whole-row coloring takes the worse of the two signals, with one
         # asymmetry: a delta spike colors the row at any band it reaches,
         # context % only from RED up (CTX_RED, 50%) -- yellow stays a
@@ -2278,6 +2297,8 @@ if shown:
             input_cell = f"{pad}{total_colored} (+{delta_colored})" if not shrank else f"{pad}{total_colored} ({delta_colored})"
             cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
             print(f"  {turn_no:<5}{label:<10}{input_cell}{cache_cell}{cost_cell:>8}")
+        if replayed:
+            print(f"  {col_mid_tier}*** Replayed in full: {fmt_k(replayed)} sent again ***{c_reset}")
         print_markers(i)
     if any(t[7] for t in turns):
         # Named, not hidden: a model absent from PRICES shows "?" and the
