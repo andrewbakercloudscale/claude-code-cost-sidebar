@@ -52,6 +52,9 @@ function doc(over: Record<string, unknown> = {}) {
   }
 }
 
+// Burst's ~/.config/claude-burst/mod.json; null is no file, its defaults.
+let burstMod: object | null = null
+
 // Answers everything the mod calls. `files` is what fs.read returns for the
 // session's JSON on each read, in turn; null is no file yet.
 function stubs(on, files: Array<object | null>, runs: string[][] = [], store: Record<string, unknown> = {}, opened: object[] = [], toasts: string[] = []) {
@@ -68,6 +71,7 @@ function stubs(on, files: Array<object | null>, runs: string[][] = [], store: Re
   on('process.run', ($, e) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: 'started\n', stderr: '' } } })
   let i = 0
   on('fs.read', ($, e) => {
+    if (e.path === '/Users/me/.config/claude-burst/mod.json' && burstMod) return { value: JSON.stringify(burstMod) }
     if (!e.path.endsWith('/mod/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c.json')) return { deny: 'no such file' }
     const f = files[Math.min(i++, files.length - 1)]
     return f === null ? { deny: 'no such file' } : { value: JSON.stringify(f) }
@@ -317,8 +321,9 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(drawn).not.toContain('warns at')
   // A part with nothing in it takes no room in the legend.
   expect(await ui.find({ type: 'Text', text: /^MCP tools/ })).toBeUndefined()
-  // What Claude Code holds beyond that is the tool working: one line, never a warning.
-  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 620k', color: 'ansi256(208)' })).toBeDefined()
+  // What Claude Code holds beyond that: 300k or more with a summary in force
+  // is red, since opening the session again compacts it with that summary.
+  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 620k', color: 'red' })).toBeDefined()
   // The bar is in the session card; a standing problem is with Proxy State.
   expect(drawn.indexOf('70k/1M 7%')).toBeLessThan(drawn.indexOf('"Turns"'))
   expect(await ui.find({ type: 'Text', text: 'Keep-awake turned off', color: 'yellow' })).toBeDefined()
@@ -347,7 +352,7 @@ test('over the limit the bar is red, a compaction under way is named, and a sile
   expect(await ui.find({ type: 'Text', text: '⟳ summarising' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Free/ })).toBeUndefined()
   // Not compacted yet: Claude Code holds what Burst sends, and the line says so.
-  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 310k', color: 'ansi256(208)' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 310k', color: 'green' })).toBeDefined()
   await ui.unmount()
   // Once it is done there is no line left saying so for the rest of the session.
   answer = mod({ route: 'SECONDARY', session: { session: 'S', context: 64_000, state: 'compacted', compact_at: 300_000 } })
@@ -360,6 +365,35 @@ test('over the limit the bar is red, a compaction under way is named, and a sile
   ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Text', text: '⚡ Burst dashboard not answering', color: 'red' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '206k/1M 21%' })).toBeDefined()
+})
+
+test('Uncompacted Size is green until compacted, yellow once it has parted, red when a restart will compact it', async ($, on) => {
+  const clock = stubs(on, [doc({ burst: BURST })])
+  let answer = mod({ session: { session: 'S', context: 70_000, state: 'ok', compact_at: 300_000, raw: 70_000 } })
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(answer) } }))
+  await start($)
+  const colourOf = async (raw: number) => {
+    answer = mod({ session: { session: 'S', context: 70_000, state: 'ok', compact_at: 300_000, raw } })
+    await clock.advance(5000)
+    const ui = await $.ui.mount(PANE)
+    const drawn = JSON.stringify(await ui.drawn())
+    await ui.unmount()
+    return (drawn.match(/\{"color":"(\w+)"\},"children":\["Uncompacted Size: \d+k"\]/) || [])[1]
+  }
+  // Within a tenth of what Burst sends is not compacted.
+  expect(await colourOf(70_000)).toBe('green')
+  expect(await colourOf(76_000)).toBe('green')
+  expect(await colourOf(200_000)).toBe('yellow')
+  expect(await colourOf(299_000)).toBe('yellow')
+  expect(await colourOf(300_000)).toBe('red')
+  // With the hand-off turned off on the dashboard a restart compacts nothing.
+  expect(await colourOf(620_000)).toBe('red')
+  burstMod = { handoff: false }
+  try {
+    expect(await colourOf(630_000)).toBe('yellow')
+  } finally {
+    burstMod = null
+  }
 })
 
 test('sections can be hidden, shown and moved, and the layout is kept', async ($, on) => {

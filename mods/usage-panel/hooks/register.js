@@ -263,7 +263,7 @@ async function readBurst($) {
     const r = await $.http.fetch(b.dashboard.replace(/\/+$/, '') + '/api/mod?session=' + encodeURIComponent(sid) + '&since=' + since)
     if (r.ok) {
       const m = JSON.parse(r.text)
-      next = { down: false, mod: { route: m.route, overflow: m.overflow, primary_failing: m.primary_failing, session: m.session, problems: m.problems } }
+      next = { down: false, mod: { route: m.route, overflow: m.overflow, primary_failing: m.primary_failing, session: m.session, problems: m.problems, handoff: await handoffOn($) } }
     }
   } catch (err) {
     // Not answering, or not Burst's answer: drawn as down.
@@ -273,6 +273,17 @@ async function readBurst($) {
   burstRaw = text
   burst = next
   return true
+}
+
+// Whether Burst's mod hands Burst's summary to Claude Code: on unless the
+// dashboard's option is off. Read from Burst's own file, as its mod does;
+// /api/mod does not carry it.
+async function handoffOn($) {
+  try {
+    return JSON.parse(await $.fs.read(home + '/.config/claude-burst/mod.json')).handoff !== false
+  } catch (err) {
+    return true
+  }
 }
 
 // The plan's limits: the limit headers on Anthropic's latest reply. Burst
@@ -777,13 +788,13 @@ function sentBar(Box, T, s, W, win, warnPct) {
       ],
     }))
   }
-  // Claude Code's own history, which Burst's compaction never shrinks. The
-  // gap is the tool working, so it is one short line in orange, a colour no
-  // warning here uses. Always said: before the two part it is what Burst
-  // sends, and a line that came and went read as a figure gone missing.
+  // Claude Code's own history, which Burst's compaction never shrinks.
+  // Always said: before the two part it is what Burst sends, and a line that
+  // came and went read as a figure gone missing. Its colour is how far the
+  // two have parted, and what a restart will do about it.
   const held = Math.max(s.raw || 0, s.context || 0)
   if (held > 0) {
-    out.push(T('Uncompacted Size: ' + k(held), { color: HELD_COLOUR }))
+    out.push(T('Uncompacted Size: ' + k(held), { color: heldColour(s, held) }))
   }
   return out
 }
@@ -812,7 +823,20 @@ export function share(amounts, width) {
   return out
 }
 
-const HELD_COLOUR = 'ansi256(208)' // orange
+// Where Burst's mod (burst-session, HANDOFF_AT) compacts a session opened
+// again with the summary Burst already wrote.
+const HANDOFF_AT = 300000
+
+// The colour of Uncompacted Size. Green: Claude Code holds what Burst sends,
+// nothing has been compacted. Yellow: Burst sends a summary and Claude Code
+// holds more than a tenth above it. Red: it holds enough that opening the
+// session again (--resume, --continue) compacts Claude Code's own copy with
+// that summary, unless the hand-off is turned off on Burst's dashboard.
+function heldColour(s, held) {
+  if (!(held > (s.context || 0) * 1.1)) return 'green'
+  const handoff = !(burst && burst.mod && burst.mod.handoff === false)
+  return handoff && held >= HANDOFF_AT ? 'red' : 'yellow'
+}
 
 // Burst's rows for This Mac, under the panel's Proxy State: a dashboard that
 // is not answering, and each problem still standing.
