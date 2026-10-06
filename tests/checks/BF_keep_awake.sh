@@ -76,4 +76,15 @@ check_BF_keep_awake() {
   assert_not_contains "a subcommand is not kept awake" "caffeinate" "$(typed mcp list)"
   printf 'CLAUDE_PANEL_CAFFEINATE=false\nCLAUDE_PANEL_KEEP_SCREEN_ON=true\n' > "$f"
   assert_not_contains "off, a typed session is started as it is" "caffeinate" "$(typed)"
+
+  # Claude Code's Bash tool has the wrapper from a snapshot of the shell's
+  # functions that leaves out every name starting with an underscore. On
+  # 2026-10-06 each `claude` it ran printed "command not found:
+  # _ccusage_awake_flags" and "_ccusage_want_rc" first.
+  printf 'CLAUDE_PANEL_CAFFEINATE=true\nCLAUDE_PANEL_REMOTE_CONTROL=true\n' > "$f"
+  : > "$SBX/awake.log"
+  local bare
+  bare=$( cd "$SBX" && PATH="$stub:$PATH" zsh -f -c 'source "$1" 2>/dev/null; unfunction -m "_*"; shift; claude "$@"; print -r -- "rc=$?"' _ "$SBX/zblock" plugin test 2>&1 )
+  assert_eq "without its helpers the wrapper says nothing and keeps the exit status" "rc=7" "$bare"
+  assert_eq "and runs claude as it was asked" "claude plugin test" "$(cat "$SBX/awake.log")"
 }

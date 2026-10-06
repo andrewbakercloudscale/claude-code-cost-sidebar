@@ -6561,7 +6561,12 @@ claude() {
   # Watching this shell, so a window closed mid-session cannot leave the Mac
   # awake for good; stopped below as soon as the session ends.
   local awake_flags awake_pid=""
-  if awake_flags=$(_ccusage_awake_flags "$@"); then
+  # The two helpers are asked for only where they are defined. Claude Code
+  # runs its Bash tool from a snapshot of this shell's functions that leaves
+  # out every name starting with an underscore, so there `claude` was this
+  # wrapper without them, and each call printed "command not found:
+  # _ccusage_awake_flags" and "_ccusage_want_rc" before it ran.
+  if (( $+functions[_ccusage_awake_flags] )) && awake_flags=$(_ccusage_awake_flags "$@"); then
     caffeinate "$awake_flags" -w $$ >/dev/null 2>&1 &!
     awake_pid=$!
   fi
@@ -6569,7 +6574,7 @@ claude() {
     args=(--session-id "$CLAUDE_PANEL_PIN_SID")
     unset CLAUDE_PANEL_PIN_SID
   fi
-  if _ccusage_want_rc "$@"; then
+  if (( $+functions[_ccusage_want_rc] )) && _ccusage_want_rc "$@"; then
     local rc_name
     rc_name=$("$HOME/.local/bin/claude-panel-rc-name" 2>/dev/null) || rc_name="${PWD:t}"
     args+=(--remote-control "${rc_name:-${PWD:t}}")
