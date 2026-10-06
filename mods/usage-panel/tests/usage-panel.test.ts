@@ -965,3 +965,59 @@ test('formatting', () => {
   expect(modelName('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
   expect(axis(['0', '12', '23'], 10)).toBe('0   12  23')
 })
+
+const BAND = {
+  plugin: 'usage-panel',
+  component: 'AbovePrompt',
+  surface: 'terminal',
+  viewport: { columns: 160, rows: 50 },
+  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 100, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+} as const
+
+test('the sidebar has a Hide button, and while it is closed a button above the prompt brings it back', async ($, on) => {
+  const opened: object[] = []
+  const closed: object[] = []
+  stubs(on, [doc()], [], {}, opened)
+  let up = true
+  on('ui.close', ($, e) => { closed.push(e); up = false; return { value: {} } })
+  // What the engine draws above the prompt beneath the mods: nothing.
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  on('ui.panes', () => ({ value: up ? [{ id: 'usage', title: 'Usage', isShown: true, isFocused: false, isPlaced: true }] : [] }))
+  await start($)
+  expect(opened.length).toBe(1)
+  // Up: nothing above the prompt.
+  let band = await $.ui.mount(BAND)
+  expect(await band.find({ key: 'usage-show' })).toBeUndefined()
+  await band.unmount()
+
+  const pane = await $.ui.mount(PANE)
+  await pane.press({ key: 'usage-hide' })
+  expect(closed.length).toBe(1)
+  expect(closed[0]).toMatchObject({ id: 'usage' })
+
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ key: 'usage-show' })).toBeDefined()
+  await band.press({ key: 'usage-show' })
+  expect(opened.length).toBe(2)
+  // Beside the session, as a new session opens it.
+  expect(opened[1]).toMatchObject({ id: 'usage', title: 'Usage', columns: 58 })
+  expect((opened[1] as { focus?: boolean }).focus).toBeUndefined()
+})
+
+test('the button above the prompt is there for a sidebar that waits undrawn, and not for a session that never had one', async ($, on) => {
+  const store: Record<string, unknown> = { pinned: false }
+  stubs(on, [doc()], [], store)
+  let panes: object[] = []
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  on('ui.panes', () => ({ value: panes }))
+  await start($)
+  // The pin is off and nothing opened it: no button.
+  let band = await $.ui.mount(BAND)
+  expect(await band.find({ key: 'usage-show' })).toBeUndefined()
+  await band.unmount()
+  // Opened, and waiting on a terminal too narrow for one nobody asked for.
+  await $.command.run({ command: 'show-cost-panel', args: '' })
+  panes = [{ id: 'usage', title: 'Usage', isShown: false, isFocused: false, isPlaced: false }]
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ key: 'usage-show' })).toBeDefined()
+})
