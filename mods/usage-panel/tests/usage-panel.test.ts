@@ -1028,3 +1028,40 @@ test('the button above the prompt is there for a sidebar that waits undrawn, and
   expect(await band.find({ key: 'usage-show' })).toBeUndefined()
   await pane.unmount()
 })
+
+const HINT = {
+  plugin: 'usage-panel',
+  component: 'PromptHint',
+  surface: 'terminal',
+  viewport: { columns: 160, rows: 50 },
+  props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+} as const
+
+test('while the sidebar is closed the line under the prompt names the command that brings it back', async ($, on) => {
+  stubs(on, [doc()], [], {}, [])
+  on('ui.close', () => ({ value: {} }))
+  // The engine's own line: the hint, and whatever tail the mods added.
+  const tails: (string | undefined)[] = []
+  on('ui.render', ($, e) => {
+    if (e.component === 'PromptHint') tails.push((e.props as { tail?: string }).tail)
+    return $.ui.resolve(e).Box({ children: [] })
+  })
+  await start($)
+  // Up: the line is the engine's.
+  let hint = await $.ui.mount(HINT)
+  expect(tails[tails.length - 1]).toBeUndefined()
+  await hint.unmount()
+
+  await $.command.run({ command: 'hide-cost-panel', args: '' })
+  hint = await $.ui.mount(HINT)
+  expect(tails[tails.length - 1]).toBe('/show-cost-panel for the usage sidebar')
+  await hint.unmount()
+  // Another mod's tail is kept, ours after it.
+  hint = await $.ui.mount({ ...HINT, props: { ...HINT.props, tail: 'theirs' } })
+  expect(tails[tails.length - 1]).toBe('theirs · /show-cost-panel for the usage sidebar')
+  await hint.unmount()
+
+  await $.command.run({ command: 'show-cost-panel', args: '' })
+  hint = await $.ui.mount(HINT)
+  expect(tails[tails.length - 1]).toBeUndefined()
+})
