@@ -64,7 +64,14 @@ Each section is its own card, most specific first: this session, its turns, this
 | `/usage-panel sections` / `reset` | Show the current order (hidden ones in brackets), or go back to the default. |
 | `v` (in the sidebar) | With Claude Burst installed: open its dashboard, or its support console when the dashboard is down. The same button is in the This Mac card to click. |
 
-The sidebar has a **Hide** button at its top right, which does what `/hide-cost-panel` does. While it is closed, a **Show usage sidebar** button sits in the row above the prompt and opens it again; that row is there only while the sidebar is closed, and not in a session that never had one (the pin is off and nothing opened it).
+The sidebar has a **Hide** button at its top right, which does what `/hide-cost-panel` does. While it is closed there are two ways back, neither of them in a session that never had a sidebar (the pin is off and nothing opened it):
+
+- **The line under the prompt ends with `/show-cost-panel for the usage sidebar`.** It is text, not a button (that line takes only plain dim text from a mod), so type the command. On a narrow terminal Claude Code cuts it where the row ends.
+- **A `Show usage sidebar` button sits in the band above the prompt** and opens the sidebar beside the session. Claude Code lets that band be folded to one line (`plugin panel hidden · ctrl+x ctrl+a or click to show`, by its `[-]` or `ctrl+x ctrl+a`), and the button goes with it, which is why the line under the prompt says the same.
+
+<img src="docs/sidebar-hidden.png" alt="The sidebar hidden, twice. With the band above the prompt open: a Show usage sidebar button over the prompt. With it folded away: the line plugin panel hidden, ctrl+x ctrl+a or click to show. In both the line under the prompt ends with /show-cost-panel for the usage sidebar" width="760">
+
+<sub>Illustration: Claude Code draws the band, the prompt and the line under it; this is a copy of how they look.</sub>
 
 The numbers are the panel's own, not a second implementation: for each session the mod starts `ccusage-panel.sh` without a terminal (`PANEL_HEADLESS=1`, via `~/.local/bin/ccusage-panel-mod-start`), and it runs its usual two refresh tiers and writes what it would have drawn, as numbers, to `~/.cache/ccusage-panel-cache/mod/<session id>.json`. The mod reads that file every 5 seconds. When the session ends the mod stops saying it is there, and the headless panel exits by itself 90 seconds later. The floating alerts over Ghostty still come from it.
 
@@ -97,6 +104,21 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 | Lines starting `↗ ◇ ▲ ◴ $ !` | Insights, at most three, only when there is something to say: how many turns until Burst compacts (or, without Burst, until the context turns amber) at the current growth, the median turn, a turn that cost over 4× the median, a session over 3× your average, a cache hit rate under 85%. `◴` is a turn made dear by a pause: it came more than five minutes after the one before, read under half its input from the cache (the cache had expired) and cost at least twice the median. It reads `Turn 212 came after a 26m pause and read 4% from cache: $0.90 against a $0.05 median.` |
 | A line starting `▤` | With Claude Burst, one more: it names the part that is half or more of a context of 100k and up, e.g. `Tool results are 65% of the context sent.` |
 
+#### A limit Burst learned, and a history worth compacting
+
+<table>
+<tr>
+<td valign="top"><img src="docs/card-session-intelligent.png" alt="The top of the sidebar with its Hide button, and a Session card whose limit reads Auto Compact at 240k (Intelligent) in cyan" width="400"></td>
+<td valign="top"><img src="docs/card-session-held.png" alt="A Session card with Uncompacted Size: 539k in red and a Full Async Compaction button beside it" width="400"></td>
+</tr>
+<tr>
+<td align="center"><sub><code>(Intelligent)</code>: Burst chose this limit for the repository</sub></td>
+<td align="center"><sub><b>Full Async Compaction</b>, from half the window held</sub></td>
+</tr>
+</table>
+
+**Full Async Compaction** is beside `Uncompacted Size` once Claude Code holds half the model's window or more (500k of 1M). It runs Claude Burst's `/compact-async-full`: Claude Code's own history is replaced with the summary Burst already wrote, with no summary request and no pause, so `Uncompacted Size` comes down to what Burst sends. It is Burst's command, from its `burst-session` mod: where Burst holds no summary of the session yet, or its hand-off is turned off on the dashboard, Burst says so and nothing is compacted.
+
 #### The context bar without Claude Burst
 
 <img src="docs/card-session-no-burst.png" alt="The Session card without Claude Burst: the ctx bar at 522k, 52% of a 1M window, in amber, ticks named expensive from 400k and wasteful from 700k, and a line saying it is getting expensive, with /compact and /clear" width="460">
@@ -127,6 +149,10 @@ The last 12 turns of this session, newest first. Beside the heading, both across
 | `(Δ)` | What the turn added to the context. When the context shrank by a fifth or more, it is how much went, negative and in green: `64k (-232k)` is a compaction. When it rose by far more than the turn wrote, it is the rise, in yellow, over a `*** Replayed in full: 102k sent again ***` row: Claude Code sent its whole conversation again, which it does when Anthropic no longer holds the thread (after a pause, say). |
 | `Cache` | The share of that turn's input read from the prompt cache. Green from 95%, red below, purple below 90%. A low figure straight after a compaction is expected. |
 | `Cost` | That turn at the model's published rates, cache reads and writes included. `?` is a model with no known price. |
+
+<img src="docs/card-turns-replayed.png" alt="The Turns card with turn 118 at 323k (+105k), the rise in yellow, over a row reading Replayed in full: 105k sent again" width="460">
+
+<sub>A turn that sent the whole conversation again.</sub>
 
 A turn that added far more than the session's average, or one past 50% of the window, has its whole row coloured. The `*** Async Compaction ... ***` rows are Claude Burst's: see [Pauseless compaction](#pauseless-compaction-with-claude-burst).
 
