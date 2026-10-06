@@ -803,8 +803,9 @@ const PART_COLOURS = {
   'Tool results': 'green',
 }
 
-// What is left of the bar: white, the one colour no part has.
-const FREE_COLOUR = 'white'
+// What is left of the bar: light grey, lighter than the system prompt's
+// mid grey and a colour no part has. White glared beside the parts.
+const FREE_COLOUR = 'ansi256(250)'
 
 // Where Burst compacts this session: what GetAutoCompactionThreshold says
 // for this folder, and until it has answered, what the session's own
