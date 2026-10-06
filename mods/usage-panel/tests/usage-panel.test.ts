@@ -321,14 +321,14 @@ test('with Claude Burst the session has one ctx bar: what Burst sends, by part, 
   expect(at('Messages 20k')).toBeLessThan(at('System tools 14k'))
   expect(at('System tools 14k')).toBeLessThan(at('System prompt 6k'))
   // The room left before Burst compacts has its own colour and is named, last.
-  expect(await coloured(ui, /^█+$/, 'white')).toBe(true)
+  expect(await coloured(ui, /^█+$/, 'ansi256(250)')).toBe(true)
   expect(at('Free 930k')).toBeGreaterThan(at('System prompt 6k'))
   // The bar is the model's whole window; where Burst compacts is a line on
   // it, named underneath.
   // A thin red line and an arrow at it, on the bar's own colour, so the bar
   // is not cut into bands.
-  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["▕"]')
-  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["◀"]')
+  expect(drawn).toContain('{"color":"red","backgroundColor":"ansi256(250)"},"children":["▕"]')
+  expect(drawn).toContain('{"color":"red","backgroundColor":"ansi256(250)"},"children":["◀"]')
   expect(drawn).toContain('"Auto Compact at 300k"')
   expect(drawn).not.toContain('warns at')
   // A part with nothing in it takes no room in the legend.
@@ -348,8 +348,8 @@ test('before Burst has the breakdown by part, the bar still has the red limit li
   await start($)
   const ui = await $.ui.mount(PANE)
   const drawn = JSON.stringify(await ui.drawn())
-  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["▕"]')
-  expect(drawn).toContain('{"color":"red","backgroundColor":"white"},"children":["◀"]')
+  expect(drawn).toContain('{"color":"red","backgroundColor":"ansi256(250)"},"children":["▕"]')
+  expect(drawn).toContain('{"color":"red","backgroundColor":"ansi256(250)"},"children":["◀"]')
   // The used share is one block, where the parts would be.
   expect(drawn.slice(drawn.indexOf('"ctx   "'), drawn.indexOf('147k/1M 15%'))).not.toContain('░')
 })
