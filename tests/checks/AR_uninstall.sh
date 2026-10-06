@@ -40,8 +40,13 @@ check_AR_uninstall() {
       '# CLAUDE_PANEL_BYPASS_PERMISSIONS (claude-panel options)' 'PANEL_BYPASS_ARGS=(--dangerously-skip-permissions)' \
       "bp_opt=\"\$(grep -E '^CLAUDE_PANEL_BYPASS_PERMISSIONS=' \"\$HOME/.config/claude-panel/options\" 2>/dev/null | tail -1)\"" \
       'case "$bp_opt" in' '  true|1|yes|on) PANEL_BYPASS_ARGS=(--dangerously-skip-permissions) ;;' '  false|0|no|off) PANEL_BYPASS_ARGS=() ;;' 'esac' \
+      '# CLAUDE_PANEL_CAFFEINATE (claude-panel options)' 'PANEL_AWAKE=(caffeinate -i)' \
+      "aw_opt=\"\$(grep -E '^CLAUDE_PANEL_KEEP_SCREEN_ON=' \"\$HOME/.config/claude-panel/options\" 2>/dev/null | tail -1)\"" \
+      'case "$aw_opt" in true|1|yes|on) PANEL_AWAKE=(caffeinate -di) ;; esac' \
+      "aw_opt=\"\$(grep -E '^CLAUDE_PANEL_CAFFEINATE=' \"\$HOME/.config/claude-panel/options\" 2>/dev/null | tail -1)\"" \
+      'case "$aw_opt" in false|0|no|off) PANEL_AWAKE=() ;; esac' \
       '# caffeinate -i keeps the Mac awake.' \
-      'caffeinate -i "$CLAUDE" --session-id "$PIN_SID" "${PANEL_BYPASS_ARGS[@]}" "${PANEL_RC_ARGS[@]}"'
+      '"${PANEL_AWAKE[@]}" "$CLAUDE" --session-id "$PIN_SID" "${PANEL_BYPASS_ARGS[@]}" "${PANEL_RC_ARGS[@]}"'
   } > "$bin/ghostty-claude-launcher"
 
   # sandbox_new SYMLINKS the real claude-day-projection.sh into the sandbox

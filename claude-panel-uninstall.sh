@@ -126,7 +126,7 @@ fi
 
 # --- ~/.local/bin/ghostty-claude-launcher patch --------------------------
 GCL="$BIN/ghostty-claude-launcher"
-if [ -f "$GCL" ] && grep -qE 'claude-panel-launch\.sh|PANEL_RC_ARGS|PANEL_BYPASS_ARGS|--session-id "\$PIN_SID"' "$GCL"; then
+if [ -f "$GCL" ] && grep -qE 'claude-panel-launch\.sh|PANEL_RC_ARGS|PANEL_BYPASS_ARGS|PANEL_AWAKE|--session-id "\$PIN_SID"' "$GCL"; then
   new="$(mktemp)"
   # 1. setup's comment block, from its marker through the launch line, and
   #    the blank line setup put before it; 2. the Remote Control snippet;
@@ -143,6 +143,13 @@ if [ -f "$GCL" ] && grep -qE 'claude-panel-launch\.sh|PANEL_RC_ARGS|PANEL_BYPASS
       if ($0 == "esac") inbp = 0
       next
     }
+    # The keep-awake snippet, from its marker through its last case line;
+    # the launch line gets its caffeinate -i back below.
+    $0 == "# CLAUDE_PANEL_CAFFEINATE (claude-panel options)" { inaw = 1; next }
+    inaw {
+      if (index($0, "case \"$aw_opt\" in false|0|no|off)") == 1) inaw = 0
+      next
+    }
     $0 == "# CLAUDE_PANEL_REMOTE_CONTROL (claude-panel options)" { next }
     $0 == "PANEL_RC_ARGS=()" { next }
     index($0, "rc_opt=\"$(grep -E '"'"'^CLAUDE_PANEL_REMOTE_CONTROL='"'"'") == 1 { next }
@@ -152,6 +159,7 @@ if [ -f "$GCL" ] && grep -qE 'claude-panel-launch\.sh|PANEL_RC_ARGS|PANEL_BYPASS
       gsub(/ "\$\{PANEL_RC_ARGS\[@\]\}"/, "")
       gsub(/ "\$\{PANEL_BYPASS_ARGS\[@\]\}"/, bpflag ? " --dangerously-skip-permissions" : "")
       gsub(/ --session-id "\$PIN_SID"/, "")
+      sub(/^"\$\{PANEL_AWAKE\[@\]\}" "\$CLAUDE"/, "caffeinate -i \"$CLAUDE\"")
       if (held) print ""
       held = 0
     }
@@ -159,7 +167,7 @@ if [ -f "$GCL" ] && grep -qE 'claude-panel-launch\.sh|PANEL_RC_ARGS|PANEL_BYPASS
     { print }
     END { if (held) print "" }
   ' "$GCL" > "$new"
-  if grep -qE 'PIN_SID|PANEL_RC_ARGS|PANEL_BYPASS_ARGS|claude-panel|rc_opt|bp_opt' "$new"; then
+  if grep -qE 'PIN_SID|PANEL_RC_ARGS|PANEL_BYPASS_ARGS|PANEL_AWAKE|claude-panel|rc_opt|bp_opt|aw_opt' "$new"; then
     warn "~/.local/bin/ghostty-claude-launcher does not match the shape setup patched (hand-edited?); left as-is"
   else
     CHANGED=1
