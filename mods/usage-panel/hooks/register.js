@@ -61,6 +61,12 @@ let pinned = true
 // button above the prompt brings it back. A session that never had it (the
 // pin is off) is left without one.
 let wanted = false
+// The sidebar is drawn: kept here as it opens and closes, since the button
+// is drawn from it and a drawing asks the engine nothing.
+let up = false
+// It was opened and waits undrawn, on a terminal too narrow for a sidebar
+// nobody asked for: it is up once it is first drawn.
+let waiting = false
 let layout = null // { order, hidden } as the person left it
 let burst = null // { down, mod }: Burst's /api/mod answer; null without Burst
 let burstRaw = ''
@@ -141,7 +147,7 @@ export function register(on) {
     if (pinned) {
       wanted = true
       try {
-        await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS })
+        up = seat(await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS }))
       } catch (err) {
         $.ui.log('could not open the usage sidebar: ' + err)
       }
@@ -154,7 +160,13 @@ export function register(on) {
   // The close itself is never held up by it.
   on('ui.close', ($, e, next) => {
     const out = next(e)
-    if (e && e.id === PANE) Promise.resolve(out).then(() => $.ui.invalidate('ui.render')).catch(() => {})
+    if (e && e.id === PANE) {
+      Promise.resolve(out).then(() => {
+        up = false
+        waiting = false
+        $.ui.invalidate('ui.render')
+      }).catch(() => {})
+    }
     return out
   })
 
@@ -162,10 +174,7 @@ export function register(on) {
   // for one nobody asked for: one button, under whatever else is there.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const theirs = await next(e)
-    if (!wanted || (e.props && e.props.hasSurvey)) return theirs
-    let up = false
-    try { up = (await $.ui.panes()).some((x) => x.id === PANE && x.isPlaced) } catch (err) { return theirs }
-    if (up) return theirs
+    if (!wanted || up || (e.props && e.props.hasSurvey)) return theirs
     const { Box, Button } = $.ui.resolve(e)
     const ours = Box({ flexDirection: 'row', children: [Button({ key: 'usage-show', label: 'Show usage sidebar', onPress: () => showPane($) })] })
     return theirs ? Box({ flexDirection: 'column', children: [theirs, ours] }) : ours
@@ -208,13 +217,19 @@ export function register(on) {
       return {}
     }
     wanted = true
-    await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS, focus: true, closeOnEscape: true })
+    up = seat(await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS, focus: true, closeOnEscape: true }))
     $.ui.invalidate('ui.render')
     return {}
   })
 
   on('ui.render', { component: 'Pane' }, async ($, e, next) => {
     if (e.requestId !== PANE) return next(e)
+    // One that waited for a wider terminal has its place.
+    if (waiting) {
+      waiting = false
+      up = true
+      $.ui.invalidate('ui.render')
+    }
     const { Box, Text, Button } = $.ui.resolve(e)
     const width = Math.max(30, Math.min(100, (e.props && e.props.bodyColumns) || (e.viewport && e.viewport.columns) || 50))
     const now = Math.floor((await $.clock.now()) / 1000)
@@ -250,14 +265,29 @@ export function register(on) {
 // focus taken. The button above the prompt goes as it does.
 async function showPane($) {
   wanted = true
-  try { await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS }) } catch (err) { $.ui.toast('could not open the usage sidebar') }
+  try { up = seat(await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS })) } catch (err) { $.ui.toast('could not open the usage sidebar') }
   $.ui.invalidate('ui.render')
+}
+
+// Whether the sidebar is drawn, from what $.ui.open answered: not when it
+// waits undrawn, on a terminal too narrow for one nobody asked for.
+function seat(opened) {
+  waiting = !!(opened && opened.isPlaced === false)
+  return !waiting
 }
 
 // Closes it, for this session only: /usage-panel unpin stops it opening in
 // new ones.
 async function hidePane($) {
-  try { await $.ui.close({ id: PANE }) } catch (err) { $.ui.log('could not close the usage sidebar: ' + err) }
+  // Hidden by hand, so it was had: the button above the prompt is the way back.
+  wanted = true
+  try {
+    await $.ui.close({ id: PANE })
+    up = false
+    waiting = false
+  } catch (err) {
+    $.ui.log('could not close the usage sidebar: ' + err)
+  }
   $.ui.invalidate('ui.render')
 }
 
