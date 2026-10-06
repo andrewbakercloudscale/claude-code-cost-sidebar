@@ -4829,7 +4829,9 @@ fi
 # a second one.
 if panel_option CLAUDE_PANEL_CAFFEINATE && [ "${CLAUDE_PANEL_CAFFEINATED:-}" != "$$" ] \
    && command -v caffeinate >/dev/null 2>&1; then
-  caffeinate -i -w "$$" >/dev/null 2>&1 &
+  awake_flags=-i
+  panel_option CLAUDE_PANEL_KEEP_SCREEN_ON && awake_flags=-di
+  caffeinate "$awake_flags" -w "$$" >/dev/null 2>&1 &
   export CLAUDE_PANEL_CAFFEINATED="$$"
 fi
 
@@ -6353,7 +6355,8 @@ while IFS='|' read -r opt default comment; do
   printf '%s=%s\n' "$opt" "$default" >> "$PANEL_OPTIONS"
 done <<OPTIONS_EOF
 CLAUDE_PANEL_REMOTE_CONTROL|false|start interactive claude sessions with --remote-control
-CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a panel runs
+CLAUDE_PANEL_CAFFEINATE|false|keep the Mac awake (caffeinate -i) while a session runs, however it was started
+CLAUDE_PANEL_KEEP_SCREEN_ON|false|also keep the screen on (caffeinate -di) while a session runs, so it never locks; needs CLAUDE_PANEL_CAFFEINATE
 CLAUDE_PANEL_SESSION_TITLE|true|name new sessions after their folder
 CLAUDE_PANEL_LOADING_OVERLAY|true|float a "wait to type" notice while the panel split opens
 CLAUDE_PANEL_COMPACTION_OVERLAY|true|float "Async Compaction In Progress" while Claude Burst compacts this session
@@ -6431,8 +6434,35 @@ _ccusage_want_rc() {
   done
   return 0
 }
+# CLAUDE_PANEL_CAFFEINATE (~/.config/claude-panel/options) keeps the Mac
+# awake while an interactive session typed at the prompt runs, as the Finder
+# launchers do for theirs; CLAUDE_PANEL_KEEP_SCREEN_ON keeps the screen on
+# as well. Prints the caffeinate flags, or fails when the session is not to
+# be kept awake: the option is off, or this is a subcommand, -p or --help.
+_ccusage_awake_flags() {
+  local v s
+  v=$(grep -E '^CLAUDE_PANEL_CAFFEINATE=' ~/.config/claude-panel/options 2>/dev/null | tail -1)
+  v="${CLAUDE_PANEL_CAFFEINATE:-${v#*=}}"
+  case "${(L)v//[\"\' ]/}" in true|1|yes|on) ;; *) return 1 ;; esac
+  case "${1:-}" in ''|-*) ;; *) return 1 ;; esac
+  local a
+  for a in "$@"; do
+    case "$a" in -p|--print|-h|--help|-v|--version) return 1 ;; esac
+  done
+  (( $+commands[caffeinate] )) || return 1
+  s=$(grep -E '^CLAUDE_PANEL_KEEP_SCREEN_ON=' ~/.config/claude-panel/options 2>/dev/null | tail -1)
+  s="${CLAUDE_PANEL_KEEP_SCREEN_ON:-${s#*=}}"
+  case "${(L)s//[\"\' ]/}" in true|1|yes|on) print -r -- -di ;; *) print -r -- -i ;; esac
+}
 claude() {
   local -a args
+  # Watching this shell, so a window closed mid-session cannot leave the Mac
+  # awake for good; stopped below as soon as the session ends.
+  local awake_flags awake_pid=""
+  if awake_flags=$(_ccusage_awake_flags "$@"); then
+    caffeinate "$awake_flags" -w $$ >/dev/null 2>&1 &!
+    awake_pid=$!
+  fi
   if [ -n "${CLAUDE_PANEL_PIN_SID:-}" ]; then
     args=(--session-id "$CLAUDE_PANEL_PIN_SID")
     unset CLAUDE_PANEL_PIN_SID
@@ -6442,11 +6472,15 @@ claude() {
     rc_name=$("$HOME/.local/bin/claude-panel-rc-name" 2>/dev/null) || rc_name="${PWD:t}"
     args+=(--remote-control "${rc_name:-${PWD:t}}")
   fi
+  local rc
   if (( $+functions[_ccusage_claude_orig] )); then
     _ccusage_claude_orig "${args[@]}" "$@"
   else
     command claude "${args[@]}" "$@"
   fi
+  rc=$?
+  [ -n "$awake_pid" ] && kill "$awake_pid" 2>/dev/null
+  return $rc
 }
 # Is this command line an interactive claude session with no session flag
 # of its own, i.e. one this hook can and should give a known --session-id?
@@ -6702,6 +6736,66 @@ GCL_BP_EOF
   rm -f "$bp_snip"
   mv "$tmp" "$GCL"
   chmod +x "$GCL"
+fi
+
+# CLAUDE_PANEL_CAFFEINATE and CLAUDE_PANEL_KEEP_SCREEN_ON for the Finder
+# launch path. The launcher hard-codes `caffeinate -i`, so the dashboard's
+# "Keep the Mac awake while a session runs" said nothing true about a session
+# started from Finder, and nothing could keep the screen on. caffeinate
+# becomes an array the options file controls: awake unless the option is
+# false, with -d when the screen is to stay on. A launcher that did not run
+# its session under caffeinate is left as it is.
+GCL_AW_MARKER="# CLAUDE_PANEL_CAFFEINATE (claude-panel options)"
+if [ -f "$GCL" ] && grep -qF "$GCL_PIN_LINE" "$GCL" && ! grep -qF "$GCL_AW_MARKER" "$GCL" \
+   && grep -F "$GCL_PIN_LINE" "$GCL" | head -1 | grep -q '^caffeinate -i "\$CLAUDE"'; then
+  echo "Adding the keep-awake options to ~/.local/bin/ghostty-claude-launcher ..."
+  pin_n=$(grep -nF "$GCL_PIN_LINE" "$GCL" | head -1 | cut -d: -f1)
+  aw_snip=$(mktemp)
+  {
+    echo "$GCL_AW_MARKER"
+    cat <<'GCL_AW_EOF'
+PANEL_AWAKE=(caffeinate -i)
+aw_opt="$(grep -E '^CLAUDE_PANEL_KEEP_SCREEN_ON=' "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)"
+aw_opt="$(printf '%s' "${aw_opt#*=}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]')"
+case "$aw_opt" in true|1|yes|on) PANEL_AWAKE=(caffeinate -di) ;; esac
+aw_opt="$(grep -E '^CLAUDE_PANEL_CAFFEINATE=' "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)"
+aw_opt="$(printf '%s' "${aw_opt#*=}" | tr -d "\"' " | tr '[:upper:]' '[:lower:]')"
+case "$aw_opt" in false|0|no|off) PANEL_AWAKE=() ;; esac
+GCL_AW_EOF
+  } > "$aw_snip"
+  at_n=$pin_n
+  case "$(sed -n "$((pin_n - 1))p" "$GCL" | sed 's/^[[:space:]]*//')" in '#'*) at_n=$((pin_n - 1)) ;; esac
+  tmp=$(mktemp)
+  awk -v at="$at_n" -v pin_n="$pin_n" -v snip="$aw_snip" '
+    NR == at { while ((getline l < snip) > 0) print l }
+    NR == pin_n { sub(/^caffeinate -i "\$CLAUDE"/, "\"${PANEL_AWAKE[@]}\" \"$CLAUDE\"") }
+    { print }
+  ' "$GCL" > "$tmp"
+  rm -f "$aw_snip"
+  mv "$tmp" "$GCL"
+  chmod +x "$GCL"
+fi
+
+# Until the launchers read CLAUDE_PANEL_CAFFEINATE they ran every session
+# under caffeinate whatever it said, and it defaults to false. So that
+# reading it changes nothing by itself, a Mac with Finder launchers has the
+# option turned on, once: its sessions were being kept awake already.
+AW_MIGRATED="$(dirname "$PANEL_OPTIONS")/.awake-option-read-by-launchers"
+if [ ! -e "$AW_MIGRATED" ]; then
+  if ls "$BIN_DIR"/ghostty-*-launcher >/dev/null 2>&1 && grep -qE '^CLAUDE_PANEL_CAFFEINATE=' "$PANEL_OPTIONS" \
+     && ! grep -qiE "^CLAUDE_PANEL_CAFFEINATE=[\"' ]*(true|1|yes|on)[\"' ]*\$" "$PANEL_OPTIONS"; then
+    echo "Finder launchers were keeping the Mac awake already: turning on CLAUDE_PANEL_CAFFEINATE so they still do."
+    tmp=$(mktemp)
+    sed 's/^CLAUDE_PANEL_CAFFEINATE=.*/CLAUDE_PANEL_CAFFEINATE=true/' "$PANEL_OPTIONS" > "$tmp" && cat "$tmp" > "$PANEL_OPTIONS"
+    rm -f "$tmp"
+  fi
+  : > "$AW_MIGRATED"
+fi
+# The option's comment from before it covered every session.
+if grep -qxF '# CLAUDE_PANEL_CAFFEINATE: keep the Mac awake (caffeinate -i) while a panel runs' "$PANEL_OPTIONS"; then
+  tmp=$(mktemp)
+  sed 's/^# CLAUDE_PANEL_CAFFEINATE: keep the Mac awake (caffeinate -i) while a panel runs$/# CLAUDE_PANEL_CAFFEINATE: keep the Mac awake (caffeinate -i) while a session runs, however it was started/' "$PANEL_OPTIONS" > "$tmp" && cat "$tmp" > "$PANEL_OPTIONS"
+  rm -f "$tmp"
 fi
 
 # The launcher drives Ghostty through its DEFAULT bindings (cmd+d,
