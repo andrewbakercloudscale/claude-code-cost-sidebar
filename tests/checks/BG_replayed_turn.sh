@@ -24,5 +24,8 @@ for prev, ctx, delta in ((138008, 239965, 5), (136954, 138008, 1052), (148086, 5
 0" "$(printf '%s\n' "$got" | sed -n '1,5p')"
   assert_eq "a small session's 23k rise is a replay, a large session's 22k is not" "25000
 0" "$(printf '%s\n' "$got" | sed -n '6,7p')"
+  # The other way, a compaction: the whole row in the Cache column's blue.
+  assert_contains "a turn whose context shrank is drawn whole in blue" \
+    'print(f"  {col_cache}{turn_no:<5}{label:<10}{pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")' "$(cat "$PANEL_SH")"
   assert_contains "the row is followed by a line that says so" 'Replayed in full: {fmt_k(replayed)} sent again' "$(cat "$PANEL_SH")"
 }

@@ -146,7 +146,7 @@ The last 12 turns of this session, newest first. Beside the heading, both across
 | `Turn` | The turn's number in this session. |
 | `Model` | The model that answered, per turn, from the transcript. A `*` after it means the turn was served by Claude Burst's secondary provider; its cache and cost cells then show `--` and the gateway's own figure, or `?`. |
 | `Input` | The whole context sent for that turn (input plus cache reads and writes). Coloured by how full the model's window is: yellow past 30%, red past 50%, purple past 70%. |
-| `(Δ)` | What the turn added to the context. When the context shrank by a fifth or more, it is how much went, negative and in green: `64k (-232k)` is a compaction. When it rose by far more than the turn wrote, it is the rise, in yellow, over a `*** Replayed in full: 102k sent again ***` row: Claude Code sent its whole conversation again, which it does when Anthropic no longer holds the thread (after a pause, say). |
+| `(Δ)` | What the turn added to the context. When the context shrank by a fifth or more, it is how much went, negative, and the whole row is blue: `64k (-232k)` is a compaction. When it rose by far more than the turn wrote, it is the rise, in yellow, over a `*** Replayed in full: 102k sent again ***` row: Claude Code sent its whole conversation again, which it does when Anthropic no longer holds the thread (after a pause, say). |
 | `Cache` | The share of that turn's input read from the prompt cache. Green from 95%, red below, purple below 90%. A low figure straight after a compaction is expected. |
 | `Cost` | That turn at the model's published rates, cache reads and writes included. `?` is a model with no known price. |
 
@@ -302,7 +302,7 @@ Burst does the compacting; this panel is where you see it. One compaction, in th
 <tr>
 <td valign="top"><sub><b>1. Started.</b> The context reaches Burst's limit (300k here, the red line on the bar). The ctx label is yellow, the session says <code>summarising</code>, and a yellow <code>Async Compaction Started</code> row sits above the turn it began beside. You keep working.</sub></td>
 <td valign="top"><sub><b>2. Pending.</b> The summary is written and waits. The session says <code>a summary is ready: the next prompt compacts</code>, and the table has a blue <code>Pending (next prompt)</code> row. Turn 142 ran while the summary was being written.</sub></td>
-<td valign="top"><sub><b>3. Finished.</b> The next prompt went out with the summary in place of the history: <code>64k (-232k)</code> in green, a green <code>Finished</code> row with what the summary cost, and a cyan drop at the end of <code>growth</code>. Cache is 19% for that one turn, then recovers.</sub></td>
+<td valign="top"><sub><b>3. Finished.</b> The next prompt went out with the summary in place of the history: the turn's row in blue with <code>64k (-232k)</code>, a green <code>Finished</code> row with what the summary cost, and a cyan drop at the end of <code>growth</code>. Cache is 19% for that one turn, then recovers.</sub></td>
 </tr>
 </table>
 
@@ -310,7 +310,7 @@ What to look for:
 
 - **The ctx bar is Burst's.** It is the context Burst sends after its own compaction, by part, against the limit it compacts at, read from Burst's dashboard every 5 seconds. Claude Code's own figure does not know a compaction happened, which is what the `Claude Code holds 299k` line is for.
 - **The three marker rows** come from Burst's `~/.config/claude-burst/metrics.jsonl`. Each is drawn between the two turns it happened between. A Pending whose Finished landed before another turn ran is not drawn: the Finished says it all.
-- **The green negative delta** is on the first turn sent with the summary. That turn's cache hit is low and its cost is up, because the smaller context is written to the cache once. It is the expected price of the compaction, so it never colours the row as a spike.
+- **The blue row with a negative delta** is the first turn sent with the summary. That turn's cache hit is low and its cost is up, because the smaller context is written to the cache once. It is the expected price of the compaction, so it never colours the row as a spike.
 - **Notices.** Where Burst's own `burst-session` mod is installed, it shows each step as a toast inside the session. Without it, on Ghostty, a small floating notice reads "Async Compaction In Progress", then "Async Compaction Finished" (`CLAUDE_PANEL_COMPACTION_OVERLAY`).
 
 Without Burst none of this appears: the ctx bar is the panel's own gauge against the model's window, and the marker rows never show. Burst's installer offers to install this panel, and this panel finds Burst by itself; neither needs the other.
