@@ -178,7 +178,7 @@ How close you are to your plan's limits. Anthropic states the figures itself, in
 | On screen | What it is |
 |---|---|
 | `Max (20x)` | The plan Claude Code is signed in with. |
-| `5h` bar, `82%  resets 16:17 (1h58m)` | The share of the 5-hour limit used, and when the window resets. Green, yellow from 80%, red from 95%. The tick on the bar is the 80% mark. Any use at all fills at least one cell. In a narrow sidebar the bar moves to a row of its own under the figures, the full width of the card. |
+| `5h` bar, `82%  resets 16:17 (1h58m)` | The share of the 5-hour limit used, and when the window resets. Green, yellow from 80%, red from 95%. Any use at all fills at least one cell. In a narrow sidebar the bar moves to a row of its own under the figures, the full width of the card. |
 | `weekly` bar, `58%  resets Thu 02:00` | The same for the 7-day limit. Any other window Anthropic reports (a per-model weekly limit, for one) gets a row of its own. |
 | `$132 at API rates this month ($200 plan)` | What this month's use would have cost pay-as-you-go, beside the plan's flat price. Shown for Pro ($20), Max 5x ($100) and Max 20x ($200). |
 | `What used the weekly limit` | The limit's reading shared out by project: the three projects that spent most since the window opened, and the rest as `other`, each with its part of the limit in points (a project at `31%` of a limit that reads `58%` used a little over half of what is gone). This session's project is in cyan and each other project has a colour of its own, the same in both blocks. One block for the 5-hour limit and one for the weekly. |
