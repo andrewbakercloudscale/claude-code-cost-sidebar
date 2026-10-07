@@ -218,7 +218,7 @@ A table, not a chart: one column for Burst's window and, where that is longer th
 | `Net savings` | Not re-sent, less the other two. Green, or red with a minus when it is a loss. |
 | `Each` | Net savings per compaction. |
 | `Of all spend` | Net savings as a share of everything spent over the same days, every provider, at API rates (from Burst's log). |
-| `642M tokens not re-sent, largest 300k → 61k` | The same saving in tokens, and the biggest single compaction: the context before and after. |
+| `642M tokens not re-sent, largest 300k → 61k` | The same saving in tokens, and the biggest single compaction: the context before and after. In a narrow sidebar the largest has a row of its own. |
 | `This session: $2.84 saved, 1 compaction` | This session's own share. `$0.40 lost so far` in yellow means its compaction has not paid for itself yet; it does over the next few turns. |
 
 **Overflow to Secondary**, under it when requests have gone to the secondary, is the same table: requests, what they would have cost at Anthropic's price, what the secondary charged, net savings and its share of all spend.

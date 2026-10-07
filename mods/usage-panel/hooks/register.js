@@ -671,7 +671,11 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
       const body = planSection(Box, T, d, IW, now, limits, extra)
       return body.length > 0 ? [...body, ...notes('plan')] : []
     },
-    savings: () => [...savingsSection(Box, T, IW, extra), ...overflowSection(Box, T, IW, extra)],
+    savings: () => {
+      const saved = savingsSection(Box, T, IW, extra)
+      const over = overflowSection(Box, T, IW, extra)
+      return saved.length > 0 && over.length > 0 ? [...saved, T(' '), ...over] : [...saved, ...over]
+    },
     today: () => [...todaySection(Box, T, d, IW, now), ...notes('today')],
     sessions: () => topSection(Box, T, d, IW),
     days: () => daysSection(Box, T, d, IW),
@@ -1110,7 +1114,13 @@ function savingsSection(Box, T, W, extra) {
     ['Of all spend', ofSpend(c.net, extra.spent), w ? ofSpend(w.net, extra.spent7) : '', tone(c.net), w && tone(w.net)],
   ]))
   out.push(T(' '))
-  if (c.tokens > 0) out.push(T(big(c.tokens) + ' tokens not re-sent' + (c.before > c.after && c.after > 0 ? ', largest ' + k(c.before) + ' → ' + k(c.after) : ''), { dimColor: true, wrap: 'truncate-end' }))
+  if (c.tokens > 0) {
+    // On one row where it fits; in a narrow sidebar the largest has its own.
+    const sent = big(c.tokens) + ' tokens not re-sent'
+    const largest = c.before > c.after && c.after > 0 ? 'largest ' + k(c.before) + ' → ' + k(c.after) : ''
+    const one = largest ? sent + ', ' + largest : sent
+    for (const line of one.length <= W || !largest ? [one] : [sent, 'Largest ' + largest.slice(8)]) out.push(T(line, { dimColor: true, wrap: 'truncate-end' }))
+  }
   const mine = extra.saved
   if (mine && mine.n > 0) {
     const one = mine.n === 1
