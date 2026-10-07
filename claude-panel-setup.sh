@@ -2212,8 +2212,10 @@ if shown:
         # The Δ is normally what this turn added (its cache write). When the
         # context SHRANK, a compaction happened (Claude Code's or the
         # gateway's) and the useful number is how much went: shown negative,
-        # in green, and never allowed to colour the row as a spike, since the
-        # cache write that follows a compaction is the expected cost of it.
+        # the whole row in blue (the Pending row's colour) so the turn a
+        # compaction landed on is found at a glance, and never coloured as a
+        # spike, since the cache write that follows a compaction is the
+        # expected cost of it.
         idx = start_idx - 1 + i
         prev_ctx = turns[idx - 1][1] if idx > 0 else 0
         shrank = prev_ctx and total_ctx < prev_ctx * 0.8 and not is_secondary
@@ -2288,13 +2290,14 @@ if shown:
         ctx_rank = severity_rank(ctx_c)
         rank = max(severity_rank(delta_c), ctx_rank if ctx_rank >= 2 else 0)
         cost_cell = "?" if cost is None else "$" + format(cost, ".2f")
-        if rank > 0:
+        if shrank:
+            print(f"  {col_cache}{turn_no:<5}{label:<10}{pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
+        elif rank > 0:
             row_c = (col_input, col_mid_tier, col_cost, col_purple)[rank]
             print(f"  {row_c}{turn_no:<5}{label:<10}{pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
         else:
             total_colored = f"{ctx_c}{total_str}{c_reset}"
-            delta_colored = f"{delta_c}{sign}{delta_str}{c_reset}" if shrank else f"{delta_c}{delta_str}{c_reset}"
-            input_cell = f"{pad}{total_colored} (+{delta_colored})" if not shrank else f"{pad}{total_colored} ({delta_colored})"
+            input_cell = f"{pad}{total_colored} (+{delta_c}{delta_str}{c_reset})"
             cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
             print(f"  {turn_no:<5}{label:<10}{input_cell}{cache_cell}{cost_cell:>8}")
         if replayed:
@@ -7756,7 +7759,7 @@ echo
 # turn table reads for its Pauseless Compaction rows. Neither needs the other.
 if [ -d "$HOME/.config/claude-burst" ]; then
   echo "Claude Burst detected: the turn table marks its Pauseless Compaction (Started,"
-  echo "Pending and Finished rows, a green negative delta, and the summary cost in the"
+  echo "Pending and Finished rows, the compacted turn's row in blue, and the summary cost in the"
   echo "session total)."
 else
   echo "Optional: Claude Burst (https://github.com/andrewbakercloudscale/claude-burst)"

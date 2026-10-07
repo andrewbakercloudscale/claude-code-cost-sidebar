@@ -77,7 +77,9 @@ function table(turns, marks) {
     const again = marks.replayed && marks.replayed[n]
     const input = shrank ? `${G}${kk(ctx)}${X} (${G}-${kk(prev - ctx)}${X})` : again ? `${G}${kk(ctx)}${X} (+${Y}${kk(delta)}${X})` : `${G}${kk(ctx)}${X} (+${G}${kk(delta)}${X})`
     const cc = hit < 90 ? M : hit < 95 ? R : G
-    rows.push(`  ${String(n).padEnd(5)}${'Opus 5.5'.padEnd(10)}${pad}${input}${cc}${(hit + '%').padStart(6)}${X}${('$' + cost.toFixed(2)).padStart(8)}`)
+    // A compaction's turn is blue from end to end.
+    if (shrank) rows.push(`  ${B}${String(n).padEnd(5)}${'Opus 5.5'.padEnd(10)}${pad}${cell}${(hit + '%').padStart(6)}${('$' + cost.toFixed(2)).padStart(8)}${X}`)
+    else rows.push(`  ${String(n).padEnd(5)}${'Opus 5.5'.padEnd(10)}${pad}${input}${cc}${(hit + '%').padStart(6)}${X}${('$' + cost.toFixed(2)).padStart(8)}`)
     if (again) rows.push(`  ${Y}*** Replayed in full: ${kk(delta)} sent again ***${X}`)
     for (const m of (marks.under && marks.under[n]) || []) rows.push(m)
   }
