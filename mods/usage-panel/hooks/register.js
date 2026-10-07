@@ -991,16 +991,24 @@ function planSection(Box, T, d, W, now, limits, extra) {
   const labelOf = (l) => lpad(Math.round(l.util * 100) + '%', 4) + '  resets ' + when(l.reset, now)
   // One bar width for every row, so the bars can be compared.
   const labelW = Math.max(0, ...rows.map((l) => labelOf(l).length))
-  for (const l of rows) {
+  // Beside its figures where there is room for a bar worth reading; in a
+  // narrow sidebar the bar has a row of its own, the card's whole width, and
+  // the figures no longer wrap under it.
+  const beside = W - nameW - 2 - labelW
+  const stacked = beside < LIMIT_BAR_MIN
+  for (const [i, l] of rows.entries()) {
     const pct = Math.round(l.util * 100)
     const c = pct >= LIMIT_ALARM * 100 ? 'red' : pct >= LIMIT_WARN * 100 ? 'yellow' : 'green'
-    out.push(Box({
-      flexDirection: 'row', columnGap: 1, children: [
-        T(pad(limitName(l.key), nameW), { dimColor: true }),
-        gauge(T, pct, Math.max(6, W - nameW - 2 - labelW), c, [LIMIT_WARN * 100]),
-        T(labelOf(l), { color: c === 'green' ? undefined : c }),
-      ],
-    }))
+    const name = T(pad(limitName(l.key), nameW), { dimColor: !stacked, bold: stacked })
+    const label = T(labelOf(l), { color: c === 'green' ? undefined : c, wrap: 'truncate-end' })
+    // Any use at all is a cell on the bar: 4% of a short one rounded to none.
+    const bar = (w) => gauge(T, l.util > 0 ? Math.max(pct, 100 / w) : 0, w, c, [LIMIT_WARN * 100])
+    if (stacked) {
+      out.push(Box({ flexDirection: 'row', columnGap: 1, marginTop: i > 0 ? 1 : 0, children: [name, label] }))
+      out.push(bar(W))
+    } else {
+      out.push(Box({ flexDirection: 'row', columnGap: 1, children: [name, bar(Math.max(6, beside)), label] }))
+    }
   }
   out.push(...limitShares(Box, T, d, W, rows, extra))
   if (rows.length === 0) {
@@ -1008,13 +1016,25 @@ function planSection(Box, T, d, W, now, limits, extra) {
   }
   // What the flat price buys: the month's use at pay-as-you-go rates.
   if (plan && plan.price > 0 && d.month > 0) {
-    out.push(T([
-      T(money(d.month), { bold: true }),
-      T(' at API rates this month (' + money(plan.price) + ' plan)', { dimColor: true }),
-    ], { wrap: 'wrap' }))
+    out.push(Box({
+      flexDirection: 'row', marginTop: out.length > 1 ? 1 : 0, children: [T([
+        T(money(d.month), { bold: true }),
+        // The shorter wording where the longer would wrap.
+        T((money(d.month) + ' at API rates this month (' + money(plan.price) + ' plan)').length <= W ? ' at API rates this month (' + money(plan.price) + ' plan)' : ' this month at API rates vs ' + money(plan.price), { dimColor: true }),
+      ], { wrap: 'wrap' })],
+    }))
   }
   return out
 }
+
+// The narrowest bar a limit is drawn with beside its figures: under this it
+// has a row of its own.
+const LIMIT_BAR_MIN = 16
+
+// A colour for each project in the two charts of what used a limit, the
+// same project the same colour in both. Cyan is this session's project and
+// grey the rest, so neither is here.
+const SHARE_COLOURS = ['blue', 'green', 'yellow', 'magenta']
 
 // What used each limit, by project: the limit's reading shared out by each
 // project's cost at API rates since the window opened. An estimate, and
@@ -1023,6 +1043,11 @@ function planSection(Box, T, d, W, now, limits, extra) {
 function limitShares(Box, T, d, W, rows, extra) {
   const out = []
   const here = (d.session && d.session.folder) || ''
+  const colours = new Map()
+  const colourOf = (name) => {
+    if (!colours.has(name)) colours.set(name, SHARE_COLOURS[colours.size % SHARE_COLOURS.length])
+    return colours.get(name)
+  }
   for (const l of rows) {
     const by = extra && extra.by && extra.by[l.key]
     if (!by || !(by.total > 0)) continue
@@ -1031,7 +1056,11 @@ function limitShares(Box, T, d, W, rows, extra) {
     const list = rest / by.total >= 0.005 ? [...top, { name: 'other', usd: rest, other: true }] : top
     const nameW = Math.min(20, Math.max(...list.map((x) => x.name.length)))
     const barW = Math.max(4, W - nameW - 6)
-    out.push(sub(T, 'What used the ' + limitName(l.key) + ' limit', 'est. by cost'))
+    // A chart of its own: a blank row over a heading in bold. The note gives
+    // way before the heading does.
+    const title = 'What used the ' + limitName(l.key) + ' limit'
+    const note = title.length + 14 <= W ? 'est. by cost' : title.length + 6 <= W ? 'est.' : ''
+    out.push(Box({ flexDirection: 'row', marginTop: 1, children: [T([T(title, { bold: true, color: ACCENT }), note ? T('  ' + note, { dimColor: true }) : ''], { wrap: 'truncate-end' })] }))
     for (const x of list) {
       const pts = (x.usd / by.total) * l.util * 100
       const n = Math.max(1, Math.round((x.usd / top[0].usd) * barW))
@@ -1039,7 +1068,7 @@ function limitShares(Box, T, d, W, rows, extra) {
       out.push(Box({
         flexDirection: 'row', columnGap: 1, children: [
           T(pad(cut(x.name, nameW), nameW), { bold: mine, color: mine ? ACCENT : undefined, dimColor: !!x.other }),
-          T('█'.repeat(Math.min(n, barW)) + ' '.repeat(Math.max(0, barW - n)), { color: mine ? ACCENT : x.other ? 'gray' : 'blue' }),
+          T('█'.repeat(Math.min(n, barW)) + ' '.repeat(Math.max(0, barW - n)), { color: mine ? ACCENT : x.other ? 'gray' : colourOf(x.name) }),
           T(lpad(pts < 1 ? '<1%' : Math.round(pts) + '%', 4)),
         ],
       }))
