@@ -1175,14 +1175,18 @@ function ofSpend(net, spent) {
 // The colour of money gained in the savings tables; money lost is red.
 const GAIN = 'blue'
 
+// Money and shares by their sign: red below nothing, blue otherwise. A
+// plain count, or nothing, has no colour.
+function tone(v) {
+  return typeof v !== 'string' || !/[$%]/.test(v) ? undefined : v.startsWith('-') ? 'red' : GAIN
+}
+
 // A card's figures as a table: a column for Burst's window and, where that
 // is longer than a week, one for the last 7 days. Each row is [label,
-// window, week]. Money and shares are coloured by their sign: red below
-// nothing, blue otherwise. A plain count has no colour.
+// window, week], each figure coloured by tone().
 function figures(Box, T, days, two, rows) {
   const cw = 10
   const lw = 15
-  const tone = (v) => (typeof v !== 'string' || !/[$%]/.test(v) ? undefined : v.startsWith('-') ? 'red' : GAIN)
   const cell = (v, o) => T(lpad(v == null ? '' : v, cw), o || { color: tone(v) })
   const out = [Box({ flexDirection: 'row', marginTop: 1, children: [T(pad('', lw)), cell(days + ' days', { bold: true, color: ACCENT }), two ? cell(WEEK + ' days', { bold: true, color: ACCENT }) : ''] })]
   for (const [label, a, b] of rows) {
@@ -1204,17 +1208,21 @@ function strategiesSection(Box, T, W, extra) {
   const out = [heading(T, 'Compaction Strategies', 'context cost')]
   const w = lastWeek(s.daily, s.days)
   const at = (label, n) => (n > 0 ? label + ' ' + k(n) : label)
-  const count = (n) => String(n) + ' ×'
-  out.push(...figures(Box, T, s.days, !!w, [
-    [at('Default', s.defaultAt), money(s.def.usd, 2), w && money(w.defUsd, 2)],
-    ['  compactions', count(s.def.n), w && count(w.defN)],
-    [at('Static', s.fixedAt), money(s.fixed.usd, 2), w && money(w.fixedUsd, 2)],
-    ['  compactions', count(s.fixed.n), w && count(w.fixedN)],
-    ['Burst, as run', money(s.actual.usd, 2), w && money(w.actualUsd, 2)],
-    ['  compactions', count(s.actual.n), w && count(w.actualN)],
-    ['Saved v default', money(s.def.usd - s.actual.usd, 2), w && money(w.defUsd - w.actualUsd, 2)],
-    ['Saved v static', money(s.fixed.usd - s.actual.usd, 2), w && money(w.fixedUsd - w.actualUsd, 2)],
-  ]))
+  const lw = 14, cw = 10, nw = 5
+  // One table per span: a row a strategy with its cost, its compactions (×)
+  // and what it saved against Claude Code alone; then Burst against static.
+  const table = (days, def, fixed, actual) => {
+    const row = (label, cost, n, saved) => Box({ flexDirection: 'row', children: [
+      T(pad(label, lw), { dimColor: true }), T(lpad(cost, cw)), T(lpad(n, nw)),
+      T(lpad(saved, cw), { color: tone(saved) }),
+    ] })
+    const way = (label, x, base) => row(label, money(x.usd, 2), String(x.n), base ? money(base.usd - x.usd, 2) : '')
+    out.push(Box({ flexDirection: 'row', marginTop: 1, children: [T(pad(days + ' days', lw), { bold: true, color: ACCENT }), ...[['Cost', cw], ['×', nw], ['v default', cw]].map(([h, n]) => T(lpad(h, n), { bold: true, color: ACCENT }))] }))
+    out.push(way(at('Default', s.defaultAt), def), way(at('Static', s.fixedAt), fixed, def), way('Burst, as run', actual, def))
+    out.push(row('  v static', '', '', money(fixed.usd - actual.usd, 2)))
+  }
+  table(s.days, s.def, s.fixed, s.actual)
+  if (w) table(WEEK, { usd: w.defUsd, n: w.defN }, { usd: w.fixedUsd, n: w.fixedN }, { usd: w.actualUsd, n: w.actualN })
   return out
 }
 
