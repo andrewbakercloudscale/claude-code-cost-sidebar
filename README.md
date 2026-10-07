@@ -210,18 +210,29 @@ A table, not a chart: one column for Burst's window and, where that is longer th
 | On screen | What it is |
 |---|---|
 | `30 days`, `7 days` | The column headings: the window Burst keeps these figures over, and the last 7 days of it. |
-| `$105 saved` | The net saving over the window: green when compaction has paid for itself, red (`lost`) when it has not yet. |
+| `$105 saved` | The net saving over the window: blue when compaction has paid for itself, red (`lost`) when it has not yet. |
+| Blue and red figures | In these tables money gained is blue and money lost is red, with its minus. Counts have no colour. |
 | `Compactions` | How many times Burst compacted. |
 | `Not re-sent` | What the turns after each compaction would have cost with the full history still in the context. |
 | `Summaries` | What the background calls that wrote the summaries cost. |
 | `Cache rewrites` | Each compaction changes the context, so the next turn writes it to the cache once at the higher rate. |
-| `Net savings` | Not re-sent, less the other two. Green, or red with a minus when it is a loss. |
+| `Net savings` | Not re-sent, less the other two. Red with a minus when it is a loss. |
 | `Each` | Net savings per compaction. |
 | `Of all spend` | Net savings as a share of everything spent over the same days, every provider, at API rates (from Burst's log). |
 | `642M tokens not re-sent, largest 300k → 61k` | The same saving in tokens, and the biggest single compaction: the context before and after. In a narrow sidebar the largest has a row of its own. |
 | `This session: $2.84 saved, 1 compaction` | This session's own share. `$0.40 lost so far` in yellow means its compaction has not paid for itself yet; it does over the next few turns. |
 
-**Overflow to Secondary**, under it when requests have gone to the secondary, is the same table: requests, what they would have cost at Anthropic's price, what the secondary charged, net savings and its share of all spend.
+**Compaction Strategies**, under it, answers what the choice of limit was worth. Burst replays the same requests three ways and prices each. It is the context cost only (cache reads plus what the compactions cost): output and new input are the same all three ways.
+
+| On screen | What it is |
+|---|---|
+| `Default 950k` | Claude Code alone: no Burst, so it compacts only near the end of the model's window. |
+| `Static 500k` | A fixed Compact at, the one set on Burst's dashboard. The label carries its real value. |
+| `Burst, as run` | What Burst really sent, with whatever mode was on each day (Intelligent Compaction Mode included). |
+| `compactions` | Under each, how many compactions that way makes. |
+| `Saved v default`, `Saved v static` | The first two, each less `Burst, as run`. Red with a minus where Burst cost more. |
+
+**Overflow to Secondary**, under that when requests have gone to the secondary, is the same table: requests, what they would have cost at Anthropic's price, what the secondary charged, net savings and its share of all spend.
 
 ### Today
 
