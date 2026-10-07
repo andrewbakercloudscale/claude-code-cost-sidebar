@@ -662,6 +662,19 @@ test('Pauseless Compaction that lost shows the loss in red, with its minus', asy
   expect((await ui.find({ type: 'Text', text: '    -$1.63' })).props.color).toBe('red')
 })
 
+test('in a narrow sidebar the largest compaction has a row of its own, and Overflow to Secondary a blank row above it', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  dashboard(on, { state: { context: { window_days: 7, compaction_stats: { compactions: 45, saved_usd: 298.47, summary_usd: 12.59, rewrite_usd: 9.83, net_usd: 276.05, tokens_not_resent: 1_492_358_786, largest_before: 945_748, largest_after: 60_359, sessions: [], daily: [] }, overflow_stats: { requests: 30, priced: 30, list_usd: 20, paid_usd: 5, saved_usd: 15, daily: [] } } } })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 43 } })
+  const drawn = JSON.stringify(await ui.drawn())
+  // 39 columns in the card, 44 in the one-row form: nothing is cut off.
+  expect(drawn).toContain('"1.49B tokens not re-sent"')
+  expect(drawn).toContain('"Largest 946k → 60k"')
+  const card = drawn.slice(drawn.indexOf('"Largest 946k → 60k"'), drawn.indexOf('"Overflow to Secondary"'))
+  expect(card).toContain('[" "]')
+})
+
 test('over a 30-day window the savings tables have a column for the 30 days and one for the last 7', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   // Ten days on file: $10 not re-sent a day, less $1 for summaries and $1 for rewrites, 2 compactions a day.
