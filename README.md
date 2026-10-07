@@ -229,8 +229,12 @@ A table, not a chart: one column for Burst's window and, where that is longer th
 | `Default 950k` | Claude Code alone: no Burst, so it compacts only near the end of the model's window. |
 | `Static 500k` | A fixed Compact at, the one set on Burst's dashboard. The label carries its real value. |
 | `Burst, as run` | What Burst really sent, with whatever mode was on each day (Intelligent Compaction Mode included). |
-| `compactions` | Under each, how many compactions that way makes. |
-| `Saved v default`, `Saved v static` | The first two, each less `Burst, as run`. Red with a minus where Burst cost more. |
+| `Cost` | The context cost that way. |
+| `×` | How many compactions that way makes. |
+| `v default` | What that way saves against `Default`: its cost taken from Default's. Blue, or red with a minus where it costs more. |
+| `v static` | `Burst, as run` against `Static`: what Burst's own choice of limit was worth over the fixed one. |
+
+One table for Burst's window and, where that is longer than a week, one for the last 7 days.
 
 **Overflow to Secondary**, under that when requests have gone to the secondary, is the same table: requests, what they would have cost at Anthropic's price, what the secondary charged, net savings and its share of all spend.
 

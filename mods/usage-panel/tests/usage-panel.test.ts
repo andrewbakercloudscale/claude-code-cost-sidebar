@@ -718,18 +718,23 @@ test('Compaction Strategies sets Claude Code alone, a static limit and Burst as 
   const drawn = JSON.stringify(await ui.drawn())
   const card = drawn.slice(drawn.indexOf('"Compaction Strategies"'), drawn.indexOf('"Today"'))
   expect(card).toContain('"  context cost"')
-  expect(card).toContain('"Default 950k   "')
-  expect(card).toContain('"Static 500k    "')
+  expect(card).toContain('"30 days       "')
+  expect(card).toContain('" v default"')
+  expect(card).toContain('"Default 950k  "')
+  expect(card).toContain('"Static 500k   "')
   expect(card).toContain('"   $927.25"')
-  expect(card).toContain('"      79 ×"')
-  // 927.25 - 584.52 and 672.27 - 584.52 over the window: money gained is blue.
+  expect(card).toContain('"   79"')
+  // Saved against Claude Code alone: 927.25 - 672.27 static, 927.25 - 584.52 as run. Blue.
+  expect((await ui.find({ type: 'Text', text: '   $254.98' })).props.color).toBe('blue')
   expect((await ui.find({ type: 'Text', text: '   $342.73' })).props.color).toBe('blue')
+  // Burst against static: 672.27 - 584.52.
   expect((await ui.find({ type: 'Text', text: '    $87.75' })).props.color).toBe('blue')
   // The last seven days: $70 alone, $49 static, $56 as run. Burst lost $7 against static: red.
+  expect(card).toContain('"7 days        "')
   expect((await ui.find({ type: 'Text', text: '    $14.00' })).props.color).toBe('blue')
   expect((await ui.find({ type: 'Text', text: '    -$7.00' })).props.color).toBe('red')
-  // A count has no colour.
-  expect((await ui.find({ type: 'Text', text: '      79 ×' })).props.color).toBeUndefined()
+  // A cost is a fact, not a gain: no colour.
+  expect((await ui.find({ type: 'Text', text: '   $927.25' })).props.color).toBeUndefined()
 })
 
 test('without Burst, or before Burst has compacted anything, there is no Pauseless Compaction card', async ($, on) => {
