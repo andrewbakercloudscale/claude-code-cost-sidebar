@@ -802,18 +802,6 @@ function sessionSection(Box, T, d, W, burst, warnPct, full) {
         spark(T, costs, (v, i) => (drops.has(i) ? 'cyan' : med > 0 && v > med * 4 ? 'red' : med > 0 && v > med * 2 ? 'yellow' : 'green'), 0),
       ],
     }))
-    const cache = turns.slice(-20).filter((t) => !t[6]).map((t) => t[3])
-    if (cache.length > 0) {
-      const avg = cache.reduce((a, b) => a + b, 0) / cache.length
-      const label = Math.round(avg) + '% hit'
-      out.push(Box({
-        flexDirection: 'row', columnGap: 1, marginTop: 1, children: [
-          T('cache ', { dimColor: true }),
-          gauge(T, avg, Math.max(6, W - 8 - label.length), avg >= 90 ? 'green' : avg >= 75 ? 'yellow' : 'red', []),
-          T(label, { dimColor: true }),
-        ],
-      }))
-    }
   }
   return out
 }
