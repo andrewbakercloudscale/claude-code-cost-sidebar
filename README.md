@@ -210,7 +210,7 @@ A table, not a chart: one column for Burst's window and, where that is longer th
 
 | On screen | What it is |
 |---|---|
-| `last 30 days` | The window Burst keeps these figures over. |
+| `30 days`, `7 days` | The column headings: the window Burst keeps these figures over, and the last 7 days of it. |
 | `$105 saved` | The net saving over the window: green when compaction has paid for itself, red (`lost`) when it has not yet. |
 | `Compactions` | How many times Burst compacted. |
 | `Not re-sent` | What the turns after each compaction would have cost with the full history still in the context. |

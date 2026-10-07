@@ -1104,7 +1104,7 @@ function limitShares(Box, T, d, W, rows, extra) {
 function savingsSection(Box, T, W, extra) {
   const c = extra && extra.comp
   if (!c || !(c.n > 0)) return []
-  const out = [heading(T, 'Pauseless Compaction', 'last ' + c.days + ' days')]
+  const out = [heading(T, 'Pauseless Compaction')]
   out.push(T([
     T(money(Math.abs(c.net)), { bold: true, color: c.net >= 0 ? 'green' : 'red' }),
     T(c.net >= 0 ? ' saved' : ' lost', { color: c.net >= 0 ? 'green' : 'red' }),
@@ -1179,7 +1179,7 @@ function overflowSection(Box, T, W, extra) {
   const o = extra && extra.over
   if (!o || !(o.n > 0)) return []
   const good = o.saved >= 0
-  const out = [heading(T, 'Overflow to Secondary', 'last ' + o.days + ' days')]
+  const out = [heading(T, 'Overflow to Secondary')]
   out.push(T([
     T(money(Math.abs(o.saved)), { bold: true, color: good ? 'green' : 'red' }),
     T(good ? ' saved' : ' lost', { color: good ? 'green' : 'red' }),
