@@ -1017,7 +1017,7 @@ function planSection(Box, T, d, W, now, limits, extra) {
     const name = T(pad(limitName(l.key), nameW), { dimColor: !stacked, bold: stacked })
     const label = T(labelOf(l), { color: c === 'green' ? undefined : c, wrap: 'truncate-end' })
     // Any use at all is a cell on the bar: 4% of a short one rounded to none.
-    const bar = (w) => gauge(T, l.util > 0 ? Math.max(pct, 100 / w) : 0, w, c, [LIMIT_WARN * 100])
+    const bar = (w) => gauge(T, l.util > 0 ? Math.max(pct, 100 / w) : 0, w, c, [])
     if (stacked) {
       out.push(Box({ flexDirection: 'row', columnGap: 1, marginTop: i > 0 ? 1 : 0, children: [name, label] }))
       out.push(bar(W))
