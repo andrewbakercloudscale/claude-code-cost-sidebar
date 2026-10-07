@@ -921,6 +921,35 @@ test('Plan Utilisation says what used each limit, by project, from Burst\'s log 
   expect(drawn).not.toContain('"scratch')
   // This session's project is in cyan, as in Projects.
   expect(await coloured(ui, /^claude-burst$/, 'cyan')).toBe(true)
+  // The others have a colour each, the same in both charts.
+  const bar = async (name: string) => {
+    const rows = (await ui.findAll({ type: 'Box' })).filter((n) => n.children && n.children.length === 3 && new RegExp('^' + name + ' *$').test(String((n.children[0].children || [])[0])))
+    return rows.map((n) => n.children[1].props.color)
+  }
+  expect(await bar('wp-plugins')).toEqual(['blue', 'blue'])
+  // (tools has a third bar further down, in another card)
+  expect((await bar('tools')).slice(0, 2)).toEqual(['green', 'green'])
+  expect(await bar('other')).toEqual(['gray', 'gray'])
+  // Each chart's heading is in bold.
+  expect((await ui.findAll({ type: 'Text', text: 'What used the weekly limit' })).some((n) => n.props && n.props.bold === true)).toBe(true)
+  await ui.unmount()
+})
+
+test('in a narrow sidebar each limit has its bar on a row of its own, and any use is a cell on it', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  dashboard(on, { responses: () => [reply(0.03, 0.04)], usage: () => ({ by_repo: [{ key: 'claude-burst', usd: 30 }] }) }, [])
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 43 } })
+  const drawn = JSON.stringify(await ui.drawn())
+  // 39 columns in the card: the figures whole on one row, the bar the full width under them.
+  expect(await ui.find({ type: 'Text', text: /^  3%  resets \d\d:\d\d \(1h41m\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '█' + '░'.repeat(30) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '██' + '░'.repeat(29) })).toBeDefined()
+  // The month's line is worded to fit, not wrapped.
+  expect(drawn).toContain(' this month at API rates vs $200')
+  // The longer heading keeps its words and shortens its note.
+  expect(drawn).toContain('"What used the weekly limit"')
+  expect(drawn).toContain('"  est."')
   await ui.unmount()
 })
 
