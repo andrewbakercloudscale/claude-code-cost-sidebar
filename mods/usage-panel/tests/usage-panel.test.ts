@@ -590,26 +590,24 @@ test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, a
   expect(drawn).toContain('"  last 7 days"')
   expect(drawn).toContain('{"bold":true,"color":"green"},"children":["$276"]')
   expect(drawn).toContain('"  45 compactions"')
-  expect(drawn).toContain('"  $298.47"')
-  expect(drawn).toContain('"  -$12.59"')
-  expect(drawn).toContain('"   -$9.83"')
+  expect(drawn).toContain('"   $298.47"')
+  expect(drawn).toContain('"   -$12.59"')
+  expect(drawn).toContain('"    -$9.83"')
   expect(drawn).toContain('"1.49B tokens not re-sent, largest 946k → 60k"')
   // This session's own share, and no other's.
   expect(drawn).toContain('"This session: "')
   expect(drawn).toContain('"$3.19"')
   expect(drawn).toContain('" saved, 2 compactions"')
-  // A row a day with its date and its figure, the last one today.
-  expect(drawn).toContain('"Net savings per day"')
-  expect(drawn).toContain('"3 Oct"')
-  expect(drawn).toContain('"$92.70"')
-  expect(drawn).toContain('"today"')
-  expect(drawn).toContain('"$26.70"')
-  expect(drawn).not.toContain('"  red: lost"')
+  // A table, not a chart: one column while Burst's window is a week.
+  expect(drawn).toContain('"    7 days"')
+  expect(drawn).not.toContain('"Net savings per day"')
+  expect(drawn).toContain('"Each           "')
+  expect(drawn).toContain('"     $6.13"')
   // The total is named for what it is, and given as a share of the $690 spent since the first day.
-  expect(drawn).toContain('"Net savings           "')
+  expect(drawn).toContain('"Net savings    "')
+  expect(drawn).toContain('"Of all spend   "')
   expect(urls.some((u) => u.startsWith('http://127.0.0.1:7788/api/usage?range=custom&limit=1&from=2026-10-03&to='))).toBe(true)
-  expect(drawn).toContain('"40%"')
-  expect(drawn).toContain('" of the $690 spent"')
+  expect(drawn).toContain('"       40%"')
   // Under Plan Utilisation, above Today; and it can be hidden like the rest.
   expect(drawn.indexOf('"Pauseless Compaction"')).toBeGreaterThan(drawn.indexOf('"Plan Utilisation"'))
   expect(drawn.indexOf('"Pauseless Compaction"')).toBeLessThan(drawn.indexOf('"Today"'))
@@ -632,11 +630,11 @@ test('Overflow to Secondary shows what the secondary saved against the price of 
   const card = drawn.slice(drawn.indexOf('"Overflow to Secondary"'), drawn.indexOf('"Today"'))
   expect(card).toContain('{"bold":true,"color":"green"},"children":["$42.0"]')
   expect(card).toContain('"  12 requests"')
-  expect(card).toContain('"   $48.20"')
-  expect(card).toContain('"   -$6.15"')
-  expect(card).toContain('"   $42.05"')
+  expect(card).toContain('"    $48.20"')
+  expect(card).toContain('"    -$6.15"')
+  expect(card).toContain('"    $42.05"')
+  expect(card).toContain('"Requests       "')
   expect(card).toContain('"1 request has no price and is left out"')
-  expect(card).toContain('"3 Oct')
   // No compaction this week: its card is not drawn, this one still is.
   expect(await ui.find({ type: 'Text', text: 'Pauseless Compaction' })).toBeUndefined()
   await ui.unmount()
@@ -653,32 +651,45 @@ test('no Overflow card when nothing went to the secondary', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: 'Overflow to Secondary' })).toBeUndefined()
 })
 
-test('Pauseless Compaction draws a losing day as a red bar', async ($, on) => {
+test('Pauseless Compaction that lost shows the loss in red, with its minus', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   const daily = [{ date: '2026-10-04', net_usd: -1.2, compactions: 5 }, { date: '2026-10-05', net_usd: -0.43, compactions: 4 }]
   dashboard(on, { state: { context: { window_days: 7, compaction_stats: { compactions: 9, saved_usd: 0.75, summary_usd: 1.38, rewrite_usd: 1, net_usd: -1.63, tokens_not_resent: 3_740_000, sessions: [], daily } } } })
   await start($)
   const ui = await $.ui.mount(PANE)
   const drawn = JSON.stringify(await ui.drawn())
-  const card = drawn.slice(drawn.indexOf('"Pauseless Compaction"'), drawn.indexOf('"Not re-sent'))
-  expect(card).toContain('" lost"')
-  expect(card).toMatch(/"color":"red"\},"children":\["█+ *"\]/)
-  expect(card).toContain('"4 Oct')
-  // The figure has its minus, and the heading says what red is.
-  expect(card).toContain('"-$1.20"')
-  expect(card).toContain('"  red: lost"')
-  expect(drawn).toContain('"Net loss              "')
+  expect(drawn).toContain('" lost"')
+  expect((await ui.find({ type: 'Text', text: '    -$1.63' })).props.color).toBe('red')
 })
 
-test('Pauseless Compaction has no chart for a week with nothing saved or lost on any day', async ($, on) => {
+test('over a 30-day window the savings tables have a column for the 30 days and one for the last 7', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
-  const daily = [{ date: '2026-10-04', net_usd: 0, compactions: 0 }, { date: '2026-10-05', net_usd: 0, compactions: 0 }]
-  dashboard(on, { state: { context: { window_days: 7, compaction_stats: { compactions: 1, saved_usd: 0, summary_usd: 0, rewrite_usd: 0, net_usd: 0, tokens_not_resent: 0, sessions: [], daily } } } })
+  // Ten days on file: $10 not re-sent a day, less $1 for summaries and $1 for rewrites, 2 compactions a day.
+  const dates = ['2026-09-26', '2026-09-27', '2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05']
+  const daily = dates.map((date) => ({ date, compactions: 2, saved_usd: 10, summary_usd: 1, rewrite_usd: 1, net_usd: 8 }))
+  const od = dates.map((date) => ({ date, requests: 3, list_usd: 2, paid_usd: 0.5, saved_usd: 1.5 }))
+  const usage = (url: string) => (url.includes('from=2026-09-26') ? { by_provider: [{ key: 'anthropic', usd: 400 }] } : url.includes('from=2026-09-29') ? { by_provider: [{ key: 'anthropic', usd: 100 }] } : {})
+  dashboard(on, { state: { context: { window_days: 30, compaction_stats: { compactions: 20, saved_usd: 100, summary_usd: 10, rewrite_usd: 10, net_usd: 80, tokens_not_resent: 0, sessions: [], daily }, overflow_stats: { requests: 30, priced: 30, list_usd: 20, paid_usd: 5, saved_usd: 15, daily: od } } }, usage })
   await start($)
   const ui = await $.ui.mount(PANE)
   const drawn = JSON.stringify(await ui.drawn())
-  const card = drawn.slice(drawn.indexOf('"Pauseless Compaction"'), drawn.indexOf('"Not re-sent'))
-  expect(card).not.toContain('"today"')
+  expect(drawn).toContain('"  last 30 days"')
+  const card = drawn.slice(drawn.indexOf('"Pauseless Compaction"'), drawn.indexOf('"Overflow to Secondary"'))
+  expect(card).toContain('"   30 days"')
+  expect(card).toContain('"    7 days"')
+  // 30 days from Burst's totals; 7 days summed from the last seven of its days.
+  expect(card).toContain('"        20"')
+  expect(card).toContain('"        14"')
+  expect(card).toContain('"    $80.00"')
+  expect(card).toContain('"    $56.00"')
+  expect(card).toContain('"    -$7.00"')
+  // $80 of the $400 spent in the window; $56 of the $100 spent in the last seven days.
+  expect(card).toContain('"       20%"')
+  expect(card).toContain('"       56%"')
+  const over = drawn.slice(drawn.indexOf('"Overflow to Secondary"'), drawn.indexOf('"Today"'))
+  expect(over).toContain('"    $15.00"')
+  expect(over).toContain('"    $10.50"')
+  expect(over).toContain('"        21"')
 })
 
 test('without Burst, or before Burst has compacted anything, there is no Pauseless Compaction card', async ($, on) => {

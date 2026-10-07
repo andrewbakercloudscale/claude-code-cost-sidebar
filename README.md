@@ -202,23 +202,27 @@ How close you are to your plan's limits. Anthropic states the figures itself, in
 
 ### Pauseless Compaction
 
-<img src="docs/card-savings.png" alt="The Pauseless Compaction card: $24.4 saved over the last 7 days from 9 compactions, that saving as a share of what was spent, a row per day with its date and figure, what was not re-sent less the summaries and cache rewrites, tokens not re-sent, and this session's share" width="460">
+<img src="docs/card-savings.png" alt="The Pauseless Compaction card: $105 saved over the last 30 days from 38 compactions, then a table with a column for the 30 days and one for the last 7: compactions, what was not re-sent, the summaries, the cache rewrites, net savings, the saving per compaction and its share of all spend" width="460">
 
 What Claude Burst's [pauseless compaction](#pauseless-compaction-with-claude-burst) has saved, across every session on this Mac. Shown only with Burst, once it has compacted something. The figures are Burst's own, read from its dashboard once a minute.
 
+A table, not a chart: one column for Burst's window and, where that is longer than a week, one for the last 7 days (summed from Burst's daily figures). Burst's window is 30 days from 0.20.12; with an older Burst it is 7 days and the table has one column.
+
 | On screen | What it is |
 |---|---|
-| `last 7 days` | The window Burst keeps these figures over. |
-| `$24.4 saved` | The net saving: green when compaction has paid for itself, red (`lost`) when it has not yet. |
-| `9 compactions  $2.72 each` | How many times Burst compacted, and the net saving per compaction. |
-| `21% of the $118 spent` | The net saving as a share of everything spent over the same days, every provider, at API rates (from Burst's log). |
-| `Net savings per day` | A row per day, oldest first and `today` last: the date, a bar by its size, and the figure. Green saved money. A day that lost money is red with a minus (`-$0.40`), and the heading then says `red: lost`. No chart when no day saved or lost anything. |
+| `last 30 days` | The window Burst keeps these figures over. |
+| `$105 saved` | The net saving over the window: green when compaction has paid for itself, red (`lost`) when it has not yet. |
+| `Compactions` | How many times Burst compacted. |
 | `Not re-sent` | What the turns after each compaction would have cost with the full history still in the context. |
 | `Summaries` | What the background calls that wrote the summaries cost. |
 | `Cache rewrites` | Each compaction changes the context, so the next turn writes it to the cache once at the higher rate. |
-| `Net savings` | Not re-sent, less the other two. `Net loss` in red when compaction has not paid for itself. |
-| `158M tokens not re-sent, largest 300k → 61k` | The same saving in tokens, and the biggest single compaction: the context before and after. |
+| `Net savings` | Not re-sent, less the other two. Green, or red with a minus when it is a loss. |
+| `Each` | Net savings per compaction. |
+| `Of all spend` | Net savings as a share of everything spent over the same days, every provider, at API rates (from Burst's log). |
+| `642M tokens not re-sent, largest 300k → 61k` | The same saving in tokens, and the biggest single compaction: the context before and after. |
 | `This session: $2.84 saved, 1 compaction` | This session's own share. `$0.40 lost so far` in yellow means its compaction has not paid for itself yet; it does over the next few turns. |
+
+**Overflow to Secondary**, under it when requests have gone to the secondary, is the same table: requests, what they would have cost at Anthropic's price, what the secondary charged, net savings and its share of all spend.
 
 ### Today
 
