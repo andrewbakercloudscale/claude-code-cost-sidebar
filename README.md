@@ -202,22 +202,23 @@ How close you are to your plan's limits. Anthropic states the figures itself, in
 
 ### Pauseless Compaction
 
-<img src="docs/card-savings.png" alt="The Pauseless Compaction card: $25.3 saved over the last 7 days from 9 compactions, a bar per day, what was not re-sent less the summaries and cache rewrites, tokens not re-sent, and this session's share" width="460">
+<img src="docs/card-savings.png" alt="The Pauseless Compaction card: $24.4 saved over the last 7 days from 9 compactions, that saving as a share of what was spent, a row per day with its date and figure, what was not re-sent less the summaries and cache rewrites, tokens not re-sent, and this session's share" width="460">
 
 What Claude Burst's [pauseless compaction](#pauseless-compaction-with-claude-burst) has saved, across every session on this Mac. Shown only with Burst, once it has compacted something. The figures are Burst's own, read from its dashboard once a minute.
 
 | On screen | What it is |
 |---|---|
 | `last 7 days` | The window Burst keeps these figures over. |
-| `$25.3 saved` | The net saving: green when compaction has paid for itself, red (`lost`) when it has not yet. |
-| `9 compactions  $2.81 each` | How many times Burst compacted, and the net saving per compaction. |
-| The bars | Net saving per day, oldest on the left, today in cyan. A day that lost money is a red bar of that size. No chart when no day saved or lost anything. |
+| `$24.4 saved` | The net saving: green when compaction has paid for itself, red (`lost`) when it has not yet. |
+| `9 compactions  $2.72 each` | How many times Burst compacted, and the net saving per compaction. |
+| `21% of the $118 spent` | The net saving as a share of everything spent over the same days, every provider, at API rates (from Burst's log). |
+| `Net savings per day` | A row per day, oldest first and `today` last: the date, a bar by its size, and the figure. Green saved money. A day that lost money is red with a minus (`-$0.40`), and the heading then says `red: lost`. No chart when no day saved or lost anything. |
 | `Not re-sent` | What the turns after each compaction would have cost with the full history still in the context. |
 | `Summaries` | What the background calls that wrote the summaries cost. |
 | `Cache rewrites` | Each compaction changes the context, so the next turn writes it to the cache once at the higher rate. |
-| `Net` | Not re-sent, less the other two. |
+| `Net savings` | Not re-sent, less the other two. `Net loss` in red when compaction has not paid for itself. |
 | `158M tokens not re-sent, largest 300k → 61k` | The same saving in tokens, and the biggest single compaction: the context before and after. |
-| `1 compaction has saved $2.84 this session` | This session's own share. `has lost $0.40 so far` in yellow means its compaction has not paid for itself yet; it does over the next few turns. |
+| `This session: $2.84 saved, 1 compaction` | This session's own share. `$0.40 lost so far` in yellow means its compaction has not paid for itself yet; it does over the next few turns. |
 
 ### Today
 
@@ -228,7 +229,7 @@ What Claude Burst's [pauseless compaction](#pauseless-compaction-with-claude-bur
 | `$31.40` | Spent today across all sessions on this Mac. |
 | `→ $44.90 by end of day` | The forecast, from your own hour-by-hour pattern scaled by today's pace. It is not shown early in the day, before there is enough to go on. |
 | `$1.84 re-written after 6 pauses, $12.40 in 9 days` | What pauses cost. The prompt cache expires after five minutes idle, and the turn after a longer pause writes the context to the cache again at about 25 times the price of reading it. This is that difference, for today's turns in every session, and over the days the panel has on file (30 at most, counted from the day this was installed). Not shown until there is a loss on file. |
-| `By hour` | A typical day: your average spend in each hour over the last 30 days. Blue hours are gone, cyan is this hour, grey are still to come. |
+| `By hour` | A typical day: your average spend in each hour over the last 30 days. Blue hours are gone, cyan is this hour, grey are still to come; the row under the chart says so. |
 | `5h block  1h58m left` | The current 5-hour usage block and when it resets. The bar is how much of the block has passed. |
 | `$12.8  $4.10/hr elevated` | Spent in this block, and its burn rate across all sessions, with the panel's word for it. |
 | Lines starting `◔ ◴ ≋ ⇄` | Insights: a busy day (1.5× a typical day by this hour or more) or a quiet one (half or less), pauses that cost a tenth of the day or more (`◴`), and a raised burn rate. With Claude Burst, `⇄` says how many requests went to the secondary provider today, which one, and what they cost on top of the plan. |
@@ -237,13 +238,13 @@ What Claude Burst's [pauseless compaction](#pauseless-compaction-with-claude-bur
 
 <img src="docs/card-sessions.png" alt="The Sessions today card" width="460">
 
-The five most expensive sessions today: the end of each session's id, its cost, a bar against the most expensive, and when it was last active. This session is in cyan with a `◀`.
+The five most expensive sessions today: the end of each session's id, its cost, a bar against the most expensive, and when it was last active. This session is in cyan with a `◀`; each other session has a colour of its own, the same on its rows under Costliest turns.
 
 **Costliest turns today** is the five dearest single turns of the day, from whichever session they were in:
 
 | Column | What it is |
 |---|---|
-| `*91b04` | The end of the session's id. This session's rows are in cyan. |
+| `*91b04` | The end of the session's id, in the session's colour from the chart above. This session's rows are in cyan. |
 | `#61` | The turn's number in that session, the same number its turn table shows. |
 | `$1.92` | What the turn cost. |
 | `268k` | The context it sent. |
@@ -282,7 +283,7 @@ No line means nothing stood out: the turn was dear because the whole context is 
 
 <img src="docs/card-projects.png" alt="The Projects card" width="460">
 
-Spend by project folder over 30 days, largest first, with this session's project in cyan. Under it, two general insights, each shown only when something has changed (a line that is always there is not read):
+Spend by project folder over 30 days, largest first, each project in a colour of its own and this session's in cyan. Under it, two general insights, each shown only when something has changed (a line that is always there is not read):
 
 - `▣ New top project: api-server is 46% of the last 7 days (my-app leads the 30).` The project that leads the last 7 days, with 30% of the spend or more, is not the one that leads the 30. Needs Claude Burst, whose log the 7 days are read from.
 - `◷ Unusual hour: 23:00 averages $0.40/hr, against $5.10 at 10:00.` This session is working at an hour that averages under a tenth of your busiest one.

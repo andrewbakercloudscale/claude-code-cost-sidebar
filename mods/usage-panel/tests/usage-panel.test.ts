@@ -581,7 +581,8 @@ test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, a
     daily: [{ date: '2026-10-03', net_usd: 92.7, compactions: 11 }, { date: '2026-10-04', net_usd: 46.6, compactions: 6 }, { date: '2026-10-05', net_usd: 26.7, compactions: 6 }],
   }
   const state = { context: { window_days: 7, compaction: { warn_at_percent: 80 }, compaction_stats: stats }, today: { SecondaryRequests: 0 } }
-  dashboard(on, { state })
+  const urls: string[] = []
+  dashboard(on, { state, usage: (url: string) => (url.includes('from=2026-10-03') ? { by_provider: [{ key: 'anthropic', usd: 680 }, { key: 'together', usd: 10 }] } : {}) }, urls)
   await start($)
   const ui = await $.ui.mount(PANE)
   const drawn = JSON.stringify(await ui.drawn())
@@ -594,9 +595,21 @@ test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, a
   expect(drawn).toContain('"   -$9.83"')
   expect(drawn).toContain('"1.49B tokens not re-sent, largest 946k → 60k"')
   // This session's own share, and no other's.
-  expect(drawn).toContain('"2 compactions have saved "')
+  expect(drawn).toContain('"This session: "')
   expect(drawn).toContain('"$3.19"')
-  expect(drawn).toContain('" this session"')
+  expect(drawn).toContain('" saved, 2 compactions"')
+  // A row a day with its date and its figure, the last one today.
+  expect(drawn).toContain('"Net savings per day"')
+  expect(drawn).toContain('"3 Oct"')
+  expect(drawn).toContain('"$92.70"')
+  expect(drawn).toContain('"today"')
+  expect(drawn).toContain('"$26.70"')
+  expect(drawn).not.toContain('"  red: lost"')
+  // The total is named for what it is, and given as a share of the $690 spent since the first day.
+  expect(drawn).toContain('"Net savings           "')
+  expect(urls.some((u) => u.startsWith('http://127.0.0.1:7788/api/usage?range=custom&limit=1&from=2026-10-03&to='))).toBe(true)
+  expect(drawn).toContain('"40%"')
+  expect(drawn).toContain('" of the $690 spent"')
   // Under Plan Utilisation, above Today; and it can be hidden like the rest.
   expect(drawn.indexOf('"Pauseless Compaction"')).toBeGreaterThan(drawn.indexOf('"Plan Utilisation"'))
   expect(drawn.indexOf('"Pauseless Compaction"')).toBeLessThan(drawn.indexOf('"Today"'))
@@ -649,8 +662,12 @@ test('Pauseless Compaction draws a losing day as a red bar', async ($, on) => {
   const drawn = JSON.stringify(await ui.drawn())
   const card = drawn.slice(drawn.indexOf('"Pauseless Compaction"'), drawn.indexOf('"Not re-sent'))
   expect(card).toContain('" lost"')
-  expect(card).toMatch(/"color":"red"\},"children":\["[▁▂▃▄▅▆▇█ ]+"\]/)
+  expect(card).toMatch(/"color":"red"\},"children":\["█+ *"\]/)
   expect(card).toContain('"4 Oct')
+  // The figure has its minus, and the heading says what red is.
+  expect(card).toContain('"-$1.20"')
+  expect(card).toContain('"  red: lost"')
+  expect(drawn).toContain('"Net loss              "')
 })
 
 test('Pauseless Compaction has no chart for a week with nothing saved or lost on any day', async ($, on) => {
@@ -815,6 +832,8 @@ test('the costliest turns today are listed under the top sessions, from any sess
   const ui = await $.ui.mount(PANE)
   const drawn = JSON.stringify(await ui.drawn())
   expect(await ui.find({ type: 'Text', text: 'Costliest turns today' })).toBeDefined()
+  // Not every bar blue: the sessions that are not this one have a colour each.
+  expect(JSON.stringify(await ui.drawn())).toMatch(/"color":"(green|yellow|magenta)"\},"children":\["█+ *"\]/)
   expect(drawn).toContain('"#212 "')
   expect(drawn).toContain('" $6.81"')
   // A long folder keeps its end, as the project rows do.

@@ -468,6 +468,7 @@ async function readExtras($) {
   }
   const cfg = state && state.context && state.context.compaction
   if (cfg && cfg.warn_at_percent > 0) next.warn = cfg.warn_at_percent
+  const iso = (sec) => new Date(sec * 1000).toISOString().slice(0, 19) + 'Z'
   const stats = state && state.context && state.context.compaction_stats
   const mine = ((stats && stats.sessions) || []).filter((x) => x && x.session === sid)
   // Every session Burst has compacted, over its window (7 days).
@@ -489,6 +490,14 @@ async function readExtras($) {
       daily: (Array.isArray(over.daily) ? over.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => ({ d: x.date, net: x.saved_usd || 0 })),
     }
   }
+  // What was spent over the same days, every provider, to say what share of
+  // it each saving is.
+  const since = ((next.comp && next.comp.daily[0]) || (next.over && next.over.daily[0]) || {}).d
+  if (since) {
+    const all = await get('/api/usage?range=custom&limit=1&from=' + since + '&to=' + iso(now))
+    const spent = ((all && all.by_provider) || []).reduce((a, x) => a + ((x && x.usd) || 0), 0)
+    if (spent > 0) next.spent = spent
+  }
   if (mine.length > 0) next.saved = { net: mine.reduce((a, x) => a + (x.net_usd || 0), 0), n: mine.reduce((a, x) => a + (x.compactions || 0), 0) }
   if (state && state.today && state.today.SecondaryRequests > 0) {
     const day = new Date(now * 1000)
@@ -501,7 +510,6 @@ async function readExtras($) {
   // What used each of the plan's limits, by project: Anthropic's spend in
   // Burst's log since the window opened. Only the plain windows (5h, 7d): a
   // per-model one is a part of the weekly.
-  const iso = (sec) => new Date(sec * 1000).toISOString().slice(0, 19) + 'Z'
   const byRepo = (u) => {
     const rows = ((u && u.by_repo) || []).filter((x) => x && x.usd > 0).map((x) => ({ name: x.key || 'no folder', usd: x.usd })).sort((a, b) => b.usd - a.usd)
     return rows.length > 0 ? { rows: rows.slice(0, 8), total: rows.reduce((a, x) => a + x.usd, 0) } : null
@@ -681,9 +689,21 @@ function heading(T, title, note) {
   return T([T(title, { bold: true, color: ACCENT }), note ? T('  ' + note, { dimColor: true }) : ''], { wrap: 'truncate-end' })
 }
 
-// A smaller heading inside a card, for one chart of several.
-function sub(T, title, note) {
-  return T([T(title, { color: ACCENT }), note ? T('  ' + note, { dimColor: true }) : ''], { wrap: 'truncate-end' })
+// A smaller heading inside a card, for one chart of several: in bold, under
+// a blank row, so the charts do not run into each other.
+function sub(Box, T, title, note) {
+  return Box({ flexDirection: 'row', marginTop: 1, children: [T([T(title, { bold: true, color: ACCENT }), note ? T('  ' + note, { dimColor: true }) : ''], { wrap: 'truncate-end' })] })
+}
+
+// A colour for each bar in a chart of projects or sessions, by its place.
+// Cyan is this session's and grey the rest's, so neither is here.
+const SHARE_COLOURS = ['blue', 'green', 'yellow', 'magenta']
+function colourer() {
+  const seen = new Map()
+  return (name) => {
+    if (!seen.has(name)) seen.set(name, SHARE_COLOURS[seen.size % SHARE_COLOURS.length])
+    return seen.get(name)
+  }
 }
 
 // ---- this session
@@ -1031,11 +1051,6 @@ function planSection(Box, T, d, W, now, limits, extra) {
 // has a row of its own.
 const LIMIT_BAR_MIN = 16
 
-// A colour for each project in the two charts of what used a limit, the
-// same project the same colour in both. Cyan is this session's project and
-// grey the rest, so neither is here.
-const SHARE_COLOURS = ['blue', 'green', 'yellow', 'magenta']
-
 // What used each limit, by project: the limit's reading shared out by each
 // project's cost at API rates since the window opened. An estimate, and
 // said to be: Anthropic does not publish how it weighs tokens against a
@@ -1043,11 +1058,8 @@ const SHARE_COLOURS = ['blue', 'green', 'yellow', 'magenta']
 function limitShares(Box, T, d, W, rows, extra) {
   const out = []
   const here = (d.session && d.session.folder) || ''
-  const colours = new Map()
-  const colourOf = (name) => {
-    if (!colours.has(name)) colours.set(name, SHARE_COLOURS[colours.size % SHARE_COLOURS.length])
-    return colours.get(name)
-  }
+  // The same project the same colour in both charts.
+  const colourOf = colourer()
   for (const l of rows) {
     const by = extra && extra.by && extra.by[l.key]
     if (!by || !(by.total > 0)) continue
@@ -1056,11 +1068,10 @@ function limitShares(Box, T, d, W, rows, extra) {
     const list = rest / by.total >= 0.005 ? [...top, { name: 'other', usd: rest, other: true }] : top
     const nameW = Math.min(20, Math.max(...list.map((x) => x.name.length)))
     const barW = Math.max(4, W - nameW - 6)
-    // A chart of its own: a blank row over a heading in bold. The note gives
-    // way before the heading does.
+    // The note gives way before the heading does.
     const title = 'What used the ' + limitName(l.key) + ' limit'
     const note = title.length + 14 <= W ? 'est. by cost' : title.length + 6 <= W ? 'est.' : ''
-    out.push(Box({ flexDirection: 'row', marginTop: 1, children: [T([T(title, { bold: true, color: ACCENT }), note ? T('  ' + note, { dimColor: true }) : ''], { wrap: 'truncate-end' })] }))
+    out.push(sub(Box, T, title, note))
     for (const x of list) {
       const pts = (x.usd / by.total) * l.util * 100
       const n = Math.max(1, Math.round((x.usd / top[0].usd) * barW))
@@ -1093,32 +1104,64 @@ function savingsSection(Box, T, W, extra) {
     T('  ' + c.n + (c.n === 1 ? ' compaction' : ' compactions'), { dimColor: true }),
     c.n > 0 && c.net > 0 ? T('  ' + money(c.net / c.n, 2) + ' each', { dimColor: true }) : '',
   ], { wrap: 'truncate-end' }))
-  // A bar per day, by its size: a day that lost is red, and a week with
-  // nothing either way has no chart (it was three blank rows).
-  if (c.daily.length >= 2 && c.daily.some((x) => x.net !== 0)) {
-    const cw = Math.max(c.daily.length, W)
-    const idx = stretch(c.daily.length, cw)
-    const last = c.daily.length - 1
-    out.push(...bars(T, Box, idx.map((i) => Math.abs(c.daily[i].net)), 3, (v, i) => (c.daily[idx[i]].net < 0 ? 'red' : idx[i] === last ? 'cyan' : 'green')))
-    out.push(T(axis([short(c.daily[0].d), 'today'], cw), { dimColor: true }))
-  }
+  out.push(...ofSpend(T, c.net, extra.spent))
+  out.push(...dayRows(Box, T, W, c.daily))
   const row = (label, value, colour) => Box({
     flexDirection: 'row', columnGap: 1, children: [T(pad(label, 22), { dimColor: true }), T(lpad(value, 9), { color: colour })],
   })
   out.push(row('Not re-sent', money(c.saved, 2), 'green'))
   out.push(row('Summaries', '-' + money(c.summary, 2)))
   out.push(row('Cache rewrites', '-' + money(c.rewrite, 2)))
-  out.push(row('Net', money(c.net, 2), c.net >= 0 ? 'green' : 'red'))
+  out.push(row(c.net >= 0 ? 'Net savings' : 'Net loss', money(Math.abs(c.net), 2), c.net >= 0 ? 'green' : 'red'))
   if (c.tokens > 0) out.push(T(big(c.tokens) + ' tokens not re-sent' + (c.before > c.after && c.after > 0 ? ', largest ' + k(c.before) + ' → ' + k(c.after) : ''), { dimColor: true, wrap: 'truncate-end' }))
   const mine = extra.saved
   if (mine && mine.n > 0) {
     const one = mine.n === 1
     out.push(T([
-      T(mine.n + (one ? ' compaction ' : ' compactions ') + (one ? 'has ' : 'have ') + (mine.net >= 0 ? 'saved ' : 'lost '), { dimColor: true }),
+      T('This session: ', { dimColor: true }),
       T(money(Math.abs(mine.net), 2), { color: mine.net >= 0 ? 'green' : 'yellow' }),
-      T(mine.net >= 0 ? ' this session' : ' so far this session', { dimColor: true }),
-    ], { wrap: 'truncate-end' }))
+      T((mine.net >= 0 ? ' saved' : ' lost so far') + ', ' + mine.n + (one ? ' compaction' : ' compactions'), { dimColor: true }),
+    ], { wrap: 'wrap' }))
   }
+  return out
+}
+
+// A saving as a share of what the same days cost, every provider, at API
+// rates. Nothing where Burst has no spend for them.
+function ofSpend(T, net, spent) {
+  if (!(spent > 0) || !net) return []
+  const p = (Math.abs(net) / spent) * 100
+  return [T([
+    T((p < 10 ? p.toFixed(1) : Math.round(p)) + '%', { bold: true, color: net >= 0 ? 'green' : 'red' }),
+    T(' of the ' + money(spent) + ' spent' + (net >= 0 ? '' : ', lost'), { dimColor: true }),
+  ], { wrap: 'wrap' })]
+}
+
+// A row per day: its date, a bar by its size and the figure. A day that
+// saved is green; one that lost is red with a minus, and the heading says
+// so. A week with nothing either way has no chart.
+function dayRows(Box, T, W, daily) {
+  const days = daily.slice(-14)
+  if (days.length < 2 || !days.some((x) => x.net !== 0)) return []
+  const max = Math.max(...days.map((x) => Math.abs(x.net)))
+  const labels = days.map((x, i) => (i === days.length - 1 ? 'today' : short(x.d)))
+  const figures = days.map((x) => money(x.net, Math.abs(x.net) >= 100 ? 0 : 2))
+  const lw = Math.max(...labels.map((l) => l.length))
+  const fw = Math.max(...figures.map((f) => f.length))
+  const bw = Math.max(4, W - lw - fw - 2)
+  const out = [Box({ flexDirection: 'row', marginTop: 1, children: [T([T('Net savings per day', { bold: true, color: ACCENT }), days.some((x) => x.net < 0) ? T('  red: lost', { color: 'red' }) : ''], { wrap: 'truncate-end' })] })]
+  days.forEach((x, i) => {
+    const n = x.net === 0 ? 0 : Math.max(1, Math.round((Math.abs(x.net) / max) * bw))
+    const c = x.net < 0 ? 'red' : 'green'
+    out.push(Box({
+      flexDirection: 'row', columnGap: 1, children: [
+        T(pad(labels[i], lw), { dimColor: i < days.length - 1, bold: i === days.length - 1 }),
+        T('█'.repeat(n) + ' '.repeat(bw - n), { color: c }),
+        T(lpad(figures[i], fw), { color: x.net < 0 ? 'red' : undefined, dimColor: x.net === 0 }),
+      ],
+    }))
+  })
+  out.push(T(' '))
   return out
 }
 
@@ -1137,19 +1180,14 @@ function overflowSection(Box, T, W, extra) {
     T(good ? ' saved' : ' lost', { color: good ? 'green' : 'red' }),
     T('  ' + o.n + (o.n === 1 ? ' request' : ' requests'), { dimColor: true }),
   ], { wrap: 'truncate-end' }))
-  if (o.daily.length >= 2 && o.daily.some((x) => x.net !== 0)) {
-    const cw = Math.max(o.daily.length, W)
-    const idx = stretch(o.daily.length, cw)
-    const last = o.daily.length - 1
-    out.push(...bars(T, Box, idx.map((i) => Math.abs(o.daily[i].net)), 3, (v, i) => (o.daily[idx[i]].net < 0 ? 'red' : idx[i] === last ? 'cyan' : 'green')))
-    out.push(T(axis([short(o.daily[0].d), 'today'], cw), { dimColor: true }))
-  }
+  out.push(...ofSpend(T, o.saved, extra.spent))
+  out.push(...dayRows(Box, T, W, o.daily))
   const row = (label, value, colour) => Box({
     flexDirection: 'row', columnGap: 1, children: [T(pad(label, 22), { dimColor: true }), T(lpad(value, 9), { color: colour })],
   })
   out.push(row('At Anthropic\'s price', money(o.list, 2)))
   out.push(row('Secondary charged', '-' + money(o.paid, 2)))
-  out.push(row('Net', money(o.saved, 2), good ? 'green' : 'red'))
+  out.push(row(good ? 'Net savings' : 'Net loss', money(Math.abs(o.saved), 2), good ? 'green' : 'red'))
   if (o.priced < o.n) out.push(T((o.n - o.priced) + (o.n - o.priced === 1 ? ' request has' : ' requests have') + ' no price and ' + (o.n - o.priced === 1 ? 'is' : 'are') + ' left out', { dimColor: true, wrap: 'truncate-end' }))
   return out
 }
@@ -1192,14 +1230,15 @@ function todaySection(Box, T, d, W, now) {
     const hours = stretch(24, cw)
     const vals = hours.map((h) => d.hourly_avg[h])
     const chart = bars(T, Box, vals, 3, (v, i) => (hours[i] === hour ? 'cyan' : hours[i] < hour ? 'blue' : 'gray'))
-    out.push(sub(T, 'By hour', '30-day average'))
+    out.push(sub(Box, T, 'By hour', '30-day average'))
     out.push(...chart)
     out.push(T(axis(['0h', '6h', '12h', '18h', '23h'], cw), { dimColor: true }))
+    out.push(T([T('█', { color: 'blue' }), T(' gone  ', { dimColor: true }), T('█', { color: 'cyan' }), T(' this hour  ', { dimColor: true }), T('█', { color: 'gray' }), T(' to come', { dimColor: true })], { wrap: 'truncate-end' }))
   }
   if (b.active) {
     const left = b.rem || 0
     const used = Math.max(0, Math.min(1, 1 - left / 300))
-    out.push(sub(T, '5h block', hm(left) + ' left'))
+    out.push(sub(Box, T, '5h block', hm(left) + ' left'))
     out.push(gauge(T, used * 100, W, 'blue', []))
     out.push(T([
       T(money(b.cost), { color: TIER[b.tier] }),
@@ -1250,7 +1289,7 @@ function daysSection(Box, T, d, W) {
     const slices = ranked.slice(0, 5).map(([m, c], i) => ({ name: modelName(m), cost: c, colour: palette[i] }))
     const rest = ranked.slice(5).reduce((a, [, c]) => a + c, 0)
     if (rest > 0) slices.push({ name: 'Other', cost: rest, colour: 'gray' })
-    out.push(sub(T, 'By model'))
+    out.push(sub(Box, T, 'By model'))
     out.push(Box({
       flexDirection: 'row', columnGap: 2, children: [
         Box({ flexDirection: 'column', children: pie(T, slices.map((x) => [x.colour, x.cost]), PIE_ROWS) }),
@@ -1274,6 +1313,7 @@ function projectsSection(Box, T, d, W) {
   const max = ps[0].cost || 1
   const nameW = Math.min(22, Math.max(...ps.map((p) => p.name.length)))
   const here = (d.session && d.session.folder) || ''
+  const colourOf = colourer()
   for (const p of ps) {
     const barW = Math.max(4, W - nameW - 9)
     const n = Math.max(1, Math.round((p.cost / max) * barW))
@@ -1281,7 +1321,7 @@ function projectsSection(Box, T, d, W) {
     out.push(Box({
       flexDirection: 'row', columnGap: 1, children: [
         T(pad(cut(p.name, nameW), nameW), { bold: mine, color: mine ? ACCENT : undefined }),
-        T('█'.repeat(n) + ' '.repeat(barW - n), { color: mine ? ACCENT : 'blue' }),
+        T('█'.repeat(n) + ' '.repeat(barW - n), { color: mine ? ACCENT : colourOf(p.name) }),
         T(lpad(money(p.cost), 7)),
       ],
     }))
@@ -1294,6 +1334,10 @@ function topSection(Box, T, d, W) {
   if (top.length === 0) return []
   const out = [heading(T, 'Sessions today')]
   const max = top[0].cost || 1
+  // A colour for each session, the same on its costliest turns below.
+  const colourOf = colourer()
+  const tint = (sid) => (sid === d.sid ? ACCENT : top.some((x) => x.sid === sid) ? colourOf(sid) : undefined)
+  for (const r of top) if (r.sid !== d.sid) colourOf(r.sid)
   for (const r of top) {
     const mine = r.sid === d.sid
     const barW = Math.max(4, W - 26)
@@ -1301,9 +1345,9 @@ function topSection(Box, T, d, W) {
     const n = Math.min(barW, Math.max(1, Math.round((r.cost / max) * barW)))
     out.push(Box({
       flexDirection: 'row', columnGap: 1, children: [
-        T('*' + r.sid.slice(-5), { bold: mine, color: mine ? ACCENT : undefined }),
+        T('*' + r.sid.slice(-5), { bold: mine, color: tint(r.sid) }),
         T(lpad(money(r.cost), 6), { bold: mine }),
-        T('█'.repeat(n) + ' '.repeat(barW - n), { color: mine ? ACCENT : 'blue' }),
+        T('█'.repeat(n) + ' '.repeat(barW - n), { color: tint(r.sid) }),
         T(clock(Date.parse(r.last) / 1000) + (mine ? ' ◀' : ''), { dimColor: !mine, color: mine ? ACCENT : undefined }),
       ],
     }))
@@ -1311,12 +1355,12 @@ function topSection(Box, T, d, W) {
   // The day's dearest turns, whichever session they were in.
   const dear = d.top_turns || []
   if (dear.length > 0) {
-    out.push(sub(T, 'Costliest turns today'))
+    out.push(sub(Box, T, 'Costliest turns today'))
     for (const r of dear) {
       const mine = r.sid === d.sid
       out.push(Box({
         flexDirection: 'row', columnGap: 1, children: [
-          T('*' + r.sid.slice(-5), { bold: mine, color: mine ? ACCENT : undefined }),
+          T('*' + r.sid.slice(-5), { bold: mine, color: tint(r.sid) }),
           T(pad('#' + r.turn, 5), { dimColor: true }),
           T(lpad(money(r.cost, 2), 6), { bold: mine }),
           T(lpad(k(r.ctx), 5), { dimColor: true }),

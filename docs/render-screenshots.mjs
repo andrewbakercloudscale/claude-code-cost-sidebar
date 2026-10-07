@@ -169,9 +169,10 @@ const SAVED = {
     '7d': BY([['api-server', 54.2], ['my-app', 41.6], ['infra-terraform', 12.3], ['docs-site', 6.1], ['scratch', 3.8]]),
   },
   week: { ...BY([['api-server', 54.2], ['my-app', 41.6], ['infra-terraform', 12.3], ['docs-site', 6.1], ['scratch', 3.8]]), repos: ['my-app', 'api-server', 'infra-terraform', 'docs-site', 'scratch'] },
+  spent: 118.4,
   comp: {
-    days: 7, n: 9, saved: 31.62, summary: 3.47, rewrite: 2.9, net: 25.25, tokens: 158400000, before: 300400, after: 61200,
-    daily: [['2026-09-29', 2.1], ['2026-09-30', 4.6], ['2026-10-01', 3.2], ['2026-10-02', 0.4], ['2026-10-03', 6.9], ['2026-10-04', 5.21], ['2026-10-05', 2.84]].map(([d, net]) => ({ d, net, n: 1 })),
+    days: 7, n: 9, saved: 31.62, summary: 3.47, rewrite: 2.9, net: 24.45, tokens: 158400000, before: 300400, after: 61200,
+    daily: [['2026-09-29', 2.1], ['2026-09-30', 4.6], ['2026-10-01', 3.2], ['2026-10-02', -0.4], ['2026-10-03', 6.9], ['2026-10-04', 5.21], ['2026-10-05', 2.84]].map(([d, net]) => ({ d, net, n: 1 })),
   },
 }
 
