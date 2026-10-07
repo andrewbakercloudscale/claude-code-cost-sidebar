@@ -471,13 +471,14 @@ async function readExtras($) {
   const iso = (sec) => new Date(sec * 1000).toISOString().slice(0, 19) + 'Z'
   const stats = state && state.context && state.context.compaction_stats
   const mine = ((stats && stats.sessions) || []).filter((x) => x && x.session === sid)
-  // Every session Burst has compacted, over its window (7 days).
+  // Every session Burst has compacted, over its window (30 days; 7 before
+  // Burst 0.20.12).
   if (stats && stats.compactions > 0) {
     next.comp = {
       days: (state.context.window_days > 0 && state.context.window_days) || 7,
       n: stats.compactions, saved: stats.saved_usd || 0, summary: stats.summary_usd || 0, rewrite: stats.rewrite_usd || 0,
       net: stats.net_usd || 0, tokens: stats.tokens_not_resent || 0, before: stats.largest_before || 0, after: stats.largest_after || 0,
-      daily: (Array.isArray(stats.daily) ? stats.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => ({ d: x.date, net: x.net_usd || 0, n: x.compactions || 0 })),
+      daily: (Array.isArray(stats.daily) ? stats.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => ({ d: x.date, net: x.net_usd || 0, n: x.compactions || 0, saved: x.saved_usd || 0, summary: x.summary_usd || 0, rewrite: x.rewrite_usd || 0 })),
     }
   }
   // What the secondary's requests would have cost at the price of the model
@@ -487,16 +488,22 @@ async function readExtras($) {
     next.over = {
       days: (state.context.window_days > 0 && state.context.window_days) || 7,
       n: over.requests, priced: over.priced || 0, list: over.list_usd || 0, paid: over.paid_usd || 0, saved: over.saved_usd || 0,
-      daily: (Array.isArray(over.daily) ? over.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => ({ d: x.date, net: x.saved_usd || 0 })),
+      daily: (Array.isArray(over.daily) ? over.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => ({ d: x.date, net: x.saved_usd || 0, n: x.requests || 0, list: x.list_usd || 0, paid: x.paid_usd || 0 })),
     }
   }
   // What was spent over the same days, every provider, to say what share of
   // it each saving is.
-  const since = ((next.comp && next.comp.daily[0]) || (next.over && next.over.daily[0]) || {}).d
-  if (since) {
-    const all = await get('/api/usage?range=custom&limit=1&from=' + since + '&to=' + iso(now))
-    const spent = ((all && all.by_provider) || []).reduce((a, x) => a + ((x && x.usd) || 0), 0)
-    if (spent > 0) next.spent = spent
+  // The same for the last 7 of them where the window is longer.
+  const days = (next.comp && next.comp.daily) || (next.over && next.over.daily) || []
+  const spentSince = async (day) => {
+    const all = day ? await get('/api/usage?range=custom&limit=1&from=' + day.d + '&to=' + iso(now)) : null
+    return ((all && all.by_provider) || []).reduce((a, x) => a + ((x && x.usd) || 0), 0)
+  }
+  const spent = await spentSince(days[0])
+  if (spent > 0) next.spent = spent
+  if (days.length > 7) {
+    const spent7 = await spentSince(days[days.length - 7])
+    if (spent7 > 0) next.spent7 = spent7
   }
   if (mine.length > 0) next.saved = { net: mine.reduce((a, x) => a + (x.net_usd || 0), 0), n: mine.reduce((a, x) => a + (x.compactions || 0), 0) }
   if (state && state.today && state.today.SecondaryRequests > 0) {
@@ -1102,17 +1109,19 @@ function savingsSection(Box, T, W, extra) {
     T(money(Math.abs(c.net)), { bold: true, color: c.net >= 0 ? 'green' : 'red' }),
     T(c.net >= 0 ? ' saved' : ' lost', { color: c.net >= 0 ? 'green' : 'red' }),
     T('  ' + c.n + (c.n === 1 ? ' compaction' : ' compactions'), { dimColor: true }),
-    c.n > 0 && c.net > 0 ? T('  ' + money(c.net / c.n, 2) + ' each', { dimColor: true }) : '',
   ], { wrap: 'truncate-end' }))
-  out.push(...ofSpend(T, c.net, extra.spent))
-  out.push(...dayRows(Box, T, W, c.daily))
-  const row = (label, value, colour) => Box({
-    flexDirection: 'row', columnGap: 1, children: [T(pad(label, 22), { dimColor: true }), T(lpad(value, 9), { color: colour })],
-  })
-  out.push(row('Not re-sent', money(c.saved, 2), 'green'))
-  out.push(row('Summaries', '-' + money(c.summary, 2)))
-  out.push(row('Cache rewrites', '-' + money(c.rewrite, 2)))
-  out.push(row(c.net >= 0 ? 'Net savings' : 'Net loss', money(Math.abs(c.net), 2), c.net >= 0 ? 'green' : 'red'))
+  const w = lastWeek(c.daily, c.days)
+  const tone = (v) => (v >= 0 ? 'green' : 'red')
+  out.push(...figures(Box, T, c.days, !!w, [
+    ['Compactions', String(c.n), w && String(w.n)],
+    ['Not re-sent', money(c.saved, 2), w && money(w.saved, 2)],
+    ['Summaries', money(-c.summary, 2), w && money(-w.summary, 2)],
+    ['Cache rewrites', money(-c.rewrite, 2), w && money(-w.rewrite, 2)],
+    ['Net savings', money(c.net, 2), w && money(w.net, 2), tone(c.net), w && tone(w.net)],
+    ['Each', c.n > 0 ? money(c.net / c.n, 2) : '', w && w.n > 0 ? money(w.net / w.n, 2) : ''],
+    ['Of all spend', ofSpend(c.net, extra.spent), w ? ofSpend(w.net, extra.spent7) : '', tone(c.net), w && tone(w.net)],
+  ]))
+  out.push(T(' '))
   if (c.tokens > 0) out.push(T(big(c.tokens) + ' tokens not re-sent' + (c.before > c.after && c.after > 0 ? ', largest ' + k(c.before) + ' → ' + k(c.after) : ''), { dimColor: true, wrap: 'truncate-end' }))
   const mine = extra.saved
   if (mine && mine.n > 0) {
@@ -1126,42 +1135,38 @@ function savingsSection(Box, T, W, extra) {
   return out
 }
 
-// A saving as a share of what the same days cost, every provider, at API
-// rates. Nothing where Burst has no spend for them.
-function ofSpend(T, net, spent) {
-  if (!(spent > 0) || !net) return []
-  const p = (Math.abs(net) / spent) * 100
-  return [T([
-    T((p < 10 ? p.toFixed(1) : Math.round(p)) + '%', { bold: true, color: net >= 0 ? 'green' : 'red' }),
-    T(' of the ' + money(spent) + ' spent' + (net >= 0 ? '' : ', lost'), { dimColor: true }),
-  ], { wrap: 'wrap' })]
+// The days a card's second column covers, where Burst's window is longer.
+const WEEK = 7
+
+// The last WEEK days of a card's daily figures summed, field by field. null
+// where the window is no longer than that: one column says it all.
+function lastWeek(daily, days) {
+  if (!(days > WEEK) || daily.length === 0) return null
+  const out = {}
+  for (const x of daily.slice(-WEEK)) for (const key of Object.keys(x)) if (typeof x[key] === 'number') out[key] = (out[key] || 0) + x[key]
+  return out
 }
 
-// A row per day: its date, a bar by its size and the figure. A day that
-// saved is green; one that lost is red with a minus, and the heading says
-// so. A week with nothing either way has no chart.
-function dayRows(Box, T, W, daily) {
-  const days = daily.slice(-14)
-  if (days.length < 2 || !days.some((x) => x.net !== 0)) return []
-  const max = Math.max(...days.map((x) => Math.abs(x.net)))
-  const labels = days.map((x, i) => (i === days.length - 1 ? 'today' : short(x.d)))
-  const figures = days.map((x) => money(x.net, Math.abs(x.net) >= 100 ? 0 : 2))
-  const lw = Math.max(...labels.map((l) => l.length))
-  const fw = Math.max(...figures.map((f) => f.length))
-  const bw = Math.max(4, W - lw - fw - 2)
-  const out = [Box({ flexDirection: 'row', marginTop: 1, children: [T([T('Net savings per day', { bold: true, color: ACCENT }), days.some((x) => x.net < 0) ? T('  red: lost', { color: 'red' }) : ''], { wrap: 'truncate-end' })] })]
-  days.forEach((x, i) => {
-    const n = x.net === 0 ? 0 : Math.max(1, Math.round((Math.abs(x.net) / max) * bw))
-    const c = x.net < 0 ? 'red' : 'green'
-    out.push(Box({
-      flexDirection: 'row', columnGap: 1, children: [
-        T(pad(labels[i], lw), { dimColor: i < days.length - 1, bold: i === days.length - 1 }),
-        T('█'.repeat(n) + ' '.repeat(bw - n), { color: c }),
-        T(lpad(figures[i], fw), { color: x.net < 0 ? 'red' : undefined, dimColor: x.net === 0 }),
-      ],
-    }))
-  })
-  out.push(T(' '))
+// A saving as a share of what the same days cost, every provider, at API
+// rates. '' where Burst has no spend for them.
+function ofSpend(net, spent) {
+  if (!(spent > 0)) return ''
+  const p = (net / spent) * 100
+  return (Math.abs(p) < 10 ? p.toFixed(1) : Math.round(p)) + '%'
+}
+
+// A card's figures as a table: a column for Burst's window and, where that
+// is longer than a week, one for the last 7 days. Each row is [label,
+// window, week, colour of the window's figure, colour of the week's].
+function figures(Box, T, days, two, rows) {
+  const cw = 10
+  const lw = 15
+  const cell = (v, o) => T(lpad(v == null ? '' : v, cw), o)
+  const out = [Box({ flexDirection: 'row', marginTop: 1, children: [T(pad('', lw)), cell(days + ' days', { bold: true, color: ACCENT }), two ? cell(WEEK + ' days', { bold: true, color: ACCENT }) : ''] })]
+  for (const [label, a, b, ca, cb] of rows) {
+    if (!a && !b) continue
+    out.push(Box({ flexDirection: 'row', children: [T(pad(label, lw), { dimColor: true }), cell(a, { color: ca }), two ? cell(b, { color: cb }) : ''] }))
+  }
   return out
 }
 
@@ -1180,14 +1185,15 @@ function overflowSection(Box, T, W, extra) {
     T(good ? ' saved' : ' lost', { color: good ? 'green' : 'red' }),
     T('  ' + o.n + (o.n === 1 ? ' request' : ' requests'), { dimColor: true }),
   ], { wrap: 'truncate-end' }))
-  out.push(...ofSpend(T, o.saved, extra.spent))
-  out.push(...dayRows(Box, T, W, o.daily))
-  const row = (label, value, colour) => Box({
-    flexDirection: 'row', columnGap: 1, children: [T(pad(label, 22), { dimColor: true }), T(lpad(value, 9), { color: colour })],
-  })
-  out.push(row('At Anthropic\'s price', money(o.list, 2)))
-  out.push(row('Secondary charged', '-' + money(o.paid, 2)))
-  out.push(row(good ? 'Net savings' : 'Net loss', money(Math.abs(o.saved), 2), good ? 'green' : 'red'))
+  const w = lastWeek(o.daily, o.days)
+  const tone = (v) => (v >= 0 ? 'green' : 'red')
+  out.push(...figures(Box, T, o.days, !!w, [
+    ['Requests', String(o.n), w && String(w.n)],
+    ['Anthropic price', money(o.list, 2), w && money(w.list, 2)],
+    ['Secondary paid', money(-o.paid, 2), w && money(-w.paid, 2)],
+    ['Net savings', money(o.saved, 2), w && money(w.net, 2), tone(o.saved), w && tone(w.net)],
+    ['Of all spend', ofSpend(o.saved, extra.spent), w ? ofSpend(w.net, extra.spent7) : '', tone(o.saved), w && tone(w.net)],
+  ]))
   if (o.priced < o.n) out.push(T((o.n - o.priced) + (o.n - o.priced === 1 ? ' request has' : ' requests have') + ' no price and ' + (o.n - o.priced === 1 ? 'is' : 'are') + ' left out', { dimColor: true, wrap: 'truncate-end' }))
   return out
 }
