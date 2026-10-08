@@ -493,6 +493,10 @@ async function readExtras($) {
       def: way(strat.default), fixed: way(strat.fixed), actual: way(strat.actual),
       // The cheapest of every fixed size Burst replayed (newer Bursts only).
       best: strat.cheapest && strat.cheapest.at > 0 && strat.cheapest.usd > 0 ? { at: strat.cheapest.at, ...way(strat.cheapest) } : null,
+      // The replay checked against the bill, since the sizes in force went
+      // on record: what it predicted they would cost, and what they did.
+      track: strat.track && strat.track.requests > 0 && strat.track.planned && strat.track.planned.usd > 0
+        ? { since: String(strat.track.since || ''), planned: way(strat.track.planned), actual: way(strat.track.actual), fixed: way(strat.track.fixed) } : null,
       daily: (Array.isArray(strat.daily) ? strat.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => {
         const d = way(x.default), f = way(x.fixed), a = way(x.actual)
         return { d: x.date, defUsd: d.usd, defN: d.n, fixedUsd: f.usd, fixedN: f.n, actualUsd: a.usd, actualN: a.n }
@@ -1232,6 +1236,20 @@ function strategiesSection(Box, T, W, extra) {
   }
   table(s.days, s.def, s.fixed, s.actual, s.best)
   if (w) table(WEEK, { usd: w.defUsd, n: w.defN }, { usd: w.fixedUsd, n: w.fixedN }, { usd: w.actualUsd, n: w.actualN })
+  // Is the replay right? The same requests at the sizes that were in force,
+  // beside what Burst was billed for them, and one static size over them.
+  const t = s.track
+  if (t) {
+    const d = new Date(t.since)
+    const since = isNaN(d) ? 'Tracked' : 'Since ' + d.getDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getMonth()]
+    const row = (label, cost, n, diff) => Box({ flexDirection: 'row', children: [
+      T(pad(label, lw), { dimColor: true }), T(lpad(cost, cw)), T(lpad(n, nw)), T(lpad(diff, cw), { color: tone(diff) }),
+    ] })
+    out.push(Box({ flexDirection: 'row', marginTop: 1, children: [T(pad(since, lw), { bold: true, color: ACCENT }), ...[['Cost', cw], ['×', nw], ['v actual', cw]].map(([h, n]) => T(lpad(h, n), { bold: true, color: ACCENT }))] }))
+    out.push(row('Predicted', money(t.planned.usd, 2), String(t.planned.n), money(t.planned.usd - t.actual.usd, 2)))
+    out.push(row('Burst, as run', money(t.actual.usd, 2), String(t.actual.n), ''))
+    out.push(row(at('Static', s.fixedAt), money(t.fixed.usd, 2), String(t.fixed.n), money(t.fixed.usd - t.actual.usd, 2)))
+  }
   return out
 }
 
