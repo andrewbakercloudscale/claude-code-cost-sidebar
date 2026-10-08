@@ -144,10 +144,10 @@ The last 12 turns of this session, newest first. Beside the heading, both across
 |---|---|
 | `Turn` | The turn's number in this session. |
 | `Model` | The model that answered, per turn, from the transcript. A `*` after it means the turn was served by Claude Burst's secondary provider; its cache and cost cells then show `--` and the gateway's own figure, or `?`. |
-| `Input` | The whole context sent for that turn (input plus cache reads and writes). Coloured by how full the model's window is: yellow past 30%, red past 50%, purple past 70%. |
-| `(Δ)` | What the turn added to the context. When the context shrank by a fifth or more, it is how much went, negative, and the whole row is blue: `64k (-232k)` is a compaction. When it rose by far more than the turn wrote, it is the rise, in yellow, over a `*** Replayed in full: 102k sent again ***` row: Claude Code sent its whole conversation again, which it does when Anthropic no longer holds the thread (after a pause, say). |
-| `Cache` | The share of that turn's input read from the prompt cache. Green from 95%, red below, purple below 90%. A low figure straight after a compaction is expected. |
 | `Cost` | That turn at the model's published rates, cache reads and writes included. `?` is a model with no known price. |
+| `Input` | The whole context sent for that turn (input plus cache reads and writes). Coloured by how full the model's window is: yellow past 30%, red past 50%, purple past 70%. |
+| `(Δ)` | What the turn added to the context. Always in k: `0.6k` for a rise under a thousand tokens, `0k` for one too small to show. When the context shrank by a fifth or more, it is how much went, negative, and the whole row is blue: `64k (-232k)` is a compaction. When it rose by far more than the turn wrote, it is the rise, in yellow, over a `*** Replayed in full: 102k sent again ***` row: Claude Code sent its whole conversation again, which it does when Anthropic no longer holds the thread (after a pause, say). |
+| `Cache` | The share of that turn's input read from the prompt cache. Green from 95%, red below, purple below 90%. A low figure straight after a compaction is expected. |
 
 <img src="docs/card-turns-replayed.png" alt="The Turns card with turn 118 at 323k (+105k), the rise in yellow, over a row reading Replayed in full: 105k sent again" width="460">
 
@@ -338,7 +338,7 @@ Without Burst none of this appears: the ctx bar is the panel's own gauge against
 
 `claude-panel-setup.sh` installs the panel itself, built on top of [`ccusage`](https://github.com/ryoppippi/ccusage). It is what computes every figure the sidebar draws, and on a Claude Code too old for mods (or with `CLAUDE_PANEL_SPLIT=true`) it draws them itself, as text in a Ghostty or tmux split:
 
-- **Per-turn breakdown of the current session**: turn number, model, context size, context growth (Δ) since the last turn, cache hit %, and estimated cost per turn, read straight out of the session transcript and priced against Anthropic's published per-model rates (including cache read/write multipliers).
+- **Per-turn breakdown of the current session**: turn number, model, estimated cost per turn, context size, context growth (Δ) since the last turn and cache hit %, read straight out of the session transcript and priced against Anthropic's published per-model rates (including cache read/write multipliers).
 - **Live status line**: current session value, today's value, active-block burn rate, 7-day average session cost, 30-day value, and the current project folder. ("Value" because these are priced at pay-as-you-go API rates regardless of what plan you're actually on, see note below.)
 - **Active block**: start/end time, value so far, burn rate ($/hr and tokens/min, color-coded green/yellow/red), and a projected total for the block.
 - **Recent**: today's cost and tokens with a per-model breakdown (wrapped onto a second line when the pane is narrow), the last 3 days as dated costs (`3 days: 27th $75  28th $226  29th $141`), and this week and month. A model ccusage cannot price shows as `?`; when it is under 1% of the day's usage, today's total is still shown, marked `(+ unpriced)`, instead of being withheld.

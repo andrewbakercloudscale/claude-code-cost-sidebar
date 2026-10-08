@@ -1806,6 +1806,14 @@ def fmt_k(n):
         return f"{n/1000:.0f}k"
     return str(n)
 
+# A turn's Δ, always in k so the column reads in one unit: 0.6k for a rise
+# under a thousand, 0k for one too small to show.
+def fmt_dk(n):
+    if abs(n) >= 950:
+        return f"{n/1000:.0f}k"
+    tenths = int(abs(n) / 100 + 0.5)
+    return f"0.{tenths}k" if tenths else "0k"
+
 # The ONLY copy of this rule. It used to be mirrored in the bash panel and
 # "kept in sync manually", with both computing a denominator for the same
 # displayed percentage; the window now travels out of here in the metadata
@@ -2166,10 +2174,10 @@ print("#SERIES\t" + json.dumps({
 }, separators=(",", ":")))
 turn_h =f"{col_turn}{'Turn':<5}{c_reset}"
 model_h = f"{col_model}{'Model':<10}{c_reset}"
-input_h = f"{col_input}{'Input (Δ)':>12}{c_reset}"
+input_h = f"{col_input}{'Input (Δ)':>13}{c_reset}"
 cache_h = f"{col_cache}{'Cache':>6}{c_reset}"
-cost_h = f"{col_cost}{'Cost':>8}{c_reset}"
-print(f"  {turn_h}{model_h}{input_h}{cache_h}{cost_h}")
+cost_h = f"{col_cost}{'Cost':>7}{c_reset}"
+print(f"  {turn_h}{model_h}{cost_h}{input_h}{cache_h}")
 if shown:
     start_idx = total_n - len(shown) + 1
     # Newest turn first, this table sits at a fixed position above the
@@ -2219,15 +2227,15 @@ if shown:
         idx = start_idx - 1 + i
         prev_ctx = turns[idx - 1][1] if idx > 0 else 0
         shrank = prev_ctx and total_ctx < prev_ctx * 0.8 and not is_secondary
-        total_str, delta_str = fmt_k(total_ctx), fmt_k(delta)
+        total_str, delta_str = fmt_k(total_ctx), fmt_dk(delta)
         sign = "+"
         if shrank:
-            sign, delta_str = "-", fmt_k(prev_ctx - total_ctx)
+            sign, delta_str = "-", fmt_dk(prev_ctx - total_ctx)
         # The other way: the rise is what was sent again, and the line under
         # the row says so, since "+102k" alone reads as 102k of new work.
         replayed = 0 if is_secondary or (idx > 0 and turns[idx - 1][6]) else replayed_tokens(prev_ctx, total_ctx, delta)
         if replayed:
-            delta_str = fmt_k(replayed)
+            delta_str = fmt_dk(replayed)
         plain_cell = f"{total_str} ({sign}{delta_str})"
         pad = " " * max(0, 12 - len(plain_cell))
         if is_secondary:
@@ -2291,15 +2299,15 @@ if shown:
         rank = max(severity_rank(delta_c), ctx_rank if ctx_rank >= 2 else 0)
         cost_cell = "?" if cost is None else "$" + format(cost, ".2f")
         if shrank:
-            print(f"  {col_cache}{turn_no:<5}{label:<10}{pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
+            print(f"  {col_cache}{turn_no:<5}{label:<10}{cost_cell:>7} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")
         elif rank > 0:
             row_c = (col_input, col_mid_tier, col_cost, col_purple)[rank]
-            print(f"  {row_c}{turn_no:<5}{label:<10}{pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")
+            print(f"  {row_c}{turn_no:<5}{label:<10}{cost_cell:>7} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")
         else:
             total_colored = f"{ctx_c}{total_str}{c_reset}"
             input_cell = f"{pad}{total_colored} (+{delta_c}{delta_str}{c_reset})"
             cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
-            print(f"  {turn_no:<5}{label:<10}{input_cell}{cache_cell}{cost_cell:>8}")
+            print(f"  {turn_no:<5}{label:<10}{cost_cell:>7} {input_cell}{cache_cell}")
         if replayed:
             print(f"  {col_mid_tier}*** Replayed in full: {fmt_k(replayed)} sent again ***{c_reset}")
         print_markers(i)

@@ -26,6 +26,14 @@ for prev, ctx, delta in ((138008, 239965, 5), (136954, 138008, 1052), (148086, 5
 0" "$(printf '%s\n' "$got" | sed -n '6,7p')"
   # The other way, a compaction: the whole row in the Cache column's blue.
   assert_contains "a turn whose context shrank is drawn whole in blue" \
-    'print(f"  {col_cache}{turn_no:<5}{label:<10}{pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{cost_cell:>8}{c_reset}")' "$(cat "$PANEL_SH")"
+    'print(f"  {col_cache}{turn_no:<5}{label:<10}{cost_cell:>7} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")' "$(cat "$PANEL_SH")"
+  # The Δ is always in k: tenths under a thousand, 0k when too small to show.
+  fn=$(awk '/^def fmt_dk\(/{on=1} on&&/^$/{exit} on' "$PANEL_SH")
+  got=$(FN="$fn" python3 -c '
+import os
+exec(os.environ["FN"])
+print(" ".join(fmt_dk(n) for n in (3, 49, 50, 446, 682, 949, 950, 1049, 5400, 101957)))
+')
+  assert_eq "a turn's delta is always in k" "0k 0k 0.1k 0.4k 0.7k 0.9k 1k 1k 5k 102k" "$got"
   assert_contains "the row is followed by a line that says so" 'Replayed in full: {fmt_k(replayed)} sent again' "$(cat "$PANEL_SH")"
 }
