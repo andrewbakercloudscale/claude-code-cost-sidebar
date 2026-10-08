@@ -66,7 +66,7 @@ const dk = (n) => (n >= 950 ? Math.round(n / 1000) + 'k' : Math.round(n / 100) ?
 // The turn table as ccusage-panel.sh prints it: newest first, a compaction's
 // rows between the turns it happened between.
 function table(turns, marks) {
-  const rows = [`  ${C}Turn ${X}${C}Model     ${X}${R}   Cost${X}${G}    Input (Δ)${X}${B} Cache${X}`]
+  const rows = [`  ${C}Turn ${X}${C}Model    ${X}${R}  Cost${X}${G}    Input (Δ)${X}${B} Cache${X}`]
   for (const m of marks.top || []) rows.push(m)
   for (let i = turns.length - 1; i >= 0 && rows.length < 13; i--) {
     const [n, ctx, delta, hit, cost] = turns[i]
@@ -80,8 +80,8 @@ function table(turns, marks) {
     const input = shrank ? `${G}${kk(ctx)}${X} (${G}-${dk(prev - ctx)}${X})` : again ? `${G}${kk(ctx)}${X} (+${Y}${dk(delta)}${X})` : `${G}${kk(ctx)}${X} (+${G}${dk(delta)}${X})`
     const cc = hit < 90 ? M : hit < 95 ? R : G
     // A compaction's turn is blue from end to end.
-    if (shrank) rows.push(`  ${B}${String(n).padEnd(5)}${'Opus 5.5'.padEnd(10)}${('$' + cost.toFixed(2)).padStart(7)} ${pad}${cell}${(hit + '%').padStart(6)}${X}`)
-    else rows.push(`  ${String(n).padEnd(5)}${'Opus 5.5'.padEnd(10)}${('$' + cost.toFixed(2)).padStart(7)} ${pad}${input}${cc}${(hit + '%').padStart(6)}${X}`)
+    if (shrank) rows.push(`  ${B}${String(n).padEnd(5)}${'Opus 5.5'.padEnd(9)}${('$' + cost.toFixed(2)).padStart(6)} ${pad}${cell}${(hit + '%').padStart(6)}${X}`)
+    else rows.push(`  ${String(n).padEnd(5)}${'Opus 5.5'.padEnd(9)}${('$' + cost.toFixed(2)).padStart(6)} ${pad}${input}${cc}${(hit + '%').padStart(6)}${X}`)
     if (again) rows.push(`  ${Y}*** Replayed in full: ${kk(delta)} sent again ***${X}`)
     for (const m of (marks.under && marks.under[n]) || []) rows.push(m)
   }
