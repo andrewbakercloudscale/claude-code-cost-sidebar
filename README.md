@@ -39,6 +39,14 @@ Live, always-visible cost and token tracking for **[Claude Code](https://claude.
 This came out of a simple problem: AI coding agents burn tokens and money per turn, per session, per day, and none of that is visible while you're working. You only find out later, from a dashboard or an invoice, by which point the expensive session is long over and you've learned nothing you can act on. This repo is the fix: a live panel that sits next to your session and updates every few seconds.
 
 > **Companion tool: [Claude Burst](https://github.com/andrewbakercloudscale/claude-burst).** A local gateway for Claude Code (subscription-first routing with failover, pauseless compaction, session coordination, a dashboard). Each works without the other. Together, the sidebar shows the context Burst really sends, how much of your plan's 5-hour and weekly limits is used (with a warning as one gets close), and marks every pauseless compaction as it happens: see [Pauseless compaction](#pauseless-compaction-with-claude-burst).
+>
+> What needs Claude Burst, and is left out without it:
+> - the limit rows in **Plan Utilisation** and the warning as a limit gets close;
+> - the **Pauseless Compaction**, **Compaction Strategies** and **Overflow to Secondary** savings tables;
+> - the context bar by part, the compaction line on it, and `Uncompacted Size` with its **Full Async Compaction** button;
+> - `Proxy State`, the dashboard button and the `*** Async Compaction ... ***` rows in Turns.
+>
+> Everything else (the session, its turns, today, the week, projects) is read from Claude Code's own transcripts.
 
 The same panel for OpenCode lives in **[opencode-cost-usage-panel](https://github.com/andrewbakercloudscale/opencode-cost-usage-panel)**: the two were one repo until they were split apart, which is why the design notes here and there cross-reference each other.
 
@@ -211,14 +219,14 @@ A table, not a chart: one column for Burst's window and, where that is longer th
 |---|---|
 | `30 days`, `7 days` | The column headings: the window Burst keeps these figures over, and the last 7 days of it. |
 | `$105 saved` | The net saving over the window: blue when compaction has paid for itself, red (`lost`) when it has not yet. |
-| Blue and red figures | In these tables money gained is blue and money lost is red, with its minus. Counts have no colour. |
+| Blue and red figures | Blue is a saving: `Not re-sent`, `Net savings`, `Each`, `Bill cut by`. The same figure is red, with its minus, when it is a loss. Counts, prices and what the saving cost (`Summaries`, `Cache rewrites`, `Secondary paid`) have no colour. |
 | `Compactions` | How many times Burst compacted. |
 | `Not re-sent` | What the turns after each compaction would have cost with the full history still in the context. |
 | `Summaries` | What the background calls that wrote the summaries cost. |
 | `Cache rewrites` | Each compaction changes the context, so the next turn writes it to the cache once at the higher rate. |
 | `Net savings` | Not re-sent, less the other two. Red with a minus when it is a loss. |
 | `Each` | Net savings per compaction. |
-| `Of all spend` | Net savings as a share of everything spent over the same days, every provider, at API rates (from Burst's log). |
+| `Bill cut by` | The share net savings took off the bill: savings over what the same days would have cost without them (everything spent, every provider, at API rates, from Burst's log, plus the savings). |
 | `642M tokens not re-sent, largest 300k → 61k` | The same saving in tokens, and the biggest single compaction: the context before and after. In a narrow sidebar the largest has a row of its own. |
 | `This session: $2.84 saved, 1 compaction` | This session's own share. `$0.40 lost so far` in yellow means its compaction has not paid for itself yet; it does over the next few turns. |
 
