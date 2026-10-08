@@ -1125,12 +1125,12 @@ function savingsSection(Box, T, W, extra) {
   const w = lastWeek(c.daily, c.days)
   out.push(...figures(Box, T, c.days, !!w, [
     ['Compactions', String(c.n), w && String(w.n)],
-    ['Not re-sent', money(c.saved, 2), w && money(w.saved, 2)],
+    ['Not re-sent', money(c.saved, 2), w && money(w.saved, 2), true],
     ['Summaries', money(-c.summary, 2), w && money(-w.summary, 2)],
     ['Cache rewrites', money(-c.rewrite, 2), w && money(-w.rewrite, 2)],
-    ['Net savings', money(c.net, 2), w && money(w.net, 2)],
-    ['Each', c.n > 0 ? money(c.net / c.n, 2) : '', w && w.n > 0 ? money(w.net / w.n, 2) : ''],
-    ['Of all spend', ofSpend(c.net, extra.spent), w ? ofSpend(w.net, extra.spent7) : ''],
+    ['Net savings', money(c.net, 2), w && money(w.net, 2), true],
+    ['Each', c.n > 0 ? money(c.net / c.n, 2) : '', w && w.n > 0 ? money(w.net / w.n, 2) : '', true],
+    ['Bill cut by', ofSpend(c.net, extra.spent), w ? ofSpend(w.net, extra.spent7) : '', true],
   ]))
   out.push(T(' '))
   if (c.tokens > 0) {
@@ -1164,11 +1164,14 @@ function lastWeek(daily, days) {
   return out
 }
 
-// A saving as a share of what the same days cost, every provider, at API
-// rates. '' where Burst has no spend for them.
+// A saving as the share it cut from the bill: against what the same days
+// cost, every provider, at API rates, plus the saving itself. '' where
+// Burst has no spend for them.
 function ofSpend(net, spent) {
   if (!(spent > 0)) return ''
-  const p = (net / spent) * 100
+  // Against the bill as it would have been, without the saving.
+  if (!(spent + net > 0)) return ''
+  const p = (net / (spent + net)) * 100
   return (Math.abs(p) < 10 ? p.toFixed(1) : Math.round(p)) + '%'
 }
 
@@ -1183,15 +1186,17 @@ function tone(v) {
 
 // A card's figures as a table: a column for Burst's window and, where that
 // is longer than a week, one for the last 7 days. Each row is [label,
-// window, week], each figure coloured by tone().
+// window, week, saving]: a saving's figures are coloured by tone(), the
+// rest (counts, prices, what the saving cost) have no colour.
 function figures(Box, T, days, two, rows) {
   const cw = 10
   const lw = 15
-  const cell = (v, o) => T(lpad(v == null ? '' : v, cw), o || { color: tone(v) })
+  const cell = (v, o) => T(lpad(v == null ? '' : v, cw), o)
   const out = [Box({ flexDirection: 'row', marginTop: 1, children: [T(pad('', lw)), cell(days + ' days', { bold: true, color: ACCENT }), two ? cell(WEEK + ' days', { bold: true, color: ACCENT }) : ''] })]
-  for (const [label, a, b] of rows) {
+  for (const [label, a, b, saving] of rows) {
     if (!a && !b) continue
-    out.push(Box({ flexDirection: 'row', children: [T(pad(label, lw), { dimColor: true }), cell(a), two ? cell(b) : ''] }))
+    const o = (v) => (saving ? { color: tone(v) } : undefined)
+    out.push(Box({ flexDirection: 'row', children: [T(pad(label, lw), { dimColor: true }), cell(a, o(a)), two ? cell(b, o(b)) : ''] }))
   }
   return out
 }
@@ -1246,8 +1251,8 @@ function overflowSection(Box, T, W, extra) {
     ['Requests', String(o.n), w && String(w.n)],
     ['Anthropic price', money(o.list, 2), w && money(w.list, 2)],
     ['Secondary paid', money(-o.paid, 2), w && money(-w.paid, 2)],
-    ['Net savings', money(o.saved, 2), w && money(w.net, 2)],
-    ['Of all spend', ofSpend(o.saved, extra.spent), w ? ofSpend(w.net, extra.spent7) : ''],
+    ['Net savings', money(o.saved, 2), w && money(w.net, 2), true],
+    ['Bill cut by', ofSpend(o.saved, extra.spent), w ? ofSpend(w.net, extra.spent7) : '', true],
   ]))
   if (o.priced < o.n) out.push(T((o.n - o.priced) + (o.n - o.priced === 1 ? ' request has' : ' requests have') + ' no price and ' + (o.n - o.priced === 1 ? 'is' : 'are') + ' left out', { dimColor: true, wrap: 'truncate-end' }))
   return out

@@ -603,11 +603,11 @@ test('Pauseless Compaction shows what Burst\'s compaction saved, what it cost, a
   expect(drawn).not.toContain('"Net savings per day"')
   expect(drawn).toContain('"Each           "')
   expect(drawn).toContain('"     $6.13"')
-  // The total is named for what it is, and given as a share of the $690 spent since the first day.
+  // The total is named for what it is, and given as the share it cut from the bill: the $690 spent since the first day, plus the saving.
   expect(drawn).toContain('"Net savings    "')
-  expect(drawn).toContain('"Of all spend   "')
+  expect(drawn).toContain('"Bill cut by    "')
   expect(urls.some((u) => u.startsWith('http://127.0.0.1:7788/api/usage?range=custom&limit=1&from=2026-10-03&to='))).toBe(true)
-  expect(drawn).toContain('"       40%"')
+  expect(drawn).toContain('"       29%"')
   // Under Plan Utilisation, above Today; and it can be hidden like the rest.
   expect(drawn.indexOf('"Pauseless Compaction"')).toBeGreaterThan(drawn.indexOf('"Plan Utilisation"'))
   expect(drawn.indexOf('"Pauseless Compaction"')).toBeLessThan(drawn.indexOf('"Today"'))
@@ -696,9 +696,12 @@ test('over a 30-day window the savings tables have a column for the 30 days and 
   expect(card).toContain('"    $80.00"')
   expect(card).toContain('"    $56.00"')
   expect(card).toContain('"    -$7.00"')
-  // $80 of the $400 spent in the window; $56 of the $100 spent in the last seven days.
-  expect(card).toContain('"       20%"')
-  expect(card).toContain('"       56%"')
+  // The bill would have been $480 in the window and $156 in the last seven days: $80 and $56 cut from them.
+  expect(card).toContain('"       17%"')
+  expect(card).toContain('"       36%"')
+  // Blue is for what was saved; what it cost to save it has no colour.
+  expect((await ui.find({ type: 'Text', text: '    $80.00' })).props.color).toBe('blue')
+  expect((await ui.find({ type: 'Text', text: '   -$10.00' })).props.color).toBeUndefined()
   const over = drawn.slice(drawn.indexOf('"Overflow to Secondary"'), drawn.indexOf('"Today"'))
   expect(over).toContain('"    $15.00"')
   expect(over).toContain('"    $10.50"')
