@@ -780,6 +780,19 @@ test('Compaction Strategies sets what the replay predicted beside what Burst was
   expect((await ui.find({ type: 'Text', text: '    $30.00' })).props.color).toBe('blue')
 })
 
+test('Compaction Strategies leaves the prediction out until 200 requests have been tracked', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const way = (usd: number, compactions: number) => ({ usd, compactions })
+  const daily = [{ date: '2026-10-05', requests: 50, default: way(10, 0), fixed: way(7, 1), actual: way(8, 2) }]
+  const track = { since: '2026-10-08T12:00:00', requests: 199, planned: way(0.57, 1), actual: way(0.05, 0), fixed: way(0.03, 0) }
+  dashboard(on, { state: { context: { window_days: 7, compaction_strategies: { fixed_at: 300_000, default_at: 950_000, requests: 500, default: way(969, 5), fixed: way(568, 67), actual: way(622.5, 90), daily, repos: [], track } } } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('"Burst, as run "')
+  expect(drawn).not.toContain('Predicted')
+})
+
 test('Compaction Strategies has no best size from a Burst that does not report one', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   const way = (usd: number, compactions: number) => ({ usd, compactions })

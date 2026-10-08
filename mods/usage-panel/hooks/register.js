@@ -495,7 +495,8 @@ async function readExtras($) {
       best: strat.cheapest && strat.cheapest.at > 0 && strat.cheapest.usd > 0 ? { at: strat.cheapest.at, ...way(strat.cheapest) } : null,
       // The replay checked against the bill, since the sizes in force went
       // on record: what it predicted they would cost, and what they did.
-      track: strat.track && strat.track.requests > 0 && strat.track.planned && strat.track.planned.usd > 0
+      // Not under 200 requests, where one compaction is most of the bill.
+      track: strat.track && strat.track.requests >= 200 && strat.track.planned && strat.track.planned.usd > 0
         ? { since: String(strat.track.since || ''), planned: way(strat.track.planned), actual: way(strat.track.actual), fixed: way(strat.track.fixed) } : null,
       daily: (Array.isArray(strat.daily) ? strat.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => {
         const d = way(x.default), f = way(x.fixed), a = way(x.actual)
