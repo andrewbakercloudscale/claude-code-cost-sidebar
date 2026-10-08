@@ -246,7 +246,7 @@ A table, not a chart: one column for Burst's window and, where that is longer th
 
 One table for Burst's window and, where that is longer than a week, one for the last 7 days.
 
-A last table, `Since 8 Oct`, checks the replay itself, which is what Burst's Intelligent Compaction Mode takes its sizes from. It covers the requests sent since Burst began keeping the size in force on record, and appears once it has some.
+A last table, `Since 8 Oct`, checks the replay itself, which is what Burst's Intelligent Compaction Mode takes its sizes from. It covers the requests sent since Burst began keeping the size in force on record, and appears once there are 200 of them.
 
 | On screen | What it is |
 |---|---|
