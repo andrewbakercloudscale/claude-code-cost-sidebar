@@ -26,7 +26,7 @@ for prev, ctx, delta in ((138008, 239965, 5), (136954, 138008, 1052), (148086, 5
 0" "$(printf '%s\n' "$got" | sed -n '6,7p')"
   # The other way, a compaction: the whole row in the Cache column's blue.
   assert_contains "a turn whose context shrank is drawn whole in blue" \
-    'print(f"  {col_cache}{turn_no:<5}{label:<10}{cost_cell:>7} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")' "$(cat "$PANEL_SH")"
+    'print(f"  {col_cache}{turn_no:<5}{label:<{lw}}{cost_cell:>{cw}} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")' "$(cat "$PANEL_SH")"
   # The Δ is always in k: tenths under a thousand, 0k when too small to show.
   fn=$(awk '/^def fmt_dk\(/{on=1} on&&/^$/{exit} on' "$PANEL_SH")
   got=$(FN="$fn" python3 -c '

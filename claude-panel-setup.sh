@@ -2173,10 +2173,15 @@ print("#SERIES\t" + json.dumps({
     "avg_delta": round(avg_delta),
 }, separators=(",", ":")))
 turn_h =f"{col_turn}{'Turn':<5}{c_reset}"
-model_h = f"{col_model}{'Model':<10}{c_reset}"
+# Model and Cost are as wide as the widest thing in them and no wider, so
+# Cost sits two spaces after the longest model name, not across a gap.
+cost_text = lambda c: "?" if c is None else "$" + format(c, ".2f")
+lw = max([len(t[0]) for t in shown] + [5]) + 1
+cw = max([len(cost_text(t[4])) for t in shown] + [4]) + 1
+model_h = f"{col_model}{'Model':<{lw}}{c_reset}"
 input_h = f"{col_input}{'Input (Δ)':>13}{c_reset}"
 cache_h = f"{col_cache}{'Cache':>6}{c_reset}"
-cost_h = f"{col_cost}{'Cost':>7}{c_reset}"
+cost_h = f"{col_cost}{'Cost':>{cw}}{c_reset}"
 print(f"  {turn_h}{model_h}{cost_h}{input_h}{cache_h}")
 if shown:
     start_idx = total_n - len(shown) + 1
@@ -2297,17 +2302,17 @@ if shown:
         # the noise case the old comment was actually describing.
         ctx_rank = severity_rank(ctx_c)
         rank = max(severity_rank(delta_c), ctx_rank if ctx_rank >= 2 else 0)
-        cost_cell = "?" if cost is None else "$" + format(cost, ".2f")
+        cost_cell = cost_text(cost)
         if shrank:
-            print(f"  {col_cache}{turn_no:<5}{label:<10}{cost_cell:>7} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")
+            print(f"  {col_cache}{turn_no:<5}{label:<{lw}}{cost_cell:>{cw}} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")
         elif rank > 0:
             row_c = (col_input, col_mid_tier, col_cost, col_purple)[rank]
-            print(f"  {row_c}{turn_no:<5}{label:<10}{cost_cell:>7} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")
+            print(f"  {row_c}{turn_no:<5}{label:<{lw}}{cost_cell:>{cw}} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")
         else:
             total_colored = f"{ctx_c}{total_str}{c_reset}"
             input_cell = f"{pad}{total_colored} (+{delta_c}{delta_str}{c_reset})"
             cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
-            print(f"  {turn_no:<5}{label:<10}{cost_cell:>7} {input_cell}{cache_cell}")
+            print(f"  {turn_no:<5}{label:<{lw}}{cost_cell:>{cw}} {input_cell}{cache_cell}")
         if replayed:
             print(f"  {col_mid_tier}*** Replayed in full: {fmt_k(replayed)} sent again ***{c_reset}")
         print_markers(i)
