@@ -235,12 +235,14 @@ A table, not a chart: one column for Burst's window and, where that is longer th
 | On screen | What it is |
 |---|---|
 | `Default 950k` | Claude Code alone: no Burst, so it compacts only near the end of the model's window. |
-| `Static 500k` | A fixed Compact at, the one set on Burst's dashboard. The label carries its real value. |
+| `Static 300k` | One fixed Compact at for every repository: the one set on Burst's dashboard in its fixed mode, and 300k, a size safe for all, in Intelligent Compaction Mode. The label carries its real value. |
 | `Burst, as run` | What Burst really sent, with whatever mode was on each day (Intelligent Compaction Mode included). |
 | `Cost` | The context cost that way. |
 | `×` | How many compactions that way makes. |
 | `v default` | What that way saves against `Default`: its cost taken from Default's. Blue, or red with a minus where it costs more. |
 | `v static` | `Burst, as run` against `Static`: what Burst's own choice of limit was worth over the fixed one. |
+| `Best 200k` | The one fixed size that would have cost least, of every size from 100k to 500k that Burst replays. Known only in hindsight. Burst's window only; needs a Burst that reports it. |
+| `v best` | `Burst, as run` against `Best`: how far Burst was from the best it could have done with one size. Red with a minus while it costs more, the figure Intelligent Compaction Mode is there to close. |
 
 One table for Burst's window and, where that is longer than a week, one for the last 7 days.
 

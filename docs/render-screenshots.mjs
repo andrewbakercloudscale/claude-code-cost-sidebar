@@ -173,8 +173,8 @@ const SAVED = {
   week: { ...BY([['api-server', 54.2], ['my-app', 41.6], ['infra-terraform', 12.3], ['docs-site', 6.1], ['scratch', 3.8]]), repos: ['my-app', 'api-server', 'infra-terraform', 'docs-site', 'scratch'] },
   spent: 486.2, spent7: 118.4,
   strat: {
-    days: 30, defaultAt: 950000, fixedAt: 500000,
-    def: { usd: 312.4, n: 3 }, fixed: { usd: 231.8, n: 14 }, actual: { usd: 198.6, n: 38 },
+    days: 30, defaultAt: 950000, fixedAt: 300000,
+    def: { usd: 312.4, n: 3 }, fixed: { usd: 214.3, n: 22 }, actual: { usd: 198.6, n: 38 }, best: { at: 200000, usd: 181.2, n: 41 },
     daily: ['2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05'].map((d, i) => ({ d, defUsd: 10.2 + i, defN: i === 3 ? 1 : 0, fixedUsd: 7.9 + i * 0.7, fixedN: i % 3 === 0 ? 1 : 0, actualUsd: 6.6 + i * 0.6, actualN: i === 4 ? 3 : 1 })),
   },
   comp: {

@@ -491,6 +491,8 @@ async function readExtras($) {
       days: (state.context.window_days > 0 && state.context.window_days) || 7,
       defaultAt: strat.default_at || 0, fixedAt: strat.fixed_at || 0,
       def: way(strat.default), fixed: way(strat.fixed), actual: way(strat.actual),
+      // The cheapest of every fixed size Burst replayed (newer Bursts only).
+      best: strat.cheapest && strat.cheapest.at > 0 && strat.cheapest.usd > 0 ? { at: strat.cheapest.at, ...way(strat.cheapest) } : null,
       daily: (Array.isArray(strat.daily) ? strat.daily : []).filter((x) => x && typeof x.date === 'string').map((x) => {
         const d = way(x.default), f = way(x.fixed), a = way(x.actual)
         return { d: x.date, defUsd: d.usd, defN: d.n, fixedUsd: f.usd, fixedN: f.n, actualUsd: a.usd, actualN: a.n }
@@ -1216,7 +1218,7 @@ function strategiesSection(Box, T, W, extra) {
   const lw = 14, cw = 10, nw = 5
   // One table per span: a row a strategy with its cost, its compactions (×)
   // and what it saved against Claude Code alone; then Burst against static.
-  const table = (days, def, fixed, actual) => {
+  const table = (days, def, fixed, actual, best) => {
     const row = (label, cost, n, saved) => Box({ flexDirection: 'row', children: [
       T(pad(label, lw), { dimColor: true }), T(lpad(cost, cw)), T(lpad(n, nw)),
       T(lpad(saved, cw), { color: tone(saved) }),
@@ -1225,8 +1227,10 @@ function strategiesSection(Box, T, W, extra) {
     out.push(Box({ flexDirection: 'row', marginTop: 1, children: [T(pad(days + ' days', lw), { bold: true, color: ACCENT }), ...[['Cost', cw], ['×', nw], ['v default', cw]].map(([h, n]) => T(lpad(h, n), { bold: true, color: ACCENT }))] }))
     out.push(way(at('Default', s.defaultAt), def), way(at('Static', s.fixedAt), fixed, def), way('Burst, as run', actual, def))
     out.push(row('  v static', '', '', money(fixed.usd - actual.usd, 2)))
+    // The best fixed size in hindsight, and how far from it Burst was.
+    if (best) out.push(way(at('Best', best.at), best, def), row('  v best', '', '', money(best.usd - actual.usd, 2)))
   }
-  table(s.days, s.def, s.fixed, s.actual)
+  table(s.days, s.def, s.fixed, s.actual, s.best)
   if (w) table(WEEK, { usd: w.defUsd, n: w.defN }, { usd: w.fixedUsd, n: w.fixedN }, { usd: w.actualUsd, n: w.actualN })
   return out
 }
