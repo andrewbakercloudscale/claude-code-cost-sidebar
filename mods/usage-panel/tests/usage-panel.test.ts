@@ -740,6 +740,37 @@ test('Compaction Strategies sets Claude Code alone, a static limit and Burst as 
   expect((await ui.find({ type: 'Text', text: '   $927.25' })).props.color).toBeUndefined()
 })
 
+test('Compaction Strategies names the best fixed size in hindsight and how far Burst was from it', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const way = (usd: number, compactions: number) => ({ usd, compactions })
+  const daily = [{ date: '2026-10-05', requests: 50, default: way(10, 0), fixed: way(7, 1), actual: way(8, 2) }]
+  const base = { fixed_at: 300_000, default_at: 950_000, requests: 500, default: way(969, 5), fixed: way(568, 67), actual: way(622.5, 90), daily, repos: [] }
+  // Burst cost $131.50 more than the best single size would have: red.
+  dashboard(on, { state: { context: { window_days: 7, compaction_strategies: { ...base, cheapest: { at: 200_000, ...way(491, 181) } } } } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  const card = drawn.slice(drawn.indexOf('"Compaction Strategies"'), drawn.indexOf('"Today"'))
+  expect(card).toContain('"Static 300k   "')
+  expect(card).toContain('"Best 200k     "')
+  expect(card).toContain('"  181"')
+  expect(card).toContain('"  v best      "')
+  expect((await ui.find({ type: 'Text', text: '   $478.00' })).props.color).toBe('blue')
+  expect((await ui.find({ type: 'Text', text: '  -$131.50' })).props.color).toBe('red')
+})
+
+test('Compaction Strategies has no best size from a Burst that does not report one', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const way = (usd: number, compactions: number) => ({ usd, compactions })
+  const daily = [{ date: '2026-10-05', requests: 50, default: way(10, 0), fixed: way(7, 1), actual: way(8, 2) }]
+  dashboard(on, { state: { context: { window_days: 7, compaction_strategies: { fixed_at: 500_000, default_at: 950_000, requests: 500, default: way(969, 5), fixed: way(568, 67), actual: way(622.5, 90), daily, repos: [] } } } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('"Burst, as run "')
+  expect(drawn).not.toContain('v best')
+})
+
 test('without Burst, or before Burst has compacted anything, there is no Pauseless Compaction card', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   dashboard(on, { state: { context: { compaction_stats: { compactions: 0, sessions: [], daily: [] } } } })
