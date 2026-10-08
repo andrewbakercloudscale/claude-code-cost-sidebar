@@ -246,6 +246,15 @@ A table, not a chart: one column for Burst's window and, where that is longer th
 
 One table for Burst's window and, where that is longer than a week, one for the last 7 days.
 
+A last table, `Since 8 Oct`, checks the replay itself, which is what Burst's Intelligent Compaction Mode takes its sizes from. It covers the requests sent since Burst began keeping the size in force on record, and appears once it has some.
+
+| On screen | What it is |
+|---|---|
+| `Predicted` | Those requests replayed at the sizes that were in force when they were sent: what the replay said the sizes would cost. |
+| `Burst, as run` | What Burst was billed for the same requests. |
+| `Static 300k` | One fixed size over the same requests. |
+| `v actual` | That row's cost less Burst's. Beside `Predicted`, red with a minus means Burst cost more than the replay said, so the replay flatters; close to zero means it can be trusted. Beside `Static`, blue is what the learned sizes saved. |
+
 **Overflow to Secondary**, under that when requests have gone to the secondary, is the same table: requests, what they would have cost at Anthropic's price, what the secondary charged, net savings and its share of all spend.
 
 ### Today

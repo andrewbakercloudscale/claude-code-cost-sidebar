@@ -759,6 +759,27 @@ test('Compaction Strategies names the best fixed size in hindsight and how far B
   expect((await ui.find({ type: 'Text', text: '  -$131.50' })).props.color).toBe('red')
 })
 
+test('Compaction Strategies sets what the replay predicted beside what Burst was billed, since the sizes went on record', async ($, on) => {
+  stubs(on, [doc({ burst: BURST })])
+  const way = (usd: number, compactions: number) => ({ usd, compactions })
+  const daily = [{ date: '2026-10-05', requests: 50, default: way(10, 0), fixed: way(7, 1), actual: way(8, 2) }]
+  // The replay said $80 for the sizes in force; the bill was $100; static would have been $130.
+  const track = { since: '2026-10-08T12:00:00', requests: 400, planned: way(80, 9), actual: way(100, 11), fixed: way(130, 6) }
+  dashboard(on, { state: { context: { window_days: 7, compaction_strategies: { fixed_at: 300_000, default_at: 950_000, requests: 500, default: way(969, 5), fixed: way(568, 67), actual: way(622.5, 90), daily, repos: [], track } } } })
+  await start($)
+  const ui = await $.ui.mount(PANE)
+  const drawn = JSON.stringify(await ui.drawn())
+  const card = drawn.slice(drawn.indexOf('"Compaction Strategies"'), drawn.indexOf('"Today"'))
+  expect(card).toContain('"Since 8 Oct   "')
+  expect(card).toContain('"  v actual"')
+  expect(card).toContain('"Predicted     "')
+  expect(card).toContain('"    $80.00"')
+  expect(card).toContain('"   11"')
+  // Burst cost $20 more than predicted: red. It beat static by $30: blue.
+  expect((await ui.find({ type: 'Text', text: '   -$20.00' })).props.color).toBe('red')
+  expect((await ui.find({ type: 'Text', text: '    $30.00' })).props.color).toBe('blue')
+})
+
 test('Compaction Strategies has no best size from a Burst that does not report one', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   const way = (usd: number, compactions: number) => ({ usd, compactions })
@@ -769,6 +790,7 @@ test('Compaction Strategies has no best size from a Burst that does not report o
   const drawn = JSON.stringify(await ui.drawn())
   expect(drawn).toContain('"Burst, as run "')
   expect(drawn).not.toContain('v best')
+  expect(drawn).not.toContain('Predicted')
 })
 
 test('without Burst, or before Burst has compacted anything, there is no Pauseless Compaction card', async ($, on) => {
