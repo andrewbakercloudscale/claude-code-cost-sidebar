@@ -2043,6 +2043,29 @@ try:
 except OSError:
     lines = []
 
+# Burst's /compact-async-full: Claude Code's own history replaced with the
+# summary Burst already wrote. Claude Code runs it as its own /compact and
+# echoes it as that, so the transcript is where it is told apart: a compact
+# boundary whose summary, the message after it, says Burst wrote it.
+def full_compaction_markers(lines):
+    """[(epoch, "full", None)] for each compaction made with Burst's summary."""
+    out = []
+    for i, line in enumerate(lines):
+        if '"compact_boundary"' not in line or i + 1 >= len(lines):
+            continue
+        if "compacted by claude-burst" not in lines[i + 1][:2000]:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts = parse_iso(d.get("timestamp")) if d.get("subtype") == "compact_boundary" else None
+        if ts is not None:
+            out.append((ts, "full", None))
+    return out
+
+COMPACTION_MARKERS = sorted(COMPACTION_MARKERS + full_compaction_markers(lines), key=lambda m: m[0])
+
 for line in lines:
     try:
         d = json.loads(line)
@@ -2214,6 +2237,8 @@ if shown:
                 print(f"  {col_mid_tier}*** Async Compaction Started ***{c_reset}")
             elif kind == "pending":
                 print(f"  {col_cache}*** Async Compaction Pending (next prompt) ***{c_reset}")
+            elif kind == "full":
+                print(f"  {col_input}*** Async Full Compaction ***{c_reset}")
             else:
                 cost_note = "" if usd is None else f" (${usd:.2f})"
                 print(f"  {col_input}*** Async Compaction Finished{cost_note} ***{c_reset}")

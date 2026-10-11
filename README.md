@@ -359,6 +359,7 @@ What to look for:
 
 - **The ctx bar is Burst's.** It is the context Burst sends after its own compaction, by part, against the limit it compacts at, read from Burst's dashboard every 5 seconds. Claude Code's own figure does not know a compaction happened, which is what the `Claude Code holds 299k` line is for.
 - **The three marker rows** come from Burst's `~/.config/claude-burst/metrics.jsonl`. Each is drawn between the two turns it happened between. A Pending whose Finished landed before another turn ran is not drawn: the Finished says it all.
+- **`*** Async Full Compaction ***`** is a fourth marker row, for Burst's `/compact-async-full` (the Full Async Compaction button). Claude Code runs and echoes that command as `/compact`, so this row is where the session's history says which it was. It comes from the session's own transcript: a compaction whose summary Burst wrote.
 - **The blue row with a negative delta** is the first turn sent with the summary. That turn's cache hit is low and its cost is up, because the smaller context is written to the cache once. It is the expected price of the compaction, so it never colours the row as a spike.
 - **Notices.** Where Burst's own `burst-session` mod is installed, it shows each step as a toast inside the session. Without it, on Ghostty, a small floating notice reads "Async Compaction In Progress", then "Async Compaction Finished" (`CLAUDE_PANEL_COMPACTION_OVERLAY`).
 
