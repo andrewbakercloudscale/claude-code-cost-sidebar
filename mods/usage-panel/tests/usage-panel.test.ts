@@ -522,7 +522,7 @@ test('Plan Utilisation draws each limit with Claude Burst, and says where they c
   expect(await ui.find({ type: 'Text', text: 'Plan Utilisation' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^ 42%  resets \d\d:\d\d \(1h41m\)$/ })).toBeDefined()
   // Past 80% the row is yellow; the weekly one resets on another day.
-  expect((await ui.find({ type: 'Text', text: /^ 85%  resets (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d\d:\d\d$/ })).props.color).toBe('yellow')
+  expect((await ui.find({ type: 'Text', text: /^plan utilised: 85%  resets (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d\d:\d\d$/ })).props.color).toBe('yellow')
   expect(drawn).toContain('"weekly"')
   // Under it, the week's time: four of seven days gone, the limit 28 points ahead.
   expect((await ui.find({ type: 'Text', text: ' 57%  28 pts over pace' })).props.color).toBe('red')
