@@ -135,7 +135,7 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 </tr>
 </table>
 
-**Full Async Compaction** is beside `Uncompacted Size` once Claude Code holds half the model's window or more (500k of 1M). It runs Claude Burst's `/compact-async-full`: Claude Code's own history is replaced with the summary Burst already wrote, with no summary request and no pause, so `Uncompacted Size` comes down to what Burst sends. It is Burst's command, from its `burst-session` mod: where Burst holds no summary of the session yet, or its hand-off is turned off on the dashboard, Burst says so and nothing is compacted.
+**Full Async Compaction** is beside `Uncompacted Size` once Claude Code holds half the model's window or more (500k of 1M). It runs Claude Burst's `/compact-async-full`: Claude Code's own history is replaced with the summary Burst already wrote, with no summary request and no pause, so `Uncompacted Size` comes down to what Burst sends. A bright band crosses the button's label while it is drawn, so that it is seen. It is Burst's command, from its `burst-session` mod: where Burst holds no summary of the session yet, or its hand-off is turned off on the dashboard, Burst says so and nothing is compacted.
 
 #### The context bar without Claude Burst
 

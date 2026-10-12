@@ -67,6 +67,9 @@ let up = false
 // It was opened and waits undrawn, on a terminal too narrow for a sidebar
 // nobody asked for: it is up once it is first drawn.
 let waiting = false
+let fullDrawn = false // the Full Async Compaction button was on the last drawing
+let frame = 0 // the shimmer's, across that button's label
+let ticking = null // the shimmer's timer, while the button is drawn
 let layout = null // { order, hidden } as the person left it
 let burst = null // { down, mod }: Burst's /api/mod answer; null without Burst
 let burstRaw = ''
@@ -263,7 +266,14 @@ export function register(on) {
     }
     // Beside Uncompacted Size, where Claude Code holds half the window or
     // more: Burst's /compact-async-full, pressed.
-    const full = Button({ key: 'usage-full-compact', label: 'Full Async Compaction', onPress: () => fullCompact($) })
+    // A function, so that drawing it is known: the shimmer's timer runs only
+    // while the button is on the sidebar.
+    fullDrawn = false
+    const full = () => {
+      fullDrawn = true
+      shimmerOn($)
+      return Button({ key: 'usage-full-compact', label: FULL_LABEL, onPress: () => fullCompact($), children: shimmer(Text, FULL_LABEL, frame) })
+    }
     const rows = panel(Box, Text, data, width, now, feedError, layout, extras, burst, limits, extra, full)
     // At the top right, where a close mark is looked for. The button above
     // the prompt brings the sidebar back.
@@ -285,6 +295,43 @@ async function showPane($) {
 // is Burst's mod's (burst-session), and says for itself when it has nothing
 // to hand over.
 const FULL_COMMAND = 'compact-async-full'
+const FULL_LABEL = 'Full Async Compaction'
+
+// The button's label with a bright band crossing it, so that it is seen: it
+// is only there when there is something worth pressing it for. `frame` counts
+// the timer's ticks; the band is off the label for SHIMMER_REST of them
+// between crossings.
+const SHIMMER_MS = 120
+const SHIMMER_BAND = 3
+const SHIMMER_REST = 8
+export function shimmer(Text, label, frame) {
+  const head = frame % (label.length + SHIMMER_BAND + SHIMMER_REST)
+  const from = Math.max(0, head - SHIMMER_BAND)
+  const to = Math.min(label.length, head)
+  const base = { color: 'yellow', bold: true }
+  const out = []
+  if (from > 0) out.push(Text({ ...base, children: [label.slice(0, from)] }))
+  if (to > from) out.push(Text({ ...base, inverse: true, children: [label.slice(from, to)] }))
+  if (to < label.length) out.push(Text({ ...base, children: [label.slice(to)] }))
+  return out
+}
+
+// Redraws the sidebar a frame on while the button is drawn, and stops once a
+// frame has passed without it: the sidebar closed, or less held than the
+// button is drawn from.
+function shimmerOn($) {
+  if (ticking) return
+  ticking = $.clock.every(SHIMMER_MS, () => {
+    if (!fullDrawn || !up) {
+      ticking.cancel()
+      ticking = null
+      return
+    }
+    fullDrawn = false
+    frame++
+    $.ui.invalidate('ui.render')
+  })
+}
 async function fullCompact($) {
   try {
     await $.command.run({ command: FULL_COMMAND, args: '' })
@@ -965,7 +1012,7 @@ function sentBar(Box, T, s, W, win, warnPct, full) {
   if (held > 0) {
     const size = T('Uncompacted Size: ' + k(held), { color: heldColour(s, held) })
     // The button only where there is enough held for it to be worth a press.
-    if (full && win > 0 && held >= win * FULL_FROM) out.push(Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [size, full] }))
+    if (full && win > 0 && held >= win * FULL_FROM) out.push(Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [size, typeof full === 'function' ? full() : full] }))
     else out.push(size)
   }
   return out
