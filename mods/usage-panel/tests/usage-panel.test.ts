@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { axis, insights, k, layoutOf, limitsOf, modelName, money, pie, planOf, relayout, share, whyDear } from '../hooks/register.js'
+import { axis, insights, k, layoutOf, limitsOf, modelName, money, pie, planOf, relayout, share, weekGone, whyDear } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'usage-panel',
@@ -500,6 +500,17 @@ test('the plan limits are read off the newest reply that carries them', () => {
   expect(planOf('')).toBe(null)
 })
 
+test('the week\'s time is green at or under the limit\'s pace, yellow from 10 points over, red from 25', () => {
+  const at = (util: number, daysLeft: number) => weekGone({ key: '7d', util, reset: NOW + daysLeft * 86400 }, NOW)
+  expect(at(0.18, 0.5)).toMatchObject({ name: 'time', pct: 93, c: 'green', label: ' 93%  75 pts under pace' })
+  expect(at(0.5, 3.5)).toMatchObject({ pct: 50, c: 'green', label: ' 50%  on pace' })
+  expect(at(0.59, 3.5)).toMatchObject({ c: 'green', label: ' 50%  9 pts over pace' })
+  expect(at(0.6, 3.5).c).toBe('yellow')
+  expect(at(0.75, 3.5).c).toBe('red')
+  // A reset further off than the window is long is a week not yet begun.
+  expect(at(0.1, 8)).toMatchObject({ pct: 0, any: false })
+})
+
 test('Plan Utilisation draws each limit with Claude Burst, and says where they come from without it', async ($, on) => {
   stubs(on, [doc({ burst: BURST })])
   const urls: string[] = []
@@ -513,6 +524,8 @@ test('Plan Utilisation draws each limit with Claude Burst, and says where they c
   // Past 80% the row is yellow; the weekly one resets on another day.
   expect((await ui.find({ type: 'Text', text: /^ 85%  resets (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d\d:\d\d$/ })).props.color).toBe('yellow')
   expect(drawn).toContain('"weekly"')
+  // Under it, the week's time: four of seven days gone, the limit 28 points ahead.
+  expect((await ui.find({ type: 'Text', text: ' 57%  28 pts over pace' })).props.color).toBe('red')
   expect(drawn).toContain(' at API rates this month ($200 plan)')
   // This Mac's rows start at the card's edge, like the rows under them.
   expect(drawn).toContain('"🔀 Proxy State: "')
