@@ -1037,7 +1037,8 @@ function planSection(Box, T, d, W, now, limits, extra) {
   const shown = []
   for (const l of rows) {
     const pct = Math.round(l.util * 100)
-    shown.push({ name: limitName(l.key), pct, label: lpad(pct + '%', 4) + '  resets ' + when(l.reset, now), c: pct >= LIMIT_ALARM * 100 ? 'red' : pct >= LIMIT_WARN * 100 ? 'yellow' : 'green', any: l.util > 0 })
+    // The weekly row says what its figure is, with the week's time under it.
+    shown.push({ name: limitName(l.key), pct, label: (l.key === '7d' ? 'plan utilised: ' + pct + '%' : lpad(pct + '%', 4)) + '  resets ' + when(l.reset, now), c: pct >= LIMIT_ALARM * 100 ? 'red' : pct >= LIMIT_WARN * 100 ? 'yellow' : 'green', any: l.util > 0 })
     if (l.key === '7d') shown.push(weekGone(l, now))
   }
   const nameW = Math.max(0, ...shown.map((r) => r.name.length))
