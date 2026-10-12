@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { axis, insights, k, layoutOf, limitsOf, modelName, money, pie, planOf, relayout, share, weekGone, whyDear } from '../hooks/register.js'
+import { axis, insights, k, layoutOf, limitsOf, modelName, money, pie, planOf, relayout, share, shimmer, weekGone, whyDear } from '../hooks/register.js'
 
 const PANE = {
   plugin: 'usage-panel',
@@ -1266,6 +1266,14 @@ test('Full Async Compaction is beside Uncompacted Size from half the window held
   expect(await ui.find({ key: 'usage-full-compact' })).toBeDefined()
   await ui.press({ key: 'usage-full-compact' })
   expect(ran.map((e) => e.command)).toEqual(['compact-async-full'])
+  // A band crosses the label while it is drawn: three ticks on, its first
+  // three letters.
+  expect(await ui.find({ type: 'Text', text: 'Full Async Compaction' })).toBeDefined()
+  await clock.advance(360)
+  expect(await ui.find({ type: 'Text', text: 'Ful' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'l Async Compaction' })).toBeDefined()
+  await ui.press({ key: 'usage-full-compact' })
+  expect(ran.length).toBe(2)
   await ui.unmount()
 
   // Under half the window: the line alone.
@@ -1274,4 +1282,19 @@ test('Full Async Compaction is beside Uncompacted Size from half the window held
   ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Text', text: 'Uncompacted Size: 480k' })).toBeDefined()
   expect(await ui.find({ key: 'usage-full-compact' })).toBeUndefined()
+})
+
+test('the shimmer is the whole label every frame, with a band of three crossing it and a rest between crossings', () => {
+  const T = (p) => p
+  const label = 'Full Async Compaction'
+  const lit = (f) => shimmer(T, label, f).filter((t) => t.inverse).map((t) => t.children[0]).join('')
+  for (let f = 0; f < 80; f++) expect(shimmer(T, label, f).map((t) => t.children[0]).join('')).toBe(label)
+  expect(lit(0)).toBe('')
+  expect(lit(1)).toBe('F')
+  expect(lit(3)).toBe('Ful')
+  expect(lit(21)).toBe('ion')
+  expect(lit(23)).toBe('n')
+  // Off the label until the next crossing, 32 frames after the first.
+  for (let f = 24; f <= 32; f++) expect(lit(f)).toBe('')
+  expect(lit(33)).toBe('F')
 })
