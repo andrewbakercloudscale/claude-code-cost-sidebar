@@ -1033,24 +1033,29 @@ function planSection(Box, T, d, W, now, limits, extra) {
   const hasBurst = !!(d.burst && d.burst.dashboard)
   if (rows.length === 0 && !plan) return []
   const out = [heading(T, 'Plan Utilisation', plan ? plan.label : '')]
-  const nameW = Math.max(0, ...rows.map((l) => limitName(l.key).length))
-  const labelOf = (l) => lpad(Math.round(l.util * 100) + '%', 4) + '  resets ' + when(l.reset, now)
+  // Each limit, and under the weekly one how much of its week has gone.
+  const shown = []
+  for (const l of rows) {
+    const pct = Math.round(l.util * 100)
+    shown.push({ name: limitName(l.key), pct, label: lpad(pct + '%', 4) + '  resets ' + when(l.reset, now), c: pct >= LIMIT_ALARM * 100 ? 'red' : pct >= LIMIT_WARN * 100 ? 'yellow' : 'green', any: l.util > 0 })
+    if (l.key === '7d') shown.push(weekGone(l, now))
+  }
+  const nameW = Math.max(0, ...shown.map((r) => r.name.length))
   // One bar width for every row, so the bars can be compared.
-  const labelW = Math.max(0, ...rows.map((l) => labelOf(l).length))
+  const labelW = Math.max(0, ...shown.map((r) => r.label.length))
   // Beside its figures where there is room for a bar worth reading; in a
   // narrow sidebar the bar has a row of its own, the card's whole width, and
   // the figures no longer wrap under it.
   const beside = W - nameW - 2 - labelW
   const stacked = beside < LIMIT_BAR_MIN
-  for (const [i, l] of rows.entries()) {
-    const pct = Math.round(l.util * 100)
-    const c = pct >= LIMIT_ALARM * 100 ? 'red' : pct >= LIMIT_WARN * 100 ? 'yellow' : 'green'
-    const name = T(pad(limitName(l.key), nameW), { dimColor: !stacked, bold: stacked })
-    const label = T(labelOf(l), { color: c === 'green' ? undefined : c, wrap: 'truncate-end' })
+  for (const [i, r] of shown.entries()) {
+    const name = T(pad(r.name, nameW), { dimColor: !stacked, bold: stacked })
+    const label = T(r.label, { color: r.c === 'green' ? undefined : r.c, wrap: 'truncate-end' })
     // Any use at all is a cell on the bar: 4% of a short one rounded to none.
-    const bar = (w) => gauge(T, l.util > 0 ? Math.max(pct, 100 / w) : 0, w, c, [])
+    const bar = (w) => gauge(T, r.any ? Math.max(r.pct, 100 / w) : 0, w, r.c, [])
     if (stacked) {
-      out.push(Box({ flexDirection: 'row', columnGap: 1, marginTop: i > 0 ? 1 : 0, children: [name, label] }))
+      // The week's time sits right under the weekly bar it is read against.
+      out.push(Box({ flexDirection: 'row', columnGap: 1, marginTop: i > 0 && !r.pace ? 1 : 0, children: [name, label] }))
       out.push(bar(W))
     } else {
       out.push(Box({ flexDirection: 'row', columnGap: 1, children: [name, bar(Math.max(6, beside)), label] }))
@@ -1071,6 +1076,25 @@ function planSection(Box, T, d, W, now, limits, extra) {
     }))
   }
   return out
+}
+
+// How far ahead of the week's time the weekly limit may run, in points,
+// before its row turns yellow, and red.
+const PACE_WARN = 10
+const PACE_ALARM = 25
+
+// The share of the weekly window that has gone by, as a row under the
+// weekly limit: green while the limit is used no faster than the week
+// passes, yellow from PACE_WARN points ahead of it, red from PACE_ALARM.
+export function weekGone(l, now) {
+  const gone = Math.min(1, Math.max(0, 1 - (l.reset - now) / windowSeconds(l.key)))
+  const pct = Math.round(gone * 100)
+  const over = Math.round(l.util * 100) - pct
+  return {
+    name: 'time', pct, pace: true, any: gone > 0,
+    label: lpad(pct + '%', 4) + '  ' + (over > 0 ? over + ' pts over pace' : over < 0 ? -over + ' pts under pace' : 'on pace'),
+    c: over >= PACE_ALARM ? 'red' : over >= PACE_WARN ? 'yellow' : 'green',
+  }
 }
 
 // The narrowest bar a limit is drawn with beside its figures: under this it
