@@ -67,9 +67,7 @@ let up = false
 // It was opened and waits undrawn, on a terminal too narrow for a sidebar
 // nobody asked for: it is up once it is first drawn.
 let waiting = false
-let fullDrawn = false // the Full Async Compaction button was on the last drawing
-let frame = 0 // the shimmer's, across that button's label
-let ticking = null // the shimmer's timer, while the button is drawn
+let compacting = false // a compaction of this session's history is running
 let layout = null // { order, hidden } as the person left it
 let burst = null // { down, mod }: Burst's /api/mod answer; null without Burst
 let burstRaw = ''
@@ -156,6 +154,23 @@ export function register(on) {
       }
     }
     return next(e)
+  })
+
+  // A compaction of the main conversation, from the moment it starts until
+  // it stands or is skipped: "compacting…" beside Uncompacted Size for that
+  // long and no longer. Burst's hand-off at 800k (burst-session) comes
+  // through here as Claude Code's /compact. A precompute installs nothing,
+  // and a subagent's is its own transcript.
+  on('session.compact', async ($, e, next) => {
+    if (e.trigger === 'precompute' || e.agentId) return next(e)
+    compacting = true
+    $.ui.invalidate('ui.render')
+    try {
+      return await next(e)
+    } finally {
+      compacting = false
+      $.ui.invalidate('ui.render')
+    }
   })
 
   // Closed by the person's own close mark or key too: the button above the
@@ -264,17 +279,9 @@ export function register(on) {
         },
       }))
     }
-    // Beside Uncompacted Size, where Claude Code holds half the window or
-    // more: Burst's /compact-async-full, pressed.
-    // A function, so that drawing it is known: the shimmer's timer runs only
-    // while the button is on the sidebar.
-    fullDrawn = false
-    const full = () => {
-      fullDrawn = true
-      shimmerOn($)
-      return Button({ key: 'usage-full-compact', label: FULL_LABEL, onPress: () => fullCompact($), children: shimmer(Text, FULL_LABEL, frame) })
-    }
-    const rows = panel(Box, Text, data, width, now, feedError, layout, extras, burst, limits, extra, full)
+    // Beside Uncompacted Size while a compaction runs, and only then.
+    const busy = compacting ? Text({ color: 'yellow', bold: true, children: [COMPACTING] }) : null
+    const rows = panel(Box, Text, data, width, now, feedError, layout, extras, burst, limits, extra, busy)
     // At the top right, where a close mark is looked for. The button above
     // the prompt brings the sidebar back.
     const top = Box({ flexDirection: 'row', justifyContent: 'flex-end', children: [Button({ key: 'usage-hide', label: 'Hide', role: 'dismiss', onPress: () => hidePane($) })] })
@@ -290,55 +297,7 @@ async function showPane($) {
   $.ui.invalidate('ui.render')
 }
 
-// Burst's /compact-async-full: Claude Code's own history replaced with the
-// summary Burst already wrote, no summary request and no pause. The command
-// is Burst's mod's (burst-session), and says for itself when it has nothing
-// to hand over.
-const FULL_COMMAND = 'compact-async-full'
-const FULL_LABEL = 'Full Async Compaction'
-
-// The button's label with a bright band crossing it, so that it is seen: it
-// is only there when there is something worth pressing it for. `frame` counts
-// the timer's ticks; the band is off the label for SHIMMER_REST of them
-// between crossings.
-const SHIMMER_MS = 120
-const SHIMMER_BAND = 3
-const SHIMMER_REST = 8
-export function shimmer(Text, label, frame) {
-  const head = frame % (label.length + SHIMMER_BAND + SHIMMER_REST)
-  const from = Math.max(0, head - SHIMMER_BAND)
-  const to = Math.min(label.length, head)
-  const base = { color: 'yellow', bold: true }
-  const out = []
-  if (from > 0) out.push(Text({ ...base, children: [label.slice(0, from)] }))
-  if (to > from) out.push(Text({ ...base, inverse: true, children: [label.slice(from, to)] }))
-  if (to < label.length) out.push(Text({ ...base, children: [label.slice(to)] }))
-  return out
-}
-
-// Redraws the sidebar a frame on while the button is drawn, and stops once a
-// frame has passed without it: the sidebar closed, or less held than the
-// button is drawn from.
-function shimmerOn($) {
-  if (ticking) return
-  ticking = $.clock.every(SHIMMER_MS, () => {
-    if (!fullDrawn || !up) {
-      ticking.cancel()
-      ticking = null
-      return
-    }
-    fullDrawn = false
-    frame++
-    $.ui.invalidate('ui.render')
-  })
-}
-async function fullCompact($) {
-  try {
-    await $.command.run({ command: FULL_COMMAND, args: '' })
-  } catch (err) {
-    $.ui.toast('/' + FULL_COMMAND + ' did not run: it is Claude Burst\'s mod\'s command (' + err + ')')
-  }
-}
+export const COMPACTING = 'compacting…'
 
 // Whether the sidebar is drawn, from what $.ui.open answered: not when it
 // waits undrawn, on a terminal too narrow for one nobody asked for.
@@ -698,7 +657,7 @@ const TIER = { green: 'green', yellow: 'yellow', red: 'red', purple: 'magenta', 
 const ACCENT = 'cyan'
 const BLOCKS = ' ▁▂▃▄▅▆▇█'
 
-export function panel(Box, Text, d, width, now, feedError, layout, extras = [], burst = null, limits = null, extra = null, full = null) {
+export function panel(Box, Text, d, width, now, feedError, layout, extras = [], burst = null, limits = null, extra = null, busy = null) {
   const T = (children, props = {}) => Text({ ...props, children: Array.isArray(children) ? children : [children] })
   const rows = []
   if (!d) {
@@ -731,7 +690,7 @@ export function panel(Box, Text, d, width, now, feedError, layout, extras = [], 
   // one ends and the next starts is plain. The border and padding take 4.
   const IW = Math.max(26, W - 4)
   const draw = {
-    session: () => [...sessionSection(Box, T, d, IW, burst, extra && extra.warn, full), ...notes('session'), ...notes('burst')],
+    session: () => [...sessionSection(Box, T, d, IW, burst, extra && extra.warn, busy), ...notes('session'), ...notes('burst')],
     mac: () => {
       const foot = [...footer(Box, T, d), ...burstRows(Box, T, burst), ...extras]
       return foot.length > 0 ? [heading(T, 'This Mac'), ...foot] : []
@@ -793,7 +752,7 @@ function colourer() {
 
 // ---- this session
 
-function sessionSection(Box, T, d, W, burst, warnPct, full) {
+function sessionSection(Box, T, d, W, burst, warnPct, busy) {
   const s = d.session || {}
   // A long folder loses its start, not its end: the end is what tells two
   // repos apart.
@@ -825,7 +784,7 @@ function sessionSection(Box, T, d, W, burst, warnPct, full) {
   // compaction lines marked. Otherwise the
   // panel's gauge against the model's window, its colour thresholds as ticks.
   if (sent) {
-    out.push(...sentBar(Box, T, sent, W, s.win || 0, warnPct, full))
+    out.push(...sentBar(Box, T, sent, W, s.win || 0, warnPct, busy))
     if (s.compacting) out.push(T('  ⟳ a summary is ready: the next prompt compacts', { color: 'cyan' }))
     else if (sent.state === 'warning') out.push(T('! Close to the limit: ' + limitLabel(sent) + '.', { color: 'yellow', wrap: 'wrap' }))
     // "compacted" is not said: it stays for the rest of the session and the
@@ -938,7 +897,7 @@ function limitNote(s) {
 // not the room there is), a legend under it, and
 // what Claude Code itself still holds when that is more. Without a window
 // the bar is against the compaction limit alone.
-function sentBar(Box, T, s, W, win, warnPct, full) {
+function sentBar(Box, T, s, W, win, warnPct, busy) {
   const limit = compactAt(s)
   const warn = limit ? Math.round((limit * (warnPct > 0 && warnPct < 100 ? warnPct : 80)) / 100) : 0
   const whole = win > limit && win >= s.context
@@ -1011,8 +970,7 @@ function sentBar(Box, T, s, W, win, warnPct, full) {
   const held = Math.max(s.raw || 0, s.context || 0)
   if (held > 0) {
     const size = T('Uncompacted Size: ' + k(held), { color: heldColour(s, held) })
-    // The button only where there is enough held for it to be worth a press.
-    if (full && win > 0 && held >= win * FULL_FROM) out.push(Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [size, typeof full === 'function' ? full() : full] }))
+    if (busy) out.push(Box({ flexDirection: 'row', flexWrap: 'wrap', columnGap: 2, children: [size, busy] }))
     else out.push(size)
   }
   return out
@@ -1041,10 +999,6 @@ export function share(amounts, width) {
   }
   return out
 }
-
-// The share of the model's window Claude Code must hold before the Full
-// Async Compaction button is drawn beside Uncompacted Size.
-const FULL_FROM = 0.5
 
 // Where Burst's mod (burst-session, HANDOFF_AT) compacts a session opened
 // again with the summary Burst already wrote.

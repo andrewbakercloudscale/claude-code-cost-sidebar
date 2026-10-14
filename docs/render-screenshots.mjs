@@ -209,7 +209,7 @@ const scenes = {}
   // Compacted by Burst more than once, and Claude Code still holds all of
   // it: over half the model's window, so the button is beside the figure.
   const t = allTurns(149)
-  scenes.held = { d: doc(t, { under: { 143: [FINISHED], 142: [STARTED] } }), b: burst(t[t.length - 1][1], 'compacted', 539000), x: SAVED }
+  scenes.held = { d: doc(t, { under: { 143: [FINISHED], 142: [STARTED] } }), b: burst(t[t.length - 1][1], 'compacted', 539000), x: SAVED, busy: true }
 }
 {
   // After a pause Anthropic no longer held the thread, and Claude Code sent
@@ -281,11 +281,12 @@ function Box(p) {
 // Claude Code draws a button as its label in square brackets.
 const button = Text({ bold: true, children: ['[ Open Claude Burst dashboard ↗ ]'] })
 // The mod's own first row, drawn by its Pane hook over what panel() returns.
-const full = Text({ bold: true, children: ['[ Full Async Compaction ]'] })
+// Beside Uncompacted Size while a compaction runs: the held scene shows it.
+const full = Text({ color: 'yellow', bold: true, children: ['compacting…'] })
 const hide = Box({ flexDirection: 'row', justifyContent: 'flex-end', children: [Text({ bold: true, children: ['[ Hide ]'] })] })
 
 function page(scene) {
-  const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, scene.b ? [button] : [], scene.b, scene.b ? LIMITS : null, scene.x || null, full)
+  const rows = panel(Box, Text, scene.d, WIDTH, NOW, '', null, scene.b ? [button] : [], scene.b, scene.b ? LIMITS : null, scene.x || null, scene.busy ? full : null)
   return `<!doctype html><meta charset="utf-8"><style>
   html, body { margin: 0; background: #1f2029; }
   #pane { display: inline-block; padding: 14px 18px 18px; background: #1f2029; color: #d7dae0;

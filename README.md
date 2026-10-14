@@ -54,7 +54,7 @@ This came out of a simple problem: AI coding agents burn tokens and money per tu
 > What needs Claude Burst, and is left out without it:
 > - the limit rows in **Plan Utilisation** and the warning as a limit gets close;
 > - the **Pauseless Compaction**, **Compaction Strategies** and **Overflow to Secondary** savings tables;
-> - the context bar by part, the compaction line on it, and `Uncompacted Size` with its **Full Async Compaction** button;
+> - the context bar by part, the compaction line on it, and `Uncompacted Size` with `compacting…` beside it while a compaction runs;
 > - `Proxy State`, the dashboard button and the `*** Async Compaction ... ***` rows in Turns.
 >
 > Everything else (the session, its turns, today, the week, projects) is read from Claude Code's own transcripts.
@@ -127,15 +127,15 @@ Colours mean the same thing everywhere: green is normal, yellow is raised, red i
 <table>
 <tr>
 <td valign="top"><img src="docs/card-session-intelligent.png" alt="The top of the sidebar with its Hide button, and a Session card whose limit reads Auto Compact at 240k (Intelligent) in cyan" width="400"></td>
-<td valign="top"><img src="docs/card-session-held.png" alt="A Session card with Uncompacted Size: 539k in red and a Full Async Compaction button beside it" width="400"></td>
+<td valign="top"><img src="docs/card-session-held.png" alt="A Session card with Uncompacted Size: 539k in red and compacting… beside it" width="400"></td>
 </tr>
 <tr>
 <td align="center"><sub><code>(Intelligent)</code>: Burst chose this limit for the repository</sub></td>
-<td align="center"><sub><b>Full Async Compaction</b>, from half the window held</sub></td>
+<td align="center"><sub><code>compacting…</code>, while a compaction runs</sub></td>
 </tr>
 </table>
 
-**Full Async Compaction** is beside `Uncompacted Size` once Claude Code holds half the model's window or more (500k of 1M). It runs Claude Burst's `/compact-async-full`: Claude Code's own history is replaced with the summary Burst already wrote, with no summary request and no pause, so `Uncompacted Size` comes down to what Burst sends. A bright band crosses the button's label while it is drawn, so that it is seen. It is Burst's command, from its `burst-session` mod: where Burst holds no summary of the session yet, or its hand-off is turned off on the dashboard, Burst says so and nothing is compacted.
+**`compacting…`** is beside `Uncompacted Size` while a compaction of this session's history is running, from the moment it starts until it stands or is skipped, and at no other time. There is no button: Claude Burst's `burst-session` mod compacts Claude Code's own history by itself once it holds 800k, with the summary Burst already wrote (no summary request, no pause), and `/compact-async-full` does it by hand at any size. A sidebar that drew a button from 500k, with a band crossing its label, read as a compaction always running (removed in mod 1.20.0).
 
 #### The context bar without Claude Burst
 
@@ -360,7 +360,7 @@ What to look for:
 
 - **The ctx bar is Burst's.** It is the context Burst sends after its own compaction, by part, against the limit it compacts at, read from Burst's dashboard every 5 seconds. Claude Code's own figure does not know a compaction happened, which is what the `Claude Code holds 299k` line is for.
 - **The three marker rows** come from Burst's `~/.config/claude-burst/metrics.jsonl`. Each is drawn between the two turns it happened between. A Pending whose Finished landed before another turn ran is not drawn: the Finished says it all.
-- **`*** Async Full Compaction ***`** is a fourth marker row, for Burst's `/compact-async-full` (the Full Async Compaction button). Claude Code runs and echoes that command as `/compact`, so this row is where the session's history says which it was. It comes from the session's own transcript: a compaction whose summary Burst wrote.
+- **`*** Async Full Compaction ***`** is a fourth marker row, for Burst's `/compact-async-full` and its hand-off at 800k. Claude Code runs and echoes that command as `/compact`, so this row is where the session's history says which it was. It comes from the session's own transcript: a compaction whose summary Burst wrote.
 - **The blue row with a negative delta** is the first turn sent with the summary. That turn's cache hit is low and its cost is up, because the smaller context is written to the cache once. It is the expected price of the compaction, so it never colours the row as a spike.
 - **Notices.** Where Burst's own `burst-session` mod is installed, it shows each step as a toast inside the session. Without it, on Ghostty, a small floating notice reads "Async Compaction In Progress", then "Async Compaction Finished" (`CLAUDE_PANEL_COMPACTION_OVERLAY`).
 
