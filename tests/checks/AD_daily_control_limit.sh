@@ -151,19 +151,25 @@ STUB4
   python3 - "$HOME/.cache/claude-hourly-buckets.json" <<'BUCKETS'
 import datetime, json, sys
 hour = datetime.datetime.now().hour
-# 10 per hour up to and including now, 10 per hour after -- so elapsed
-# fraction is comfortably above MIN_PROJECTION_ELAPSED at any hour, and
-# there is always a remainder left to project onto.
-buckets = [{"hour": h, "avgCost": 10.0, "days": 14, "totalCost": 140.0} for h in range(24)]
+# 120 spread over the hours up to and including now, and 120 over the
+# hours after, so the elapsed fraction is one half at any hour (all of it
+# at 23:00) and comfortably above MIN_PROJECTION_ELAPSED. Uniform buckets
+# put it at (hour+1)/24, under that floor before 06:00, and the check
+# failed whenever the suite ran after midnight.
+def bucket(h, avg):
+    return {"hour": h, "avgCost": avg, "days": 14, "totalCost": avg * 14}
+buckets = [bucket(h, 120.0 / (hour + 1)) for h in range(hour + 1)]
+if hour < 23:
+    buckets += [bucket(h, 120.0 / (23 - hour)) for h in range(hour + 1, 24)]
 json.dump({"generatedAt": 0, "windowDays": 14, "buckets": buckets}, open(sys.argv[1], "w"))
 BUCKETS
 
   # The spend to use is derived from the limits the hook itself reports,
   # not hardcoded. Two reasons, both learned the hard way: the exact sd
-  # depends on the fixture, and the projection scales by 24/(hour+1) with
-  # uniform buckets -- so a fixed figure that sits between the two limits at
-  # 14:00 sits above both at 23:00, and the check would pass all morning and
-  # fail after supper.
+  # depends on the fixture, and the projection divides by the elapsed
+  # fraction, which the buckets set and which is all of the day at 23:00 --
+  # so a fixed figure would sit between the two limits at one hour and above
+  # both at another. The fraction is read back from the buckets written above.
   local lim_bad lim_run target elapsed_frac spend_needed
   lim_bad=$(PATH="$bin:$PATH" AD_TODAY=0 bash "$hook" --report \
     | awk '/^bad day:/ {gsub(/\$/,"",$3); print $3}')
@@ -176,7 +182,9 @@ BUCKETS
   # the runaway one. That gap is precisely the case the bad-day rule exists
   # for and the runaway rule cannot catch in time.
   target=$(LC_ALL=C awk -v a="$lim_bad" -v b="$lim_run" 'BEGIN{printf "%.2f", (a+b)/2}')
-  elapsed_frac=$(python3 -c 'import datetime; print((datetime.datetime.now().hour+1)/24)')
+  elapsed_frac=$(jq -r --argjson ch "$(( 10#$(date +%H) ))" '
+    ([.buckets[] | select(.hour <= $ch) | .avgCost] | add) / ([.buckets[].avgCost] | add)
+  ' "$HOME/.cache/claude-hourly-buckets.json")
   spend_needed=$(python3 -c "print(round($target*$elapsed_frac,2))")
 
   # The two --report calls above populated the hook's daily cache with
