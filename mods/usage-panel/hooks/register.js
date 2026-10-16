@@ -275,7 +275,7 @@ export function register(on) {
           } catch (err) {
             if (b.console) url = b.console
           }
-          try { await $.process.run(['open', url]) } catch (err) { $.ui.toast('could not open ' + url) }
+          try { await $.process.run(['open', url]) } catch (err) { $.ui.toast('🔴 Could not open ' + url) }
         },
       }))
     }
@@ -293,7 +293,7 @@ export function register(on) {
 // focus taken. The button above the prompt goes as it does.
 async function showPane($) {
   wanted = true
-  try { up = seat(await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS })) } catch (err) { $.ui.toast('could not open the usage sidebar') }
+  try { up = seat(await $.ui.open({ id: PANE, title: 'Usage', columns: COLUMNS })) } catch (err) { $.ui.toast('🔴 Could not open the usage sidebar') }
   $.ui.invalidate('ui.render')
 }
 
