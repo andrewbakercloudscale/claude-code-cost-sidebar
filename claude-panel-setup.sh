@@ -7684,6 +7684,11 @@ def plan_limits():
     return rows.get("5h"), rows.get("7d"), now
 
 def plan_bars():
+    # Each row is (shown, told): the line in the chat and on the phone, and
+    # the same figures in words for the model. A shown line fits one line of
+    # a phone, about 27 characters: a coloured dot, since the emoji is the one
+    # colour that survives, then a bar of narrow cells, ten to the full width,
+    # where coloured emoji squares are two characters wide each and wrapped.
     import time
     five, week, now = plan_limits()
     if not five and not week:
@@ -7692,25 +7697,31 @@ def plan_bars():
         t = time.localtime(epoch)
         if time.strftime("%Y-%m-%d", t) == time.strftime("%Y-%m-%d", time.localtime(now)):
             m = max(0, int((epoch - now) // 60))
-            return f"{time.strftime('%H:%M', t)} ({m // 60}h{m % 60:02d}m)"
-        return time.strftime("%a %H:%M", t)
-    def bar(pct, c):
+            return time.strftime("%H:%M", t), f"{time.strftime('%H:%M', t)} ({m // 60}h{m % 60:02d}m)"
+        return time.strftime("%a", t), time.strftime("%a %H:%M", t)
+    def bar(pct):
         n = 0 if pct <= 0 else max(1, min(10, round(pct / 10)))
-        return {"green": "\U0001f7e9", "yellow": "\U0001f7e8", "red": "\U0001f7e5"}[c] * n + "⬜" * (10 - n)
+        return "\u25b0" * n + "\u25b1" * (10 - n)
+    dot = {"green": "\U0001f7e2", "yellow": "\U0001f7e1", "red": "\U0001f534"}
     def level(pct):
         return "red" if pct >= 95 else "yellow" if pct >= 80 else "green"
     out = []
     if five:
         p = round(five["util"] * 100)
-        out.append(("5h window", bar(p, level(p)), f"{p}% used, resets {when(five['reset'])}"))
+        short, full = when(five["reset"])
+        out.append((f"{dot[level(p)]} 5h {bar(p)} {p}% \u21bb{short}", f"5h window {p}% used, resets {full}"))
     if week:
         p = round(week["util"] * 100)
-        out.append(("weekly", bar(p, level(p)), f"{p}% used, resets {when(week['reset'])}"))
+        short, full = when(week["reset"])
+        out.append((f"{dot[level(p)]} week {bar(p)} {p}% \u21bb{short}", f"weekly {p}% used, resets {full}"))
         gone = round(min(1, max(0, 1 - (week["reset"] - now) / 604800)) * 100)
         over = p - gone
-        pace = f"{over} pts over pace" if over > 0 else f"{-over} pts under pace" if over < 0 else "on pace"
+        pace = f"{over} over" if over > 0 else f"{-over} under" if over < 0 else "on pace"
         c = "red" if over >= 25 else "yellow" if over >= 10 else "green"
-        out.append(("week gone", bar(gone, c), f"{gone}% of the week, {pace}"))
+        # The weekly figure less the week gone, signed: +26 is ahead of pace.
+        sign = f"+{over}" if over > 0 else f"\u2212{-over}" if over < 0 else "\u00b10"
+        out.append((f"{dot[c]} time {bar(gone)} {gone}% {sign}",
+                     f"week gone {gone}% of the week, {pace + ' pace' if over else pace}"))
     return out
 
 if alert_daily == "1" or alert_badday == "1":
@@ -7718,10 +7729,9 @@ if alert_daily == "1" or alert_badday == "1":
         bars = plan_bars()
     except Exception:
         bars = []
-    lines.extend(f"{name} {b} {text}" for name, b, text in bars)
+    lines.extend(shown for shown, _ in bars)
     if bars:
-        # The model gets the figures without the emoji bars.
-        context.append("Plan utilisation: " + "; ".join(f"{name} {text}" for name, _, text in bars) + ".")
+        context.append("Plan utilisation: " + "; ".join(told for _, told in bars) + ".")
 if alert_cost == "1":
     cost = float(session_cost)
     avg = float(avg_session_cost)
