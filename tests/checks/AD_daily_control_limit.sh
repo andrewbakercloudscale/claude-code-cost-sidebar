@@ -219,15 +219,18 @@ LIMITS
   assert_contains "and shows what is actually spent so far" "spent so far" "$msg5"
   assert_not_contains "without claiming the day is already over budget" \
     "DAILY SPEND" "$msg5"
-  assert_contains "the 5h bar has its own line, green" $'\n🟢 5h ▰▰▰▰▱▱▱▱▱▱ 42% ' "$msg5"
-  assert_contains "the weekly bar has its own line, yellow past 80%" $'\n🟡 week ▰▰▰▰▰▰▰▰▱▱ 83% ' "$msg5"
+  assert_contains "the bars come under a title" $'\nPlan Usage:\n5h ' "$msg5"
+  # Each bar is five squares of 20%, coloured like the panel: green, amber
+  # from 80%, red from 95%; the week's time by how far ahead of it use runs.
+  assert_contains "the 5h bar has its own line, green" $'\n5h 🟩🟩⬜⬜⬜ 42% ' "$msg5"
+  assert_contains "the weekly bar has its own line, amber past 80%" $'\nweek 🟨🟨🟨🟨⬜ 83% ' "$msg5"
   # 4 of 7 days gone is 57%, so 83% used is 26 points ahead: red.
-  assert_contains "the week's time against it, on its own line" $'\n🔴 time ▰▰▰▰▰▰▱▱▱▱ 57% +26' "$msg5"
-  # One line of a phone each, about 27 characters: the emoji squares the
-  # bars were first drawn with wrapped every row onto two or three lines.
+  assert_contains "the week's time against it, on its own line, red" $'\ntime 🟥🟥🟥⬜⬜ 57% +26' "$msg5"
+  # One line of a phone each, about 27 characters with a square counted as
+  # the two it takes: ten squares wrapped every row onto two or three lines.
   local longest
-  longest=$(printf '%s\n' "$msg5" | tail -n 3 | python3 -c 'import sys; print(max(len(l.rstrip("\n")) for l in sys.stdin))')
-  assert_eq "every bar row fits a phone's line" "1" "$([ "$longest" -le 27 ] && echo 1 || echo 0)"
+  longest=$(printf '%s\n' "$msg5" | tail -n 3 | python3 -c 'import sys; print(max(sum(2 if ord(c) >= 0x2b00 else 1 for c in l.rstrip("\n")) for l in sys.stdin))')
+  assert_eq "every bar row fits a phone's line ($longest)" "1" "$([ "$longest" -le 27 ] && echo 1 || echo 0)"
   assert_contains "the model gets the figures in words" "Plan utilisation: 5h window 42% used, resets" \
     "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out5")"
   assert_contains "and the pace" "week gone 57% of the week, 26 over pace" \
