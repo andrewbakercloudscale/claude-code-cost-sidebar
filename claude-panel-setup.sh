@@ -1624,6 +1624,18 @@ transcript_stamp() {
 # session then pays nothing at all, and an ordinary tick rescans only the one
 # session actually being typed into. $today is folded into the stamp so the
 # slice invalidates by itself at midnight rather than serving yesterday's.
+#
+# That still left one full scan per BUSY session per panel per slow tick, and
+# on 16 Oct 2026 six panels over three or four busy sessions kept about one
+# core occupied (2.5 CPU-s a scan over a 2GB corpus). So the count no longer
+# asks ccusage at all: it reads the session's own transcript and its
+# subagents', which takes 0.06 CPU-s, and counts as ccusage does. Checked
+# against ccusage on 39 session-days from 14 to 16 Oct 2026, all identical;
+# two rules were needed for that. A message logged more than once (once per
+# content block, and again when a session is rewound or copied) counts once,
+# at its LARGEST usage: streamed copies grow, and copies of a rewound
+# session carry zeros, so neither the first nor the last copy matches.
+# And the day is the timestamp's own UTC prefix, as ccusage's entries are.
 session_today_tokens_cached() {
   local sid="$1" today="$2" path key cache_file stamp cached out
   path=""
@@ -1641,10 +1653,40 @@ session_today_tokens_cached() {
       return
     fi
   fi
-  out=$(ccusage session --json -i "$sid" --offline 2>/dev/null | jq -r --arg d "$today" '
-    [.entries[]? | select(.timestamp | startswith($d)) |
-      .inputTokens+.outputTokens+.cacheCreationTokens+.cacheReadTokens] | add // 0
-  ' 2>/dev/null)
+  out=$(python3 - "$path" "$today" <<'TODAYTOK_PYEOF' 2>/dev/null
+import glob, json, os, sys
+
+path, today = sys.argv[1], sys.argv[2]
+files = [path] + sorted(glob.glob(os.path.join(path[:-len(".jsonl")], "subagents", "*.jsonl")))
+FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+by_key = {}
+for p in files:
+    try:
+        f = open(p)
+    except OSError:
+        continue
+    with f:
+        for n, line in enumerate(f):
+            if '"usage"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            msg = d.get("message") or {}
+            usage = msg.get("usage")
+            if d.get("type") != "assistant" or not usage:
+                continue
+            if not str(d.get("timestamp", "")).startswith(today):
+                continue
+            key = (msg.get("id"), d.get("requestId"))
+            if None in key:
+                key = (p, n)
+            tokens = sum(int(usage.get(x) or 0) for x in FIELDS)
+            by_key[key] = max(by_key.get(key, 0), tokens)
+print(sum(by_key.values()))
+TODAYTOK_PYEOF
+)
   # Only a real answer gets cached -- caching "" on a failed/interrupted
   # fetch would pin the empty result until the next turn landed.
   [ -n "$out" ] || return
@@ -3754,13 +3796,12 @@ build_session_table() {
 }
 
 # ---- slow-tier render: Recent + Top Sessions Today ----
-# Same reasoning as build_summary(), plus the expensive bit: Top Sessions
-# fans out one session_today_tokens_cached() per session active today. Each
-# of those is a `ccusage session -i <sid>` whose -i filters only the OUTPUT
-# -- the scan is the whole corpus either way -- and each sid is its own
-# cache key, so the mtime cache dedupes a session against itself but never
-# the eight against each other. On the old single tier a day with eight
-# live sessions meant eight concurrent full corpus scans every 10 seconds.
+# Same reasoning as build_summary(). Top Sessions fans out one
+# session_today_tokens_cached() per session active today. Each of those was
+# a `ccusage session -i <sid>`, a scan of the whole corpus whatever the -i,
+# and on the old single tier a day with eight live sessions meant eight
+# concurrent full corpus scans every 10 seconds. Each now reads only its own
+# session's transcript; see that function.
 #
 # Emitted untruncated; the caller applies `head -n $remaining` at PRINT
 # time, not here, because the height left over depends on how many rows the
