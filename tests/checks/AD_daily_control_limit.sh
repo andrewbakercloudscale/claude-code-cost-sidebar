@@ -58,6 +58,8 @@ STUB
   # The session in this fixture costs nothing, so the daily line is the only
   # one -- which is the point: the session rule could not have caught this.
   assert_not_contains "the session rule did not fire here" "COST ALERT" "$msg"
+  # No plan reading anywhere: no bars, rather than empty ones.
+  assert_not_contains "no plan reading draws no bars" "5h window" "$msg"
 
   # Throttled per DAY and across sessions, not per session: N open windows
   # each run this hook on every prompt, and N pushes of one day's alert is
@@ -194,6 +196,17 @@ BUCKETS
   # today's figure the hook acts on can be up to two minutes old.
   rm -rf "$HOME/.cache/ccusage-panel-cache"
 
+  # On a plan the alert carries the panel's three plan bars, each on a line
+  # of its own. The reading is the one the usage-panel mod saved; this
+  # sandbox has no Burst config, so the gateway is not asked.
+  mkdir -p "$HOME/.claude/plugins/store"
+  python3 - "$HOME/.claude/plugins/store/usage-panel_test.json" <<'LIMITS'
+import json, sys, time
+now = int(time.time())
+json.dump({"limits": [{"key": "5h", "util": 0.42, "reset": now + 7200},
+                      {"key": "7d", "util": 0.83, "reset": now + 3 * 86400}]}, open(sys.argv[1], "w"))
+LIMITS
+
   local out5
   out5=$(PATH="$bin:$PATH" AD_TODAY="$spend_needed" TERM_PROGRAM=ghostty \
          CLAUDE_COST_ALERT_TELEGRAM=0 bash "$hook" <<<"$payload")
@@ -206,6 +219,14 @@ BUCKETS
   assert_contains "and shows what is actually spent so far" "spent so far" "$msg5"
   assert_not_contains "without claiming the day is already over budget" \
     "DAILY SPEND" "$msg5"
+  assert_contains "the 5h bar has its own line" $'\n5h window ' "$msg5"
+  assert_contains "with its figure" "42% used" "$msg5"
+  assert_contains "the weekly bar has its own line, yellow past 80%" $'\nweekly 🟨' "$msg5"
+  # 4 of 7 days gone is 57%, so 83% used is 26 points ahead: red.
+  assert_contains "the week's time against it, on its own line" $'\nweek gone 🟥' "$msg5"
+  assert_contains "with the pace" "26 pts over pace" "$msg5"
+  assert_contains "the model gets the figures too" "Plan utilisation: 5h window 42% used" \
+    "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$out5")"
 
   # Separate claims: the early warning must not consume the later one.
   assert_eq "the bad-day claim is taken" "1" \

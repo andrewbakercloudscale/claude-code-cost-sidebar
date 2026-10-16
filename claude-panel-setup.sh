@@ -7626,6 +7626,102 @@ if alert_badday == "1":
         f"so far), above the {daily_sigma_proj}-sigma line of ${float(daily_limit_proj):.2f} "
         f"drawn from the last {daily_window} days."
     )
+
+# On a plan, a day-level alert is followed by the plan's three bars, as the
+# panel's Plan Utilisation section draws them: the 5h window, the weekly
+# limit, and how much of the week has gone by against it. Without them the
+# alert says what the day costs at API rates but not whether it is eating
+# the plan, which is the question a plan user acts on.
+#
+# The figures are Anthropic's own utilisation headers: from Claude Burst's
+# recent replies when it answers, else the last reading the usage-panel mod
+# saved. Neither means no plan, or no way to tell, and then no bars: an
+# empty bar would read as a plan with nothing used. One line each, so every
+# line is a row of its own; the colour is in the emoji, the one colour that
+# survives Claude Code's rendering.
+def plan_limits():
+    import glob, time, urllib.request
+    home = os.path.expanduser("~")
+    found = None
+    cfg = os.path.join(home, ".config", "claude-burst", "config.json")
+    try:
+        listen = json.load(open(cfg)).get("admin_listen") or "127.0.0.1:7788"
+    except Exception:
+        listen = ""
+    if listen and listen not in ("off", "null"):
+        try:
+            with urllib.request.urlopen(f"http://{listen}/api/responses", timeout=1) as r:
+                replies = json.load(r)
+            replies = sorted((x for x in replies if isinstance(x, dict) and isinstance(x.get("headers"), dict)),
+                             key=lambda x: str(x.get("time") or ""), reverse=True)
+            for x in replies:
+                h, rows = x["headers"], []
+                for name, v in h.items():
+                    pre, suf = "anthropic-ratelimit-unified-", "-utilization"
+                    if not (name.startswith(pre) and name.endswith(suf)):
+                        continue
+                    key = name[len(pre):-len(suf)]
+                    try:
+                        rows.append({"key": key, "util": float(v), "reset": float(h.get(pre + key + "-reset") or 0)})
+                    except ValueError:
+                        pass
+                if rows:
+                    found = rows
+                    break
+        except Exception:
+            found = None
+    if found is None:
+        for path in sorted(glob.glob(os.path.join(home, ".claude", "plugins", "store", "usage-panel_*.json"))):
+            try:
+                kept = json.load(open(path)).get("limits")
+            except Exception:
+                continue
+            if isinstance(kept, list) and kept:
+                found = kept
+                break
+    now = time.time()
+    rows = {l.get("key"): l for l in (found or []) if isinstance(l, dict) and float(l.get("reset") or 0) > now}
+    return rows.get("5h"), rows.get("7d"), now
+
+def plan_bars():
+    import time
+    five, week, now = plan_limits()
+    if not five and not week:
+        return []
+    def when(epoch):
+        t = time.localtime(epoch)
+        if time.strftime("%Y-%m-%d", t) == time.strftime("%Y-%m-%d", time.localtime(now)):
+            m = max(0, int((epoch - now) // 60))
+            return f"{time.strftime('%H:%M', t)} ({m // 60}h{m % 60:02d}m)"
+        return time.strftime("%a %H:%M", t)
+    def bar(pct, c):
+        n = 0 if pct <= 0 else max(1, min(10, round(pct / 10)))
+        return {"green": "\U0001f7e9", "yellow": "\U0001f7e8", "red": "\U0001f7e5"}[c] * n + "⬜" * (10 - n)
+    def level(pct):
+        return "red" if pct >= 95 else "yellow" if pct >= 80 else "green"
+    out = []
+    if five:
+        p = round(five["util"] * 100)
+        out.append(("5h window", bar(p, level(p)), f"{p}% used, resets {when(five['reset'])}"))
+    if week:
+        p = round(week["util"] * 100)
+        out.append(("weekly", bar(p, level(p)), f"{p}% used, resets {when(week['reset'])}"))
+        gone = round(min(1, max(0, 1 - (week["reset"] - now) / 604800)) * 100)
+        over = p - gone
+        pace = f"{over} pts over pace" if over > 0 else f"{-over} pts under pace" if over < 0 else "on pace"
+        c = "red" if over >= 25 else "yellow" if over >= 10 else "green"
+        out.append(("week gone", bar(gone, c), f"{gone}% of the week, {pace}"))
+    return out
+
+if alert_daily == "1" or alert_badday == "1":
+    try:
+        bars = plan_bars()
+    except Exception:
+        bars = []
+    lines.extend(f"{name} {b} {text}" for name, b, text in bars)
+    if bars:
+        # The model gets the figures without the emoji bars.
+        context.append("Plan utilisation: " + "; ".join(f"{name} {text}" for name, _, text in bars) + ".")
 if alert_cost == "1":
     cost = float(session_cost)
     avg = float(avg_session_cost)
