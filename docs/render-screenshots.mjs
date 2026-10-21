@@ -60,24 +60,21 @@ function allTurns(last) {
 
 const G = `${ESC}[32m`, Y = `${ESC}[33m`, B = `${ESC}[34m`, M = `${ESC}[35m`, R = `${ESC}[31m`, C = `${ESC}[36m`, X = `${ESC}[0m`
 const kk = (n) => (n >= 1000 ? Math.round(n / 1000) + 'k' : String(n))
-// A turn's Δ as the panel prints it: always in k.
-const dk = (n) => (n >= 950 ? Math.round(n / 1000) + 'k' : Math.round(n / 100) ? '0.' + Math.round(n / 100) + 'k' : '0k')
 
 // The turn table as ccusage-panel.sh prints it: newest first, a compaction's
 // rows between the turns it happened between.
 function table(turns, marks) {
-  const rows = [`  ${C}Turn ${X}${C}Model    ${X}${R}  Cost${X}${G}    Input (Δ)${X}${B} Cache${X}`]
+  const rows = [`  ${C}Turn ${X}${C}Model    ${X}${R}  Cost${X}${G}  Input${X}${B} Cache${X}`]
   for (const m of marks.top || []) rows.push(m)
   for (let i = turns.length - 1; i >= 0 && rows.length < 13; i--) {
     const [n, ctx, delta, hit, cost] = turns[i]
     const prev = i > 0 ? turns[i - 1][1] : 0
     const shrank = prev && ctx < prev * 0.8
-    const cell = shrank ? `${kk(ctx)} (-${dk(prev - ctx)})` : `${kk(ctx)} (+${dk(delta)})`
-    const pad = ' '.repeat(Math.max(0, 12 - cell.length))
-    // A turn that sent the whole conversation again: the rise in yellow,
-    // and the same figure in the row under it.
+    const cell = kk(ctx)
+    const pad = ' '.repeat(Math.max(0, 6 - cell.length))
+    // A turn that sent the whole conversation again: a row under it says how much.
     const again = marks.replayed && marks.replayed[n]
-    const input = shrank ? `${G}${kk(ctx)}${X} (${G}-${dk(prev - ctx)}${X})` : again ? `${G}${kk(ctx)}${X} (+${Y}${dk(delta)}${X})` : `${G}${kk(ctx)}${X} (+${G}${dk(delta)}${X})`
+    const input = `${G}${cell}${X}`
     const cc = hit < 90 ? M : hit < 95 ? R : G
     // A compaction's turn is blue from end to end.
     if (shrank) rows.push(`  ${B}${String(n).padEnd(5)}${'Opus 5.5'.padEnd(9)}${('$' + cost.toFixed(2)).padStart(6)} ${pad}${cell}${(hit + '%').padStart(6)}${X}`)
