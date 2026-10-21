@@ -1848,14 +1848,6 @@ def fmt_k(n):
         return f"{n/1000:.0f}k"
     return str(n)
 
-# A turn's Δ, always in k so the column reads in one unit: 0.6k for a rise
-# under a thousand, 0k for one too small to show.
-def fmt_dk(n):
-    if abs(n) >= 950:
-        return f"{n/1000:.0f}k"
-    tenths = int(abs(n) / 100 + 0.5)
-    return f"0.{tenths}k" if tenths else "0k"
-
 # The ONLY copy of this rule. It used to be mirrored in the bash panel and
 # "kept in sync manually", with both computing a denominator for the same
 # displayed percentage; the window now travels out of here in the metadata
@@ -2244,7 +2236,7 @@ cost_text = lambda c: "?" if c is None else "$" + format(c, ".2f")
 lw = max([len(t[0]) for t in shown] + [5]) + 1
 cw = max([len(cost_text(t[4])) for t in shown] + [4]) + 1
 model_h = f"{col_model}{'Model':<{lw}}{c_reset}"
-input_h = f"{col_input}{'Input (Δ)':>13}{c_reset}"
+input_h = f"{col_input}{'Input':>7}{c_reset}"
 cache_h = f"{col_cache}{'Cache':>6}{c_reset}"
 cost_h = f"{col_cost}{'Cost':>{cw}}{c_reset}"
 print(f"  {turn_h}{model_h}{cost_h}{input_h}{cache_h}")
@@ -2289,27 +2281,21 @@ if shown:
     for i in reversed(range(len(shown))):
         label, total_ctx, delta, cache_pct, cost, model, is_secondary, is_unpriced, route, _ = shown[i][:10]
         turn_no = start_idx + i
-        # The Δ is normally what this turn added (its cache write). When the
-        # context SHRANK, a compaction happened (Claude Code's or the
-        # gateway's) and the useful number is how much went: shown negative,
-        # the whole row in blue (the Pending row's colour) so the turn a
-        # compaction landed on is found at a glance, and never coloured as a
-        # spike, since the cache write that follows a compaction is the
-        # expected cost of it.
+        # When the context SHRANK, a compaction happened (Claude Code's or
+        # the gateway's): the whole row is blue (the Pending row's colour) so
+        # the turn a compaction landed on is found at a glance, and never
+        # coloured as a spike, since the cache write that follows a
+        # compaction is the expected cost of it. What a turn added is not
+        # shown: the column took a third of the pane's width, and the colour
+        # already says when a turn added too much.
         idx = start_idx - 1 + i
         prev_ctx = turns[idx - 1][1] if idx > 0 else 0
         shrank = prev_ctx and total_ctx < prev_ctx * 0.8 and not is_secondary
-        total_str, delta_str = fmt_k(total_ctx), fmt_dk(delta)
-        sign = "+"
-        if shrank:
-            sign, delta_str = "-", fmt_dk(prev_ctx - total_ctx)
-        # The other way: the rise is what was sent again, and the line under
-        # the row says so, since "+102k" alone reads as 102k of new work.
+        total_str = fmt_k(total_ctx)
+        # The other way: a rise far beyond what the turn wrote was sent
+        # again, and the line under the row says so.
         replayed = 0 if is_secondary or (idx > 0 and turns[idx - 1][6]) else replayed_tokens(prev_ctx, total_ctx, delta)
-        if replayed:
-            delta_str = fmt_dk(replayed)
-        plain_cell = f"{total_str} ({sign}{delta_str})"
-        pad = " " * max(0, 12 - len(plain_cell))
+        pad = " " * max(0, 6 - len(total_str))
         if is_secondary:
             # Marked in the one column that has room, and explained in a
             # legend below rather than by a wider Model column -- this pane
@@ -2330,7 +2316,7 @@ if shown:
             #   - context %: the window size is unknown, so ctx_pct is noise
             sec_cost = "?" if cost is None else "$" + format(cost, ".2f")
             print(f"  {col_purple}{turn_no:<5}{label:<10}{c_reset}"
-                  f"{pad}{total_str} (+{delta_str})"
+                  f" {pad}{total_str}"
                   f"{c_na}{'--':>6}{sec_cost:>8}{c_reset}")
             print_markers(i)
             continue
@@ -2371,13 +2357,13 @@ if shown:
         rank = max(severity_rank(delta_c), ctx_rank if ctx_rank >= 2 else 0)
         cost_cell = cost_text(cost)
         if shrank:
-            print(f"  {col_cache}{turn_no:<5}{label:<{lw}}{cost_cell:>{cw}} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")
+            print(f"  {col_cache}{turn_no:<5}{label:<{lw}}{cost_cell:>{cw}} {pad}{total_str}{cache_pct:>5.0f}%{c_reset}")
         elif rank > 0:
             row_c = (col_input, col_mid_tier, col_cost, col_purple)[rank]
-            print(f"  {row_c}{turn_no:<5}{label:<{lw}}{cost_cell:>{cw}} {pad}{total_str} ({sign}{delta_str}){cache_pct:>5.0f}%{c_reset}")
+            print(f"  {row_c}{turn_no:<5}{label:<{lw}}{cost_cell:>{cw}} {pad}{total_str}{cache_pct:>5.0f}%{c_reset}")
         else:
             total_colored = f"{ctx_c}{total_str}{c_reset}"
-            input_cell = f"{pad}{total_colored} (+{delta_c}{delta_str}{c_reset})"
+            input_cell = f"{pad}{total_colored}"
             cache_cell = f"{cache_c}{cache_pct:>5.0f}%{c_reset}"
             print(f"  {turn_no:<5}{label:<{lw}}{cost_cell:>{cw}} {input_cell}{cache_cell}")
         if replayed:
