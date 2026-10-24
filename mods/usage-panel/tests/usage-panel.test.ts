@@ -66,6 +66,9 @@ let seated = true
 // Burst's ~/.config/claude-burst/mod.json; null is no file, its defaults.
 let burstMod: object | null = null
 
+// Ghostty Dock's background for this session's terminal; null is no file.
+let dockBg: string | null = null
+
 // Answers everything the mod calls. `files` is what fs.read returns for the
 // session's JSON on each read, in turn; null is no file yet.
 function stubs(on, files: Array<object | null>, runs: string[][] = [], store: Record<string, unknown> = {}, opened: object[] = [], toasts: string[] = []) {
@@ -83,6 +86,7 @@ function stubs(on, files: Array<object | null>, runs: string[][] = [], store: Re
   let i = 0
   on('fs.read', ($, e) => {
     if (e.path === '/Users/me/.config/claude-burst/mod.json' && burstMod) return { value: JSON.stringify(burstMod) }
+    if (e.path === '/Users/me/.local/state/ghostty-dock/backgrounds/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c') return dockBg === null ? { deny: 'no such file' } : { value: dockBg }
     if (!e.path.endsWith('/mod/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeb598c.json')) return { deny: 'no such file' }
     const f = files[Math.min(i++, files.length - 1)]
     return f === null ? { deny: 'no such file' } : { value: JSON.stringify(f) }
@@ -1278,4 +1282,20 @@ test('"compacting…" is beside Uncompacted Size while a compaction runs and onl
   ui = await $.ui.mount(PANE)
   expect(await ui.find({ type: 'Text', text: 'compacting…' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('beside a Ghostty Dock session the pane takes its terminal\'s background, and Claude Code\'s own without one', async ($, on) => {
+  dockBg = '#e7f5e8\n'
+  try {
+    const clock = stubs(on, [doc()])
+    await start($)
+    const ui = await $.ui.mount(PANE)
+    const root = () => ui.drawn().then((t) => (t as { props: { backgroundColor?: string } }).props.backgroundColor)
+    expect(await root()).toBe('#e7f5e8')
+    dockBg = 'not a colour'
+    await clock.advance(5000)
+    expect(await root()).toBeUndefined()
+  } finally {
+    dockBg = null
+  }
 })
