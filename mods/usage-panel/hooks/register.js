@@ -55,6 +55,7 @@ let home = ''
 let cwd = ''
 let data = null // the panel's last mod/<sid>.json
 let raw = ''
+let paneBg = '' // the terminal's background beside the pane, from Ghostty Dock; '' leaves Claude Code's
 let feedError = ''
 let pinned = true
 // The sidebar has been open in this session: where it is then closed, a
@@ -123,6 +124,7 @@ export function register(on) {
     }
     await feed($)
     await read($)
+    await readBackground($)
     await readBurst($)
     await readLimits($)
     await readExtras($)
@@ -131,7 +133,8 @@ export function register(on) {
     $.clock.every(EXTRA_MS, async () => { if (await readExtras($)) $.ui.invalidate('ui.render') })
     $.clock.every(READ_MS, async () => {
       const changed = await read($)
-      if ((await readBurst($)) || changed) $.ui.invalidate('ui.render')
+      const bg = await readBackground($)
+      if ((await readBurst($)) || changed || bg) $.ui.invalidate('ui.render')
     })
     try {
       await $.command.register({ name: COMMAND, description: 'The usage sidebar: open it; pin / unpin; hide, show, up, down, top, bottom <section>; sections; reset', immediate: true })
@@ -285,7 +288,7 @@ export function register(on) {
     // At the top right, where a close mark is looked for. The button above
     // the prompt brings the sidebar back.
     const top = Box({ flexDirection: 'row', justifyContent: 'flex-end', children: [Button({ key: 'usage-hide', label: 'Hide', role: 'dismiss', onPress: () => hidePane($) })] })
-    return Box({ flexDirection: 'column', children: [top, ...rows] })
+    return Box({ flexDirection: 'column', flexGrow: 1, backgroundColor: paneBg || undefined, children: [top, ...rows] })
   })
 }
 
@@ -349,6 +352,25 @@ async function read($) {
   } catch (err) {
     return false
   }
+  return true
+}
+
+// Claude Code fills a pane with its theme's own grey, which matches no
+// terminal but a plain dark one: beside a Ghostty Dock session in a light
+// theme, or one coloured from its row, the sidebar was a grey block. The Dock
+// writes each session's terminal background, and the pane is painted in it.
+// True when it changed.
+async function readBackground($) {
+  if (!sid || !home) return false
+  let bg = ''
+  try {
+    bg = String(await $.fs.read(home + '/.local/state/ghostty-dock/backgrounds/' + sid)).trim()
+  } catch (err) {
+    bg = ''
+  }
+  if (!/^#[0-9a-f]{6}$/i.test(bg)) bg = ''
+  if (bg === paneBg) return false
+  paneBg = bg
   return true
 }
 
