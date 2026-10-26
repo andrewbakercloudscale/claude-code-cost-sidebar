@@ -2441,7 +2441,36 @@ CACHE_LOSS_USD=""; CACHE_LOSS_TURNS=""; CACHE_LOSS_30=""; CACHE_LOSS_DAYS=""
 CACHE_LOSS_FILE="${CACHE_LOSS_FILE:-$HOME/.cache/ccusage-panel-cache/cache-loss-days.tsv}"
 CACHE_LOSS_GAP=300
 TOP_TURNS_FILES="${TOP_TURNS_FILES:-60}"
+
+# Figures that are the same in every panel (today's top turns, the 30-day
+# and week averages) were worked out by each panel on its own slow tick: a
+# dozen panels, a dozen times the work every two minutes, for one answer.
+# shared_memo runs the function once for all of them and keeps the variables
+# it sets in shared-<name>.sh, which the other panels source while it is
+# under PANEL_SHARED_TTL seconds old and from today.
+PANEL_SHARED_TTL="${PANEL_SHARED_TTL:-$(( SLOW_REFRESH - 10 ))}"
+shared_memo() { # $1 = name, $2 = function, $3... = the variables it sets
+  local f="$CCUSAGE_CACHE_DIR/shared-$1.sh" m day line
+  day=$(panel_date +%Y-%m-%d)
+  if (( PANEL_SHARED_TTL > 0 )) && m=$(stat -f %m "$f" 2>/dev/null) \
+     && (( $(panel_now) - m < PANEL_SHARED_TTL )) \
+     && IFS= read -r line < "$f" && [ "$line" = "# $day" ]; then
+    # shellcheck disable=SC1090
+    source "$f" && return 0
+  fi
+  "$2"
+  mkdir -p "$CCUSAGE_CACHE_DIR"
+  # declare -g: sourced inside this function, a plain declare makes locals.
+  { printf '# %s\n' "$day"; declare -p "${@:3}" 2>/dev/null | sed 's/^declare /declare -g /'; } \
+    > "$f.$$.tmp" && mv -f "$f.$$.tmp" "$f"
+}
+
 top_turns_refresh() {
+  shared_memo top-turns top_turns_compute TOP_TURNS_JSON TODAY_TURNS TODAY_TURNS_USD \
+    CACHE_LOSS_USD CACHE_LOSS_TURNS CACHE_LOSS_30 CACHE_LOSS_DAYS
+}
+
+top_turns_compute() {
   local files f out series tmp picked sid path turn cost ctx at cache delta gap prev reply folder json="[]"
   files=$(find "$HOME/.claude/projects" -mindepth 2 -maxdepth 2 -name '*.jsonl' \
     -newermt "$(date '+%Y-%m-%d 00:00:00')" 2>/dev/null)
@@ -3434,6 +3463,16 @@ build_summary() {
   # ---- baselines: average per-session cost over 7 days, total spend over
   # 30 days. Session average needs >=3 real sessions to trust, otherwise a
   # single earlier tiny/huge session would skew it.
+  shared_memo summary summary_globals since7 since7_iso all_sess baseline_json avg_session_cost \
+    since30 since30_iso recent_json spend30 avg_daily_30 prev7_since prev7_until prev7_since_iso \
+    prev7_until_iso prev7_avg prev30_since prev30_until prev30_since_iso prev30_until_iso \
+    prev_spend30 prev_avg_daily_30 today_daily_json today_amt current_hour today_pred \
+    typical_so_far remaining_avg _pred_frac
+  summary_session
+}
+
+# The part of the summary that is every panel's: shared_memo's to share.
+summary_globals() {
   since7=$(panel_date -v-7d +%Y%m%d 2>/dev/null || panel_date -d '7 days ago' +%Y%m%d)
   since7_iso=$(panel_date -v-7d +%Y-%m-%d 2>/dev/null || panel_date -d '7 days ago' +%Y-%m-%d)
   # Fetched ONCE for the whole frame. Three sections below are three views of
@@ -3522,6 +3561,10 @@ build_summary() {
   read -r today_pred typical_so_far remaining_avg _pred_frac <<<"$(
     project_today "$today_amt" "$HOURLY_BUCKET_CACHE" "$current_hour")"
   today_pred=$(LC_ALL=C awk -v v="$today_pred" 'BEGIN{printf "%.2f", v}')
+}
+
+# The rest of the summary, this session's.
+summary_session() {
 
   # ---- live status line (current session) ----
   # sess_id/model_id/model_label/folder_name/sess_start_epoch were already
