@@ -2450,19 +2450,22 @@ TOP_TURNS_FILES="${TOP_TURNS_FILES:-60}"
 # under PANEL_SHARED_TTL seconds old and from today.
 PANEL_SHARED_TTL="${PANEL_SHARED_TTL:-$(( SLOW_REFRESH - 10 ))}"
 shared_memo() { # $1 = name, $2 = function, $3... = the variables it sets
-  local f="$CCUSAGE_CACHE_DIR/shared-$1.sh" m day line
-  day=$(panel_date +%Y-%m-%d)
-  if (( PANEL_SHARED_TTL > 0 )) && m=$(stat -f %m "$f" 2>/dev/null) \
-     && (( $(panel_now) - m < PANEL_SHARED_TTL )) \
-     && IFS= read -r line < "$f" && [ "$line" = "# $day" ]; then
+  # Names no function it runs would use: bash scoping is dynamic, and
+  # build_trailing's "read -r day" emptied a local "day" here, so its file
+  # was headed "# " and never read back.
+  local _sm_f="$CCUSAGE_CACHE_DIR/shared-$1.sh" _sm_m _sm_day _sm_line
+  _sm_day=$(panel_date +%Y-%m-%d)
+  if (( PANEL_SHARED_TTL > 0 )) && _sm_m=$(stat -f %m "$_sm_f" 2>/dev/null) \
+     && (( $(panel_now) - _sm_m < PANEL_SHARED_TTL )) \
+     && IFS= read -r _sm_line < "$_sm_f" && [ "$_sm_line" = "# $_sm_day" ]; then
     # shellcheck disable=SC1090
-    source "$f" && return 0
+    source "$_sm_f" && return 0
   fi
   "$2"
   mkdir -p "$CCUSAGE_CACHE_DIR"
   # declare -g: sourced inside this function, a plain declare makes locals.
-  { printf '# %s\n' "$day"; declare -p "${@:3}" 2>/dev/null | sed 's/^declare /declare -g /'; } \
-    > "$f.$$.tmp" && mv -f "$f.$$.tmp" "$f"
+  { printf '# %s\n' "$_sm_day"; declare -p "${@:3}" 2>/dev/null | sed 's/^declare /declare -g /'; } \
+    > "$_sm_f.$$.tmp" && mv -f "$_sm_f.$$.tmp" "$_sm_f"
 }
 
 top_turns_refresh() {
@@ -2588,20 +2591,25 @@ session_stats_refresh() {
   [ -n "${latest:-}" ] || return 0
   local out meta
   out=$(turn_table_series "$latest")
-  meta=$(printf '%s\n' "$out" | head -1)
+  IFS= read -r meta <<<"$out"
+  # Split with expansions, not printf | cut: this runs every fast tick in
+  # every panel, and the ten pipelines it was cost more than the cache read.
+  # The tabs become \x1f first, because read merges runs of a whitespace
+  # IFS and an empty field would shift the ones after it.
   case "$meta" in
     '#META'*)
-      SESS_COST=$(printf '%s' "$meta" | cut -f2)
-      SESS_CTX=$(printf '%s' "$meta" | cut -f3)
-      SESS_WIN=$(printf '%s' "$meta" | cut -f4)
-      SESS_COMPACTING=$(printf '%s' "$meta" | cut -f5)
-      SESS_TABLE=$(printf '%s\n' "$out" | tail -n +2)
+      IFS=$'\x1f' read -r _ SESS_COST SESS_CTX SESS_WIN SESS_COMPACTING _ <<<"${meta//$'\t'/$'\x1f'}"
+      # By offset, not ${out#*$'\n'}: bash matches that against every
+      # prefix in turn, slower than the pipelines on a 300-turn table.
+      SESS_TABLE=${out:${#meta}+1}
       # The turns as numbers for the mod's graphs (turn_table_cached's
       # #SERIES line), when the cache entry is new enough to carry them.
       case "$SESS_TABLE" in
         '#SERIES'*)
-          SESS_SERIES=$(printf '%s\n' "$SESS_TABLE" | head -1 | cut -f2-)
-          SESS_TABLE=$(printf '%s\n' "$SESS_TABLE" | tail -n +2)
+          IFS= read -r meta <<<"$SESS_TABLE"
+          SESS_SERIES=${meta%%$'\t'*}
+          SESS_SERIES=${meta:${#SESS_SERIES}+1}
+          SESS_TABLE=${SESS_TABLE:${#meta}+1}
           ;;
       esac
       ;;
@@ -4040,6 +4048,14 @@ build_trailing() {
   fi
 }
 
+# Headless, the mod is sent only the figures build_trailing works out on the
+# way (week, month and the day's top sessions), and they are the same in
+# every panel; its text, with this session's row marked, goes nowhere. So
+# they are worked out once for all panels, as the summary's are: 0.87 CPU-s
+# a slow tick per panel, the most of any slow step.
+trailing_figures() { build_trailing > /dev/null; }
+trailing_refresh() { shared_memo trailing trailing_figures week_cost month_cost top_rows; }
+
 # Slow-tier render cache: the last string each slow section produced, plus
 # when it was produced. A pane width change forces a rebuild too -- the
 # summary truncates the folder name against $cols, so a resized pane would
@@ -4773,6 +4789,14 @@ mod_json_write() { # $1 = session id
     sess_rate_tier=$(tier_name "$(threshold_color "$sess_rate_now" "$BURN_YELLOW" "$BURN_RED")")
   fi
   local errs_file="${PANEL_ERR_FILE:-/dev/null}"
+  # Settings read from files (two jq runs and a grep), looked up again only
+  # after a slow tick rather than on every write: a fifth of the write's cost.
+  if [ "${mj_conf_at-unset}" != "${last_slow:-0}" ]; then
+    mj_restart=$(panel_option_int CLAUDE_PANEL_RESTART_TOKENS 400000)
+    mj_dashboard=$(panel_gateway_url)
+    mj_console=$(burst_console_url)
+    mj_conf_at=${last_slow:-0}
+  fi
   MJ_SID="$sid" MJ_NOW="$(panel_now)" MJ_SLOW_AT="${last_slow:-0}" \
   MJ_REFRESH="$REFRESH" MJ_SLOW_REFRESH="$SLOW_REFRESH" \
   MJ_MODEL="${model_label:-}" MJ_MODEL_ID="${model_id:-}" MJ_MODEL_TIER="$model_tier" \
@@ -4780,7 +4804,7 @@ mod_json_write() { # $1 = session id
   MJ_SESS_COST="$SESS_COST" MJ_SESS_TIER="$sess_tier" MJ_SESS_RATE="$sess_rate_now" MJ_SESS_RATE_TIER="$sess_rate_tier" \
   MJ_SESS_START="${sess_start_epoch:-0}" MJ_AVG_SESSION="${avg_session_cost:-0}" \
   MJ_CTX="$SESS_CTX" MJ_WIN="$SESS_WIN" MJ_CTX_TIER="$ctx_tier" MJ_COMPACTING="$SESS_COMPACTING" \
-  MJ_RESTART_TOKENS="$(panel_option_int CLAUDE_PANEL_RESTART_TOKENS 400000)" \
+  MJ_RESTART_TOKENS="$mj_restart" \
   MJ_TODAY="${today_amt:-}" MJ_TODAY_TIER="$today_tier" MJ_PRED="${today_pred:-}" MJ_PRED_TIER="$pred_tier" \
   MJ_TODAY_UNPRICED="${today_unpriced:-}" MJ_TYPICAL_SO_FAR="${typical_so_far:-}" \
   MJ_BLOCK="${has_block:-0}" MJ_BLK_COST="${blk_cost:-0}" MJ_BLK_CPH="${blk_cph:-0}" MJ_BLK_REM="${blk_rem:-0}" \
@@ -4796,7 +4820,7 @@ mod_json_write() { # $1 = session id
   MJ_ERRORS="$(sort -u "$errs_file" 2>/dev/null | head -5)" \
   MJ_THRESHOLDS="$CTX_YELLOW $CTX_RED $CTX_PURPLE $BURN_YELLOW $BURN_RED $TIER_YELLOW_MULT $TIER_RED_MULT" \
   MJ_HOURLY="${HOURLY_BUCKET_CACHE:-}" \
-  MJ_BURST_DASHBOARD="$(panel_gateway_url)" MJ_BURST_CONSOLE="$(burst_console_url)" \
+  MJ_BURST_DASHBOARD="$mj_dashboard" MJ_BURST_CONSOLE="$mj_console" \
   python3 - "$out" <<'PYEOF' 2>>"$errs_file"
 import json, os, sys, time
 from datetime import datetime, timedelta
@@ -5008,7 +5032,7 @@ panel_in_view() { # $1 = session id, $2 = now epoch
 headless_main() {
   # hsid, not sid: build_trailing reads rows into a variable named sid, and
   # bash's dynamic scoping would hand it this one.
-  local hsid="$PIN_SESSION_ID" tmp_s tmp_t tmp_r tmp_a
+  local hsid="$PIN_SESSION_ID" tmp_s tmp_r tmp_a
   [ -n "$hsid" ] || { echo "headless: no session id" >&2; return 2; }
   mod_claim "$hsid" || return 0
   PIN_SOURCE=mod
@@ -5016,11 +5040,10 @@ headless_main() {
   cols="$COLS"
   export COLS
   tmp_s=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-s.XXXXXX")
-  tmp_t=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-t.XXXXXX")
   tmp_r=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-r.XXXXXX")
   tmp_a=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-a.XXXXXX")
   # shellcheck disable=SC2064
-  trap "rm -f '$tmp_s' '$tmp_t' '$tmp_r' '$tmp_a'; [ \"\$(cat '$MOD_DIR/$hsid.pid' 2>/dev/null)\" = \"\$\$\" ] && rm -f '$MOD_DIR/$hsid.pid'" EXIT
+  trap "rm -f '$tmp_s' '$tmp_r' '$tmp_a'; [ \"\$(cat '$MOD_DIR/$hsid.pid' 2>/dev/null)\" = \"\$\$\" ] && rm -f '$MOD_DIR/$hsid.pid'" EXIT
   mod_prune
   local in_view=1 was_in_view=1 last_write=0
   while mod_alive "$hsid" && mod_still_ours "$hsid"; do
@@ -5056,7 +5079,7 @@ headless_main() {
       # computes on the way are still set when mod_json_write reads them.
       build_summary > "$tmp_s" 2>>"$PANEL_ERR_FILE"
       summary_block=$(cat "$tmp_s")
-      build_trailing > "$tmp_t" 2>>"$PANEL_ERR_FILE"
+      trailing_refresh 2>>"$PANEL_ERR_FILE"
       top_turns_refresh
       band_write "$hsid" "$summary_block"
       # The two reports behind the graphs, to files: too big for the
