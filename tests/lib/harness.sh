@@ -118,6 +118,9 @@ sandbox_new() { # $1 = name
   export HOME="$SBX/home"
   export CCUSAGE_FIXTURE_DIR="$SBX/fixtures"
   export CCUSAGE_CALL_LOG="$SBX/ccusage-calls.log"
+  # Off unless a check turns it on: checks change their inputs between calls,
+  # and the panels' shared figures would answer with the first call's.
+  export PANEL_SHARED_TTL=0
   : > "$CCUSAGE_CALL_LOG"
   # A corpus with at least one file, so corpus_changed_since() has something
   # to compare against. Its mtime is the thing tests move.
