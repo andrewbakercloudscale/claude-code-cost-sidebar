@@ -4922,9 +4922,44 @@ burst_console_url() {
   case "$c" in ''|off|null) ;; *) printf 'http://%s/' "$c" ;; esac
 }
 
-# Files of sessions whose mod has gone, after two days.
+# Files of sessions whose mod has gone, after two days. Not the .pid files:
+# a panel writes its own once, when it starts, so after two days this took a
+# running panel's, the next ccusage-panel-mod-start saw no panel and started a
+# second, and both ran on (six such pairs, up to four days old, 26 Oct 2026).
+# A stale .pid names a dead process, which mod_claim and mod-start both pass.
 mod_prune() {
-  find "$MOD_DIR" -maxdepth 1 -type f -mtime +2 -delete 2>/dev/null
+  find "$MOD_DIR" -maxdepth 1 -type f ! -name '*.pid' -mtime +2 -delete 2>/dev/null
+}
+
+# True while this process still holds mod/<id>.pid: a panel that finds
+# another live one holding it stops, so one session never has two.
+mod_still_ours() { # $1 = session id
+  local held
+  held=$(<"$MOD_DIR/$1.pid") 2>/dev/null
+  [ -z "$held" ] || [ "$held" = "$$" ] || ! kill -0 "$held" 2>/dev/null
+}
+
+# Ghostty Dock writes the sessions on screen to this file, one id a line,
+# and rewrites it at least once a minute while it runs. A session not in it
+# is a tab nobody can see: its sidebar is kept up to date at a walk, since
+# with a dozen sessions open every panel ran at full rate for the one on
+# screen (about 6% of a core each, 26 Oct 2026). Seen again, it is brought up
+# to date on its next tick. Without the Dock, or with the file over
+# PANEL_VIEW_STALE_SECS old (the Dock has quit), every panel is in view.
+DOCK_VISIBLE_FILE="${DOCK_VISIBLE_FILE:-$HOME/.local/state/ghostty-dock/visible}"
+PANEL_VIEW_STALE_SECS="${PANEL_VIEW_STALE_SECS:-180}"
+# Out of view: the figures every PANEL_BG_SLOW_SECS, the file every PANEL_BG_WRITE_SECS.
+PANEL_BG_SLOW_SECS="${PANEL_BG_SLOW_SECS:-600}"
+PANEL_BG_WRITE_SECS="${PANEL_BG_WRITE_SECS:-60}"
+
+panel_in_view() { # $1 = session id, $2 = now epoch
+  local m line
+  m=$(stat -f %m "$DOCK_VISIBLE_FILE" 2>/dev/null) || return 0
+  (( $2 - m > PANEL_VIEW_STALE_SECS )) && return 0
+  while IFS= read -r line; do
+    [ "$line" = "$1" ] && return 0
+  done < "$DOCK_VISIBLE_FILE"
+  return 1
 }
 
 headless_main() {
@@ -4944,16 +4979,33 @@ headless_main() {
   # shellcheck disable=SC2064
   trap "rm -f '$tmp_s' '$tmp_t' '$tmp_r' '$tmp_a'; [ \"\$(cat '$MOD_DIR/$hsid.pid' 2>/dev/null)\" = \"\$\$\" ] && rm -f '$MOD_DIR/$hsid.pid'" EXIT
   mod_prune
-  while mod_alive "$hsid"; do
+  local in_view=1 was_in_view=1 last_write=0
+  while mod_alive "$hsid" && mod_still_ours "$hsid"; do
     restart_if_changed "$REFRESH" "$TURN_ROWS" "$hsid"
     now_epoch=$(panel_now)
+    was_in_view=$in_view
+    in_view=1
+    panel_in_view "$hsid" "$now_epoch" || in_view=0
+    # The alerts over Ghostty are for every session, seen or not.
+    if (( ! in_view )) && (( now_epoch - last_write < PANEL_BG_WRITE_SECS )); then
+      compaction_overlay_tick "$hsid"
+      gateway_alerts_tick "$hsid"
+      panel_sleep "$REFRESH"
+      continue
+    fi
     resolve_session
     compaction_overlay_tick "$hsid"
     gateway_alerts_tick "$hsid"
     session_stats_refresh
 
     slow_due=0
-    slow_frame_due "$now_epoch" && slow_due=1
+    if (( in_view )); then
+      slow_frame_due "$now_epoch" && slow_due=1
+      # Just come into view: what it shows may be ten minutes old.
+      (( ! was_in_view )) && slow_due=1
+    else
+      (( now_epoch - last_slow >= PANEL_BG_SLOW_SECS )) && slow_due=1
+    fi
     (( slow_due )) && slow_fetch
     block_clock_tick
     if (( slow_due )); then
@@ -4973,6 +5025,7 @@ headless_main() {
       last_model_label="${model_label:-}"
     fi
     MJ_RECENT_FILE="$tmp_r" MJ_ALL_SESS_FILE="$tmp_a" mod_json_write "$hsid"
+    last_write=$now_epoch
     panel_sleep "$REFRESH"
   done
 }
