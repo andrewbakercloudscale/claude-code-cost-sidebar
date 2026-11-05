@@ -100,6 +100,19 @@ CFG
   assert_contains "an active overflow window still reports SECONDARY" \
     "SECONDARY" "$(proxy_state_line)"
 
+  # ---- a stale summary gets this tick's line ---------------------------
+  # The slow tier can be ten minutes old in a tab out of view; the Proxy
+  # State line in it is replaced with one computed now, the rest kept.
+  summary_block=$'  Session: $1\n  🔀 Proxy State: NOT IN USE, no /etc/hosts redirect\n  License: Max'
+  summary_proxy_fresh
+  assert_contains "a stale NOT IN USE is replaced by the live line" "$(proxy_state_line)" "$summary_block"
+  assert_not_contains "and the stale line is gone" "NOT IN USE" "$summary_block"
+  assert_contains "the other rows are kept" "License: Max" "$summary_block"
+  assert_contains "the first row is kept" "Session: \$1" "$summary_block"
+  summary_block="no proxy row here"
+  summary_proxy_fresh
+  assert_eq "a summary with no Proxy State row is left alone" "no proxy row here" "$summary_block"
+
   # ---- not installed at all --------------------------------------------
   # Claude Burst is a personal, opt-in proxy; a machine without it must get
   # no row, not a red one. PATH is emptied rather than merely restored --
