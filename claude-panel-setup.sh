@@ -5029,6 +5029,30 @@ panel_in_view() { # $1 = session id, $2 = now epoch
   return 1
 }
 
+# summary_proxy_fresh: summary_block with its Proxy State line computed now.
+# The rest of the summary is the slow tier's, up to ten minutes old in a tab
+# out of view; this line is a few local file reads, and the one a stale copy
+# gets dangerously wrong. On 2026-11-05 a sidebar said NOT IN USE for minutes
+# after the redirect was back, having said PRIMARY while it was gone.
+summary_proxy_fresh() {
+  local fresh line out="" nl=$'\n'
+  case "$summary_block" in *"Proxy State:"*) ;; *) return 0 ;; esac
+  fresh=$(proxy_state_line 2>/dev/null) || return 0
+  [ -n "$fresh" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in *"Proxy State:"*) line="$fresh" ;; esac
+    out+="$line$nl"
+  done <<< "$summary_block"
+  summary_block="${out%$nl}"
+}
+
+# summary_proxy_fresh, true when the line changed.
+summary_proxy_fresh_changed() {
+  local before="$summary_block"
+  summary_proxy_fresh
+  [ "$summary_block" != "$before" ]
+}
+
 headless_main() {
   # hsid, not sid: build_trailing reads rows into a variable named sid, and
   # bash's dynamic scoping would hand it this one.
@@ -5048,6 +5072,13 @@ headless_main() {
   local in_view=1 was_in_view=1 last_write=0
   while mod_alive "$hsid" && mod_still_ours "$hsid"; do
     restart_if_changed "$REFRESH" "$TURN_ROWS" "$hsid"
+    # Forget where commands were found. This loop runs for weeks, and bash
+    # remembers the path of each command it ran: when Homebrew upgraded
+    # Python on 2026-11-03 and /opt/homebrew/bin/python3 went, every write
+    # of mod/<id>.json failed with "No such file" in the three panels
+    # started before it, and their sidebars showed 3 Nov's figures, Proxy
+    # State PRIMARY included, for two days.
+    hash -r
     now_epoch=$(panel_now)
     was_in_view=$in_view
     in_view=1
@@ -5090,7 +5121,9 @@ headless_main() {
       last_cols=$cols
       last_model_label="${model_label:-}"
     fi
+    (( slow_due )) || summary_proxy_fresh
     MJ_RECENT_FILE="$tmp_r" MJ_ALL_SESS_FILE="$tmp_a" mod_json_write "$hsid"
+    (( slow_due )) || band_write "$hsid" "$summary_block"
     last_write=$now_epoch
     panel_sleep "$REFRESH"
   done
@@ -5140,6 +5173,8 @@ PANEL_REDRAW=0
 
 while true; do
   restart_if_changed
+  # As in headless_main: a command's remembered path can go (a Homebrew upgrade).
+  hash -r
 
   # Cursor-home only, NOT a full \033[2J clear, a full clear blanks the
   # whole pane for one frame before the redraw lands, which reads as a
@@ -5205,6 +5240,10 @@ while true; do
     last_slow=$now_epoch
     last_cols=$cols
     last_model_label="${model_label:-}"
+  fi
+  # Every tick, not every slow one: see summary_proxy_fresh.
+  if (( ! slow_due )) && summary_proxy_fresh_changed; then
+    band_write "$(basename "${latest:-}" .jsonl)" "$summary_block"
   fi
 
   # Everything through the per-turn table is GUARANTEED, printed in full,
