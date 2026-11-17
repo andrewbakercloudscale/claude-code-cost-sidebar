@@ -36,6 +36,7 @@ main() {
 
   echo "== 1. stopping any running panel/launcher processes =="
   stop_process '/ccusage-panel\.sh' "ccusage-panel.sh"
+  stop_process '/ccusage-panel-collector' "ccusage-panel-collector"
   stop_process '/claude-panel-launch\.sh' "claude-panel-launch.sh"
   stop_process '/claude-panel-keyblock' "claude-panel-keyblock"
   stop_process '/claude-panel-overlay' "claude-panel-overlay"
