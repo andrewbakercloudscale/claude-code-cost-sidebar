@@ -520,6 +520,17 @@ SLOW_REFRESH=3600 ~/.local/bin/ccusage-panel.sh 5 12
 SLOW_REFRESH=600 ~/.local/bin/ccusage-panel.sh 30 12
 ```
 
+A pane nobody is looking at slows its fast tier down. It is idle when it has
+not had focus for `PANEL_IDLE_AFTER` seconds (default 60; the terminal reports
+focus in and out) and Ghostty Dock does not list its session as on screen.
+Idle, `This Session` redraws every `PANEL_IDLE_REFRESH` seconds (default 60)
+and its header says `(refresh 1m)`, but every `refresh_seconds` the pane still
+checks, with a single `stat`, whether to draw at once: a turn landing (the
+transcript's mtime or size moving), focus coming back, a resize, its session
+coming on screen, or the slow tier falling due, which keeps its own rate. The
+floating alerts keep their usual cadence. Without focus reporting (the close
+button turned off) a pane is never idle.
+
 Both tiers sit behind a corpus-change gate: if nothing has been written under
 `~/.claude/projects` since a cached answer was computed, that answer cannot
 have changed, so the slow tier costs nothing at all on an idle pane no matter

@@ -156,6 +156,15 @@ fmt_interval() {
 # set it, the header claimed 5s while the figures moved every 10.
 RATE_FAST="$(fmt_interval "$REFRESH")"
 RATE_SLOW="$(fmt_interval "$SLOW_REFRESH")"
+# An idle pane (see panel_idle) draws This Session every PANEL_IDLE_REFRESH
+# rather than every REFRESH, and says so: the pane's loop sets RATE_FAST to
+# one of these two on each tick, so the label is the rate of the tick that
+# drew it. Idle only ever slows the fast tier, so it must be the slower one.
+PANEL_IDLE_REFRESH="${PANEL_IDLE_REFRESH:-60}"
+PANEL_IDLE_AFTER="${PANEL_IDLE_AFTER:-60}"
+(( PANEL_IDLE_REFRESH > REFRESH )) || PANEL_IDLE_REFRESH=$REFRESH
+RATE_FAST_ACTIVE="$RATE_FAST"
+RATE_IDLE="$(fmt_interval "$PANEL_IDLE_REFRESH")"
 # Always appended at the END of a heading, never in the middle: header()
 # wraps its whole argument in bold cyan, and this tag closes with a reset,
 # so anything placed after it would lose the heading's own colour.
@@ -335,8 +344,16 @@ fi
 # way, so under a pinned clock the GNU branch REFUSES rather than quietly
 # answering from the real clock: a test that believes it moved the clock and
 # did not is worse than a test that cannot run at all.
+#
+# The clock is bash's own EPOCHSECONDS, not `date +%s`: the panel reads it a
+# dozen times a tick in a dozen panes, and each `date` was a process start.
+# panel_now_v sets a variable instead of printing, so a caller in the main
+# shell does not pay a fork for the $(...) either.
 panel_now() {
-  if [ -n "${PANEL_FAKE_NOW:-}" ]; then printf '%s' "$PANEL_FAKE_NOW"; else date +%s; fi
+  printf '%s' "${PANEL_FAKE_NOW:-$EPOCHSECONDS}"
+}
+panel_now_v() { # $1 = variable to set
+  printf -v "$1" '%s' "${PANEL_FAKE_NOW:-$EPOCHSECONDS}"
 }
 panel_date() {
   if [ -z "${PANEL_FAKE_NOW:-}" ]; then date "$@"; return; fi
@@ -348,7 +365,60 @@ panel_date() {
   date -r "$PANEL_FAKE_NOW" "$@"
 }
 
-PANEL_START_EPOCH=$(panel_now)
+panel_now_v PANEL_START_EPOCH
+
+# ---- one stat a tick ------------------------------------------------------
+# A tick asks the mtime of half a dozen files: this script (restart on
+# deploy), the transcript (did a turn land), Burst's compaction state and
+# notices, the mod's toast marker, the Dock's visible list. Each used to be
+# its own `stat`, in every pane, every tick. tick_stat_batch stats them all
+# in one process at the top of a tick, and tick_stat answers from that until
+# tick_stat_end, or with a stat of its own for a path the batch did not
+# cover (and always outside the loop, so a test calling one function sees
+# the file as it is now). Darwin only: GNU stat's -f means something else,
+# and there every tick_stat is its own stat, as before.
+#
+# A missing file is recorded as missing ("-"), which is what each caller's
+# own failed stat meant. The batch's stat exits non-zero when any path is
+# missing and prints the others, so its status is not the answer.
+declare -gA TICK_STAT=()
+TICK_STAT_LIVE=0
+TICK_STAT_ON=0
+case "${OSTYPE:-}" in darwin*) TICK_STAT_ON=1 ;; esac
+tick_stat_batch() { # $@ = paths; empty ones are skipped
+  local p m z fm out
+  local -a ps=()
+  TICK_STAT=()
+  TICK_STAT_LIVE=0
+  (( TICK_STAT_ON )) || return 0
+  for p in "$@"; do
+    [ -n "$p" ] || continue
+    TICK_STAT["$p"]=-
+    ps+=("$p")
+  done
+  (( ${#ps[@]} )) || return 0
+  out=$(stat -f $'%m\t%z\t%Fm\t%N' "${ps[@]}" 2>/dev/null)
+  while IFS=$'\t' read -r m z fm p; do
+    [ -n "$p" ] && [ -n "${TICK_STAT[$p]+x}" ] && TICK_STAT["$p"]="$m $z $fm"
+  done <<< "$out"
+  TICK_STAT_LIVE=1
+}
+tick_stat_end() { TICK_STAT_LIVE=0; }
+# Sets $2 to "mtime size mtime-with-fraction" for $1; false when it is missing.
+tick_stat() { # $1 = path, $2 = variable to set
+  local _ts_v
+  if (( TICK_STAT_LIVE )) && [ -n "${TICK_STAT[$1]+x}" ]; then
+    _ts_v=${TICK_STAT[$1]}
+    [ "$_ts_v" = - ] && return 1
+  elif [ ! -e "$1" ]; then
+    return 1
+  elif (( TICK_STAT_ON )); then
+    _ts_v=$(stat -f '%m %z %Fm' "$1" 2>/dev/null) || return 1
+  else
+    _ts_v=$(stat -c '%Y %s %Y' "$1" 2>/dev/null) || return 1
+  fi
+  printf -v "$2" '%s' "$_ts_v"
+}
 
 # ---- the process table, in one shape, from one place --------------------
 # Two of the pin decisions below are really questions about processes: which
@@ -375,12 +445,20 @@ panel_ps() {
     [ -r "$PANEL_FAKE_PS" ] && cat "$PANEL_FAKE_PS"
     return 0
   fi
-  now=$(panel_now)
+  panel_ps_refresh
+  printf '%s\n' "$PANEL_PS_SNAPSHOT"
+}
+# The snapshot, refreshed in the CALLING shell. panel_ps is mostly read as
+# `panel_ps | awk`, the left side of a pipe, which is a subshell: what it
+# cached there was gone when it returned, so every call ran ps. A caller in
+# the main shell that refreshes first keeps it for the next one.
+panel_ps_refresh() {
+  local now
+  panel_now_v now
   if [ -z "$PANEL_PS_SNAPSHOT" ] || (( now - PANEL_PS_SNAPSHOT_AT >= PANEL_PS_TTL )); then
     PANEL_PS_SNAPSHOT=$(ps -ax -o pid=,ppid=,tty=,command= 2>/dev/null)
     PANEL_PS_SNAPSHOT_AT="$now"
   fi
-  printf '%s\n' "$PANEL_PS_SNAPSHOT"
 }
 
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
@@ -454,6 +532,42 @@ fmt_mt() {
 }
 fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 
+# ---- Claude Burst's config.json and state.json, in one jq ----------------
+# The Proxy State line, the [View] button and the gateway health check read
+# nine fields from these two files, and each field was its own jq, eight or
+# nine a tick in every pane. burst_cfg_load reads them all in one, with each
+# field's default as before. A field jq cannot read is empty, which is what
+# its own failed jq used to leave; a config.json that does not parse leaves
+# every config field empty, as eight failed jqs did.
+#
+# The pane's loop sets BURST_CFG_HELD after loading at the top of a tick, so
+# everything that tick (and the idle waits after it) shares that one read.
+# Anywhere else every call reads the files afresh, as each jq did.
+BURST_CFG_HELD=0
+BURST_CFG_FOR=""
+burst_cfg_load() { # $1 = config.json
+  local cfg="$1" state="$HOME/.config/claude-burst/state.json" out has_state=0
+  (( BURST_CFG_HELD )) && [ "$BURST_CFG_FOR" = "$cfg" ] && return 0
+  BURST_CFG_FOR="$cfg"
+  BURST_PRIMARY="" BURST_SECONDARY="" BURST_MODE="" BURST_HOST="" BURST_BUNDLE=""
+  BURST_LISTEN="" BURST_ADMIN="" BURST_CONSOLE="" BURST_OVERFLOW=""
+  [ -f "$state" ] && has_state=1 || state=/dev/null
+  out=$(jq -rn --rawfile c "$cfg" --rawfile s "$state" --argjson hs "$has_state" '
+    def v(f; d): try (f // d | if type == "string" then . else tojson end) catch "";
+    ($c | try fromjson catch "\u001fbad") as $cj
+    | ($s | try fromjson catch "\u001fbad") as $sj
+    | (if $cj == "\u001fbad" then ["", "", "", "", "", "", "", ""]
+       else [ ($cj | v(.primary.provider; "?")), ($cj | v(.secondary.provider; "?")),
+              ($cj | v(.intercept.mode; "base-url")), ($cj | v(.intercept.host; "api.anthropic.com")),
+              ($cj | v(.intercept.ca_bundle; "")), ($cj | v(.listen; "127.0.0.1:7777")),
+              ($cj | v(.admin_listen; "127.0.0.1:7788")), ($cj | v(.console_listen; "127.0.0.1:7789")) ]
+       end)
+      + [ if $hs == 0 then "0" elif $sj == "\u001fbad" then "" else ($sj | v(.overflow_until; 0)) end ]
+    | map(gsub("[\u001f\n]"; " ")) | join("\u001f")' 2>/dev/null) || return 0
+  IFS=$'\x1f' read -r BURST_PRIMARY BURST_SECONDARY BURST_MODE BURST_HOST BURST_BUNDLE \
+    BURST_LISTEN BURST_ADMIN BURST_CONSOLE BURST_OVERFLOW <<< "$out"
+}
+
 # Claude Burst (https://github.com/andrewbakercloudscale/claude-burst) is a
 # personal, opt-in local proxy -- most people running this panel won't have
 # it installed. Print nothing at all (not even a placeholder row) unless
@@ -482,30 +596,52 @@ fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 # Deliberately all local file reads, no curl: this runs on the panel's
 # refresh timer, and a network probe with a timeout would stall the whole
 # panel exactly when the network is the thing that is broken.
+# True when a line of the hosts file $2, comments cut at the first #, sends
+# $1 to 127.0.0.1 or ::1. It was this awk, which it follows exactly:
+#   { sub(/#.*/, "") }
+#   ($1 == "127.0.0.1" || $1 == "::1") {
+#     for (i = 2; i <= NF; i++) if (tolower($i) == tolower(h)) found = 1 }
+proxy_hosts_redirect() { # $1 = host, $2 = hosts file
+  local line want="${1,,}" w
+  local -a f
+  [ -r "$2" ] && [ -f "$2" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%%#*}
+    IFS=$' \t' read -r -a f <<< "$line"
+    case "${f[0]:-}" in 127.0.0.1|::1) ;; *) continue ;; esac
+    for w in "${f[@]:1}"; do
+      [ "${w,,}" = "$want" ] && return 0
+    done
+  done < "$2"
+  return 1
+}
 proxy_in_path() {
   local cfg="$1" mode host listen bundle settings base_url
-  mode=$(jq -r '.intercept.mode // "base-url"' "$cfg" 2>/dev/null)
+  burst_cfg_load "$cfg"
+  mode=$BURST_MODE
   if [ "$mode" = "transparent" ]; then
-    host=$(jq -r '.intercept.host // "api.anthropic.com"' "$cfg" 2>/dev/null)
-    bundle=$(jq -r '.intercept.ca_bundle // ""' "$cfg" 2>/dev/null)
+    host=$BURST_HOST
+    bundle=$BURST_BUNDLE
     [ -n "$bundle" ] || bundle="$HOME/.claude/certs/node-extra-ca-certs.pem"
     # A live redirect line, not merely claude-burst's marker block: `remove`
     # deletes the whole block, so an empty-but-present block only happens by
     # hand -- but a commented-out entry is common, and reports installed
     # while the hostname resolves straight to the real Anthropic IP.
-    awk -v h="$host" '
-      { sub(/#.*/, "") }
-      ($1 == "127.0.0.1" || $1 == "::1") {
-        for (i = 2; i <= NF; i++) if (tolower($i) == tolower(h)) { found = 1 }
-      }
-      END { exit !found }
-    ' "${CLAUDE_BURST_HOSTS_FILE:-/etc/hosts}" 2>/dev/null \
+    # Read in the shell, every tick, where it was an awk and a grep: the
+    # fields split as awk's default does (runs of blanks), the comparison
+    # is lowercased ASCII as awk's tolower is under LC_ALL=C, and the CA
+    # marker is a substring of the file exactly when grep finds it in a line.
+    proxy_hosts_redirect "$host" "${CLAUDE_BURST_HOSTS_FILE:-/etc/hosts}" \
       || { printf 'no /etc/hosts redirect'; return 1; }
-    grep -q '# BEGIN claude-burst CA' "$bundle" 2>/dev/null \
-      || { printf 'CA untrusted, TLS will fail'; return 1; }
+    local ca=""
+    [ -r "$bundle" ] && [ -f "$bundle" ] && IFS= read -r -d '' ca < "$bundle"
+    case "$ca" in
+      *"# BEGIN claude-burst CA"*) ;;
+      *) printf 'CA untrusted, TLS will fail'; return 1 ;;
+    esac
     return 0
   fi
-  listen=$(jq -r '.listen // "127.0.0.1:7777"' "$cfg" 2>/dev/null)
+  listen=$BURST_LISTEN
   settings="$HOME/.claude/settings.json"
   base_url=$(jq -r '.env.ANTHROPIC_BASE_URL // ""' "$settings" 2>/dev/null)
   case "$base_url" in
@@ -519,10 +655,10 @@ proxy_state_line() {
   command -v claude-burst >/dev/null 2>&1 || return
   local cfg="$HOME/.config/claude-burst/config.json"
   [ -f "$cfg" ] || return
-  local state="$HOME/.config/claude-burst/state.json"
   local primary secondary overflow_until now route_label route_color why
-  primary=$(jq -r '.primary.provider // "?"' "$cfg" 2>/dev/null)
-  secondary=$(jq -r '.secondary.provider // "?"' "$cfg" 2>/dev/null)
+  burst_cfg_load "$cfg"
+  primary=$BURST_PRIMARY
+  secondary=$BURST_SECONDARY
   primary="${primary%-passthrough}"
   secondary="${secondary%-passthrough}"
 
@@ -538,9 +674,8 @@ proxy_state_line() {
     return
   fi
 
-  overflow_until=0
-  [ -f "$state" ] && overflow_until=$(jq -r '.overflow_until // 0' "$state" 2>/dev/null)
-  now=$(panel_now)
+  overflow_until=$BURST_OVERFLOW
+  panel_now_v now
   if [ "${overflow_until:-0}" -gt "$now" ] 2>/dev/null; then
     route_label="SECONDARY ($secondary)"; route_color="$C_YELLOW"
   else
@@ -565,7 +700,7 @@ license_line() {
   # ccusage cache machinery) -- computed here, not as a top-level global,
   # so this function is safe to define before that point under `set -u`.
   local LICENSE_CACHE="$CCUSAGE_CACHE_DIR/license.txt"
-  now=$(panel_now)
+  panel_now_v now
 
   # Route-aware: claude-burst's secondary path hits a totally different
   # vendor (config's secondary.provider, e.g. "openai-compatible" against
@@ -745,7 +880,7 @@ HOURLY_BUCKET_WINDOW_DAYS=30
 
 refresh_hourly_buckets() {
   local cache_mtime now_epoch lock_dir lock_age
-  now_epoch=$(panel_now)
+  panel_now_v now_epoch
   if [ -f "$HOURLY_BUCKET_CACHE" ]; then
     cache_mtime=$(stat -f %m "$HOURLY_BUCKET_CACHE" 2>/dev/null || stat -c %Y "$HOURLY_BUCKET_CACHE" 2>/dev/null || echo 0)
     if (( now_epoch - cache_mtime < HOURLY_BUCKET_TTL )); then
@@ -1116,7 +1251,7 @@ ccusage_cached() {
   key=$(printf '%s' "$*" | shasum -a 256 | cut -c1-16)
   cache_file="$CCUSAGE_CACHE_DIR/$key.json"
   lock_dir="$cache_file.lock"
-  now_epoch=$(panel_now)
+  panel_now_v now_epoch
   ttl=$(ccusage_ttl_jittered "$1" "$key" "${2:-}")
 
   if [ -f "$cache_file" ]; then
@@ -1599,10 +1734,20 @@ today_daily_shape() {
 # turn landing invalidates it immediately, and an idle pane pays for the
 # parse exactly once until the next one lands, not every 5-10s regardless.
 transcript_stamp() {
-  local path="$1" m s
-  m=$(stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || echo 0)
-  s=$(stat -f %z "$path" 2>/dev/null || stat -c %s "$path" 2>/dev/null || echo 0)
-  printf '%s:%s' "$m" "$s"
+  local st
+  transcript_stamp_v st "$1"
+  printf '%s' "$st"
+}
+# The same, into a variable: one stat (tick_stat, so usually none of its
+# own), where it was two.
+transcript_stamp_v() { # $1 = variable to set, $2 = path
+  local _tsv
+  if tick_stat "$2" _tsv; then
+    _tsv=${_tsv% *}
+    printf -v "$1" '%s:%s' "${_tsv% *}" "${_tsv#* }"
+  else
+    printf -v "$1" '0:0'
+  fi
 }
 
 # $1 = session id, $2 = today's date (YYYY-MM-DD). Prints that session's
@@ -1645,7 +1790,7 @@ session_today_tokens_cached() {
   [ -n "$path" ] || return
   key=$(printf '%s' "$sid" | shasum -a 256 | cut -c1-16)
   cache_file="$CCUSAGE_CACHE_DIR/todaytok-$key.tsv"
-  stamp=$(transcript_stamp "$path")
+  transcript_stamp_v stamp "$path"
   if [ -f "$cache_file" ]; then
     IFS=$'\t' read -r cached _ < "$cache_file"
     if [ "$cached" = "$stamp:$today" ]; then
@@ -1701,7 +1846,7 @@ session_identity_cached() {
   local path="$1" key cache_file stamp cached
   key=$(printf '%s' "$path" | shasum -a 256 | cut -c1-16)
   cache_file="$CCUSAGE_CACHE_DIR/sessid-$key.tsv"
-  stamp=$(transcript_stamp "$path")
+  transcript_stamp_v stamp "$path"
   if [ -f "$cache_file" ]; then
     IFS=$'\t' read -r cached _ < "$cache_file"
     if [ "$cached" = "$stamp" ]; then
@@ -1775,7 +1920,7 @@ turn_table_cached() {
   # session's next reply.
   key=$(printf '%s' "$path $* $(stat -f %m "${BASH_SOURCE[0]}" 2>/dev/null)" | shasum -a 256 | cut -c1-16)
   cache_file="$CCUSAGE_CACHE_DIR/turns-$key.out"
-  stamp=$(transcript_stamp "$path")
+  transcript_stamp_v stamp "$path"
   if [ -f "$cache_file" ]; then
     IFS=$'\t' read -r cached < "$cache_file"
     if [ "$cached" = "$stamp" ]; then
@@ -2453,10 +2598,10 @@ shared_memo() { # $1 = name, $2 = function, $3... = the variables it sets
   # Names no function it runs would use: bash scoping is dynamic, and
   # build_trailing's "read -r day" emptied a local "day" here, so its file
   # was headed "# " and never read back.
-  local _sm_f="$CCUSAGE_CACHE_DIR/shared-$1.sh" _sm_m _sm_day _sm_line
+  local _sm_f="$CCUSAGE_CACHE_DIR/shared-$1.sh" _sm_m _sm_day _sm_line _sm_now
   _sm_day=$(panel_date +%Y-%m-%d)
   if (( PANEL_SHARED_TTL > 0 )) && _sm_m=$(stat -f %m "$_sm_f" 2>/dev/null) \
-     && (( $(panel_now) - _sm_m < PANEL_SHARED_TTL )) \
+     && panel_now_v _sm_now && (( _sm_now - _sm_m < PANEL_SHARED_TTL )) \
      && IFS= read -r _sm_line < "$_sm_f" && [ "$_sm_line" = "# $_sm_day" ]; then
     # shellcheck disable=SC1090
     source "$_sm_f" && return 0
@@ -2586,11 +2731,33 @@ TOPTURNS_PYEOF
 }
 
 SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""; SESS_SERIES=""
+# The table is a function of the transcript's path, mtime and size (and the
+# arguments, fixed for the life of the process): turn_table_cached keys its
+# file on exactly that. So a tick whose transcript has not moved reuses the
+# last table without asking for it, which was a shasum, two cuts, a stat and
+# a tail every tick in every pane.
+#
+# Only inside the loops (PANEL_MEMO, set by each): a check that calls this
+# directly, after rewriting the cache entry or the function behind it, gets
+# what it asked for, as before.
+PANEL_MEMO=0
+SESS_MEMO_KEY=""
+SESS_MEMO_OUT=""
 session_stats_refresh() {
   SESS_TABLE=""; SESS_COST=""; SESS_CTX=""; SESS_WIN=""; SESS_COMPACTING=""; SESS_SERIES=""
   [ -n "${latest:-}" ] || return 0
-  local out meta
-  out=$(turn_table_series "$latest")
+  local out meta ss_stamp
+  transcript_stamp_v ss_stamp "$latest"
+  if (( PANEL_MEMO )) && [ "$latest|$ss_stamp" = "$SESS_MEMO_KEY" ]; then
+    out=$SESS_MEMO_OUT
+  else
+    out=$(turn_table_series "$latest")
+    SESS_MEMO_KEY=""
+    if [ -n "$out" ]; then
+      SESS_MEMO_KEY="$latest|$ss_stamp"
+      SESS_MEMO_OUT=$out
+    fi
+  fi
   IFS= read -r meta <<<"$out"
   # Split with expansions, not printf | cut: this runs every fast tick in
   # every panel, and the ten pipelines it was cost more than the cache read.
@@ -2742,18 +2909,22 @@ fi
 PANEL_SELF="${BASH_SOURCE[0]}"
 case "$PANEL_SELF" in /*) ;; *) PANEL_SELF="$PWD/$PANEL_SELF" ;; esac
 panel_self_mtime() {
-  stat -f %m "$PANEL_SELF" 2>/dev/null || stat -c %Y "$PANEL_SELF" 2>/dev/null
+  local st
+  tick_stat "$PANEL_SELF" st || return 1
+  printf '%s\n' "${st%% *}"
 }
 PANEL_SELF_MTIME=$(panel_self_mtime)
 restart_if_changed() {
   local now_mtime
-  now_mtime=$(panel_self_mtime)
+  tick_stat "$PANEL_SELF" now_mtime && now_mtime=${now_mtime%% *}
   # Empty means the file is gone or unreadable -- mid-rename, or uninstalled.
   # Either way there is nothing to exec into; keep drawing.
   [ -z "$now_mtime" ] && return 0
   [ "$now_mtime" = "$PANEL_SELF_MTIME" ] && return 0
   bash -n "$PANEL_SELF" 2>/dev/null || return 0
   [ -n "${ORIG_STTY:-}" ] && stty "$ORIG_STTY" 2>/dev/null
+  # The sleep FIFO is not close-on-exec: the new image opens its own.
+  [ -n "${PANEL_SLEEP_FD:-}" ] && exec {PANEL_SLEEP_FD}>&-
   # The new version turns mouse reporting back on if it still wants it.
   [ -t 1 ] && printf '\033[?1000l\033[?1006l\033[?1004l'
   export CLAUDE_PANEL_REEXEC=1
@@ -2819,7 +2990,7 @@ refresh_active_block() {
 block_clock_tick() {
   [ "${has_block:-0}" = "1" ] || return
   local now_s
-  now_s=$(panel_now)
+  panel_now_v now_s
   # A block that has ENDED is not an active block, and the cached
   # `blocks --active` payload cannot notice on its own: with no new turn the
   # corpus gate correctly holds that entry, nothing refetches, and the
@@ -2833,13 +3004,31 @@ block_clock_tick() {
     has_block=0
     return
   fi
-  IFS=$'\t' read -r blk_elapsed_h blk_cph blk_rem <<<"$(awk \
-    -v now="$now_s" -v st="$blk_start_epoch" -v en="$blk_end_epoch" -v c="$blk_cost" 'BEGIN{
+  # One awk for what was four: the clock figures, then threshold_color's two
+  # comparisons and fmt_money's format on the rate, written as those two
+  # write them (the rate as its %.2f string turned back into a number, the
+  # thresholds as -v values), so the colour and the "$8" come out the same.
+  local burn_tier
+  IFS=$'\t' read -r blk_elapsed_h blk_cph blk_rem burn_tier blk_cph_money <<<"$(awk \
+    -v now="$now_s" -v st="$blk_start_epoch" -v en="$blk_end_epoch" -v c="$blk_cost" \
+    -v yt="$BURN_YELLOW" -v rt="$BURN_RED" 'BEGIN{
       h=(now-st)/3600; if(h<0.05) h=0.05
       rem=int((en-now)/60); if(rem<0) rem=0
-      printf "%.6f\t%.2f\t%d", h, c/h, rem
+      cph = sprintf("%.2f", c/h)
+      v = cph + 0
+      tier = 0
+      if (v > yt) tier = 1
+      if (v > rt) tier = 2
+      a = (v<0?-v:v)
+      printf "%.6f\t%s\t%d\t%d\t", h, cph, rem, tier
+      printf (a>0 && a<1) ? "$%.2f" : "$%.0f", v
     }')"
-  burn_color=$(threshold_color "$blk_cph" "$BURN_YELLOW" "$BURN_RED")
+  blk_cph_money_of=$blk_cph
+  case "$burn_tier" in
+    2) burn_color=$C_RED ;;
+    1) burn_color=$C_YELLOW ;;
+    *) burn_color=$C_GREEN ;;
+  esac
   burn_label="Normal"
   [ "$burn_color" = "$C_YELLOW" ] && burn_label="Elevated"
   [ "$burn_color" = "$C_RED" ] && burn_label="High"
@@ -2995,11 +3184,19 @@ session_is_live() { # $1 = session id
   local sid="$1" f pinned
   [ -n "$sid" ] || return 1
   is_uuid "$sid" || return 1
-  if panel_ps | awk -v sid="$sid" '
-       index($0, "--session-id " sid) || index($0, "--session-id=" sid) { found = 1 }
-       END { exit !found }'; then
-    return 0
+  # A substring of the whole table is a substring of one of its lines (the
+  # needle has no newline in it), so this is the awk index() it replaces,
+  # without the awk, and with the snapshot kept in this shell.
+  local procs
+  if [ -n "${PANEL_FAKE_PS:-}" ]; then
+    procs=$(panel_ps)
+  else
+    panel_ps_refresh
+    procs=$PANEL_PS_SNAPSHOT
   fi
+  case "$procs" in
+    *"--session-id $sid"*|*"--session-id=$sid"*) return 0 ;;
+  esac
   for f in "$PIN_TTY_DIR"/*; do
     [ -f "$f" ] || continue
     IFS=$'\t' read -r pinned _ < "$f" 2>/dev/null || continue
@@ -3035,7 +3232,7 @@ tty_has_claude() { # $1 = tty name, as `ps -o tty=` prints it
 # predicted by the launcher before the session existed, and a directory-keyed
 # handoff that any other session in the repo can overwrite.
 release_dead_pin() {
-  local tsc age
+  local tsc age now st
   [ -n "$PIN_SESSION_ID" ] || return 0
   [ "$PIN_SOURCE" = "pane" ] && return 0
   tsc="$project_dir/$PIN_SESSION_ID.jsonl"
@@ -3043,7 +3240,9 @@ release_dead_pin() {
   # (the grace period in resolve_session); this is only about one that
   # exists and has gone cold.
   [ -f "$tsc" ] || return 0
-  age=$(( $(panel_now) - $(stat -f %m "$tsc" 2>/dev/null || stat -c %Y "$tsc" 2>/dev/null || echo 0) ))
+  panel_now_v now
+  transcript_stamp_v st "$tsc"
+  age=$(( now - ${st%%:*} ))
   (( age > PIN_DEAD_SECS )) || return 0
   # Cold is not over. A transcript stops growing the moment its session stops
   # being typed into, so this timer fires on an idle pane exactly as it fires
@@ -3119,7 +3318,7 @@ adopt_handoff_pin() {
   is_uuid "${sid:-}" || return 0
   [ "$sid" = "$PIN_SESSION_ID" ] && return 0
   case "${written:-}" in ''|*[!0-9]*) written=0 ;; esac
-  now=$(panel_now)
+  panel_now_v now
   # A sid this panel has just released is not re-adopted on the strength of
   # the file that named it in the first place, that file has not changed,
   # and reading it again is not new evidence. It is sent down the stale path
@@ -3211,7 +3410,7 @@ lone_live_pane_session() {
   # there yet, the answer is to wait for it, not to go looking for someone
   # else's.
   [ -n "$PANE_CLAUDE_TTY" ] && return 0
-  now=$(panel_now)
+  panel_now_v now
   for f in "$PIN_TTY_DIR"/*; do
     [ -f "$f" ] || continue
     IFS=$'\t' read -r sid _ < "$f" 2>/dev/null || continue
@@ -3279,7 +3478,14 @@ adopt_lone_live_pane_session() {
 # directory; the three sites that build it agree with each other, nothing
 # outside reads it, and a space in a filename is not a bug. Do not "fix" it
 # to match this one without changing all three at once.
-project_key() { printf '%s' "$1" | tr -c 'a-zA-Z0-9' '-'; }
+project_key() { local k; project_key_v k "$1"; printf '%s' "$k"; }
+# The same into a variable, with no process at all: it was a tr every tick.
+# LC_ALL=C makes the class bytewise, as tr's is, so a multi-byte character
+# still becomes one dash per byte.
+project_key_v() { # $1 = variable to set, $2 = path
+  local LC_ALL=C
+  printf -v "$1" '%s' "${2//[!a-zA-Z0-9]/-}"
+}
 
 # ---- which transcript is this pane's session? ----
 # Runs on every FAST tick: a session started in this pane after the panel
@@ -3316,7 +3522,9 @@ resolve_session() {
   # this panel via a same-cwd Ghostty split, so $PWD reliably names the
   # project this panel belongs to; project_key() above turns that into the
   # directory name Claude Code actually used.
-  project_dir="$HOME/.claude/projects/$(project_key "$PWD")"
+  local pkey
+  project_key_v pkey "$PWD"
+  project_dir="$HOME/.claude/projects/$pkey"
   # Headless, for the Claude Code mod: the mod names its own session, so
   # there is nothing to guess and none of the pin machinery below applies.
   # The transcript is looked for under every project when it is not under
@@ -3446,13 +3654,42 @@ resolve_session() {
 
 # The identity of the transcript resolve_session settled on: sess_id,
 # model_id, model_label, folder_name, sess_start_epoch and sess_elapsed_h.
+#
+# The identity is a function of the transcript's path, mtime and size alone
+# (session_identity_cached keys its file on exactly that), so a tick whose
+# transcript has not moved reuses the last answer without asking: that
+# asking was a shasum, two cuts and a process substitution every tick. In
+# the loops only, as session_stats_refresh's (PANEL_MEMO).
+ID_MEMO_KEY=""
+ID_MEMO=()
+# Set by the pane's loop, which computes sess_elapsed_h itself on the ticks
+# that read it (the slow ones): it is the awk of every fast tick otherwise.
+PANEL_DEFER_ELAPSED=0
 resolve_identity() {
   if [ -n "$latest" ]; then
-    IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(session_identity_cached "$latest")
-    # Floor elapsed time at 3 minutes, a session-so-far rate computed over
-    # the first few seconds swings wildly and would flash red/green noise.
-    sess_elapsed_h=$(awk -v s="$sess_start_epoch" -v n="$(panel_now)" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
+    local id_stamp
+    transcript_stamp_v id_stamp "$latest"
+    if (( PANEL_MEMO )) && [ "$latest|$id_stamp" = "$ID_MEMO_KEY" ]; then
+      sess_id=${ID_MEMO[0]} model_id=${ID_MEMO[1]} model_label=${ID_MEMO[2]}
+      folder_name=${ID_MEMO[3]} sess_start_epoch=${ID_MEMO[4]}
+    else
+      IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(session_identity_cached "$latest")
+      ID_MEMO_KEY=""
+      if [ -n "$sess_id" ]; then
+        ID_MEMO_KEY="$latest|$id_stamp"
+        ID_MEMO=("$sess_id" "$model_id" "$model_label" "$folder_name" "$sess_start_epoch")
+      fi
+    fi
+    (( PANEL_DEFER_ELAPSED )) || sess_elapsed_refresh
   fi
+}
+# Floor elapsed time at 3 minutes, a session-so-far rate computed over
+# the first few seconds swings wildly and would flash red/green noise.
+sess_elapsed_refresh() {
+  [ -n "$latest" ] || return 0
+  local now
+  panel_now_v now
+  sess_elapsed_h=$(awk -v s="$sess_start_epoch" -v n="$now" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
 }
 
 # ---- slow-tier render: the summary block ----
@@ -3822,8 +4059,16 @@ build_session_table() {
     # The rate label goes LAST on this line deliberately: on a narrow pane
     # clear_eol() truncates from the right, so the label is what gets cut,
     # never the burn figure it annotates.
+    # block_clock_tick formats the rate as it computes it; fmt_money only
+    # when that is not the rate here (no block yet, or one set by hand).
+    local burn_money
+    if [ -n "${blk_cph_money:-}" ] && [ "${blk_cph:-0}" = "${blk_cph_money_of:-}" ]; then
+      burn_money=$blk_cph_money
+    else
+      burn_money=$(fmt_money "${blk_cph:-0}")
+    fi
     printf '%sThis Session%s, Burn  %s%s/hr%s %s\n' \
-      "$C_BOLD$C_CYAN" "$C_RESET" "${burn_color:-$C_RESET}" "$(fmt_money "${blk_cph:-0}")" "$C_RESET" \
+      "$C_BOLD$C_CYAN" "$C_RESET" "${burn_color:-$C_RESET}" "$burn_money" "$C_RESET" \
       "$(rate_tag "$RATE_FAST")"
     printf '%s\n' "$SESS_TABLE"
   else
@@ -4081,15 +4326,30 @@ band_write() { # $1 = session id, $2 = summary block
 # Install-time options, one KEY=value per line in
 # ~/.config/claude-panel/options (written with every option false by
 # claude-panel-setup.sh; an environment variable of the same name wins).
-# Read with grep, not sourced, so the file can only ever set a flag.
+# Read line by line, not sourced, so the file can only ever set a flag.
 # True is true/1/yes/on; anything else, or no file, is false.
-panel_option() { # $1 = KEY
-  local v="${!1:-}"
-  if [ -z "$v" ]; then
-    v=$(grep -E "^$1=" "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
-    v="${v#*=}"
+#
+# panel_option_raw sets $2 to the environment variable $1 when it is set
+# and not empty, else to the value on the last "$1=" line of the file, else
+# to nothing. It was `grep | tail -1` and then two `tr`s to normalise, five
+# process starts a call and two calls a tick; the read loop and the
+# expansions below are the same thing in the shell (LC_ALL=C, set at the
+# top, keeps ${v,,} to ASCII exactly as tr's [:upper:] was).
+panel_option_raw() { # $1 = KEY, $2 = variable to set
+  local _po_v="${!1:-}" _po_l _po_f="$HOME/.config/claude-panel/options"
+  if [ -z "$_po_v" ] && [ -r "$_po_f" ]; then
+    while IFS= read -r _po_l || [ -n "$_po_l" ]; do
+      case "$_po_l" in "$1="*) _po_v=${_po_l#*=} ;; esac
+    done < "$_po_f"
   fi
-  case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]' | tr -d '"'"'"' ')" in
+  printf -v "$2" '%s' "$_po_v"
+}
+panel_option() { # $1 = KEY
+  local v
+  panel_option_raw "$1" v
+  v=${v,,}
+  v=${v//[\"\' ]/}
+  case "$v" in
     true|1|yes|on) return 0 ;;
   esac
   return 1
@@ -4098,12 +4358,11 @@ panel_option() { # $1 = KEY
 # For options that default to ON: true only when the value is explicitly
 # false/0/no/off. A missing file or key, or anything else, leaves it on.
 panel_option_off() { # $1 = KEY
-  local v="${!1:-}"
-  if [ -z "$v" ]; then
-    v=$(grep -E "^$1=" "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
-    v="${v#*=}"
-  fi
-  case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]' | tr -d '"'"'"' ')" in
+  local v
+  panel_option_raw "$1" v
+  v=${v,,}
+  v=${v//[\"\' ]/}
+  case "$v" in
     false|0|no|off) return 0 ;;
   esac
   return 1
@@ -4129,10 +4388,12 @@ COMPACT_OVERLAY_PID=""
 # process has no Ghostty above it to find.
 PANEL_GHOSTTY_PID="${CLAUDE_PANEL_GHOSTTY_PID:-}"
 compaction_pending() { # $1 = session id
-  local m
+  local m now
   [ -n "$1" ] && [ -f "$COMPACT_STATE_FILE" ] || return 1
-  m=$(stat -f %m "$COMPACT_STATE_FILE" 2>/dev/null) || return 1
-  (( $(panel_now) - m > 900 )) && return 1
+  tick_stat "$COMPACT_STATE_FILE" m || return 1
+  m=${m%% *}
+  panel_now_v now
+  (( now - m > 900 )) && return 1
   if [ "$m|$1" != "$COMPACT_STATE_MTIME" ]; then
     COMPACT_STATE_MTIME="$m|$1"
     COMPACT_PENDING=$(jq -r --arg p "$1|" \
@@ -4162,10 +4423,12 @@ panel_ghostty_pid() {
 # while it does. One three minutes old is a mod that has gone.
 MOD_TOASTS_DIR="$HOME/.config/claude-panel/mod-toasts"
 compaction_toasted() { # $1 = session id
-  local m
+  local m now
   [ -n "$1" ] || return 1
-  m=$(stat -f %m "$MOD_TOASTS_DIR/$1" 2>/dev/null) || return 1
-  (( $(panel_now) - m <= 180 ))
+  tick_stat "$MOD_TOASTS_DIR/$1" m || return 1
+  m=${m%% *}
+  panel_now_v now
+  (( now - m <= 180 ))
 }
 compaction_overlay_tick() { # $1 = session id
   panel_option_off CLAUDE_PANEL_COMPACTION_OVERLAY && return 0
@@ -4238,12 +4501,23 @@ alert_claim() { # $1 = event id
 # New events from notices.json since the last read, one per line:
 # severity, kind, title, detail, resolves, id, session, separated by \x1f (a tab
 # is whitespace to read, so an empty detail would shift the fields).
-alert_new_events() {
+#
+# Read only when the file has changed since the last read. That gate used to
+# sit in here and never held: this runs as `< <(alert_new_events)`, a
+# subshell, so the ALERT_MTIME it saved was gone by the next tick and every
+# tick ran jq. alert_file_changed is the gate now, called from the main
+# shell. The stamp is the mtime to the nanosecond and the size, so a second
+# write inside the same second still counts as a change.
+alert_file_changed() {
   local m
-  [ -f "$ALERT_FILE" ] || return 0
-  m=$(stat -f %m "$ALERT_FILE" 2>/dev/null) || return 0
-  [ "$m" = "$ALERT_MTIME" ] && return 0
+  [ -f "$ALERT_FILE" ] || return 1
+  tick_stat "$ALERT_FILE" m || return 1
+  [ "$m" = "$ALERT_MTIME" ] && return 1
   ALERT_MTIME="$m"
+  return 0
+}
+alert_new_events() {
+  [ -f "$ALERT_FILE" ] || return 0
   jq -r --arg last "$ALERT_LAST_ID" --argjson since "${ALERT_SINCE:-0}" '
     (.events // []) as $e
     | ($e | map(.id) | index($last)) as $i
@@ -4293,7 +4567,7 @@ alert_health_tick() {
   local url now
   url=$(panel_gateway_url)
   [ -n "$url" ] || return 0
-  now=$(panel_now)
+  panel_now_v now
   (( now - ALERT_HEALTH_AT < 10 )) && return 0
   ALERT_HEALTH_AT=$now
   # Every panel notices on its own and holds the news like any other event
@@ -4375,16 +4649,26 @@ gateway_alerts_tick() { # $1 = this panel's session id
   panel_option_off CLAUDE_PANEL_ALERTS && return 0
   [ -x "$HOME/.local/bin/claude-panel-overlay" ] || return 0
   local now sev kind title detail resolves id session item secs
-  now=$(panel_now)
+  panel_now_v now
   # Claude Burst's mod is toasting in this session: the gateway's alerts
   # reach it there, as Claude Code's own toasts, so nothing is floated over
   # the window as well. A notice already up runs its course first. What the
   # mod showed is not replayed if it goes away: only later events are read.
   if compaction_toasted "$own" && ! alert_alive && (( ${#ALERT_QUEUE[@]} == 0 )) && [ -z "$ALERT_STICKY" ]; then
     ALERT_SINCE=$now; ALERT_LAST_ID=""; ALERT_HELD=()
+    # What is read next is decided by ALERT_SINCE, just moved: read the file
+    # again then, changed or not.
+    ALERT_MTIME=""
     return 0
   fi
   [ -n "$ALERT_SINCE" ] || ALERT_SINCE=$(( now - 120 ))
+  # An unchanged file holds nothing this panel has not already taken in, so
+  # it is not read again: ALERT_LAST_ID and ALERT_SINCE, which pick the new
+  # events out of it, only move in this loop and in the branch above.
+  local alert_events=""
+  if alert_file_changed; then
+    alert_events=$(alert_new_events) || ALERT_MTIME=""
+  fi
   while IFS=$'\x1f' read -r sev kind title detail resolves id session; do
     [ -n "$id" ] || continue
     ALERT_LAST_ID="$id"
@@ -4407,7 +4691,7 @@ gateway_alerts_tick() { # $1 = this panel's session id
       alert_held_drop_kind "$resolves" && continue
     fi
     ALERT_HELD+=("$(printf '%s\037%s\037%s\037%s\037%s\037%s\037%s' "$id" "$now" "$sev" "$kind" "$title" "$detail" "$resolves")")
-  done < <(alert_new_events)
+  done <<< "$alert_events"
   alert_health_tick
   alert_held_tick "$now"
 
@@ -4444,12 +4728,9 @@ gateway_alerts_tick() { # $1 = this panel's session id
 # it is a plain non-negative integer, else the default ($2). A typo must not
 # silently disable a warning, so anything unparseable falls back.
 panel_option_int() { # $1 = KEY, $2 = default
-  local v="${!1:-}"
-  if [ -z "$v" ]; then
-    v=$(grep -E "^$1=" "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
-    v="${v#*=}"
-  fi
-  v=$(printf '%s' "$v" | tr -d '"'"'"' _,')
+  local v
+  panel_option_raw "$1" v
+  v=${v//[\"\' _,]/}
   case "$v" in
     ''|*[!0-9]*) printf '%s' "$2" ;;
     *) printf '%s' "$((10#$v))" ;;
@@ -4459,12 +4740,9 @@ panel_option_int() { # $1 = KEY, $2 = default
 # A dollar option: a plain non-negative number with at most one point, else
 # the default ($2). Same precedence and tolerance as the two above.
 panel_option_usd() { # $1 = KEY, $2 = default
-  local v="${!1:-}"
-  if [ -z "$v" ]; then
-    v=$(grep -E "^$1=" "$HOME/.config/claude-panel/options" 2>/dev/null | tail -1)
-    v="${v#*=}"
-  fi
-  v=$(printf '%s' "$v" | tr -d '"'"'"' $')
+  local v
+  panel_option_raw "$1" v
+  v=${v//[\"\' \$]/}
   case "$v" in
     ''|.|*[!0-9.]*|*.*.*) printf '%s' "$2" ;;
     *) printf '%s' "$v" ;;
@@ -4501,8 +4779,17 @@ restart_banner_line() { # $1 = on|off
 # context costs no more than before. Each step is a backgrounded, waited-on
 # sleep for the same reason as the main loop's: traps must not wait a tier.
 flash_restart_banner() { # $1 = seconds to wait, $2 = frame on screen
-  local row state=on i
-  row=$(printf '%s\n' "$2" | grep -n -F -m1 "$RESTART_BANNER_TEXT" | cut -d: -f1)
+  local row="" state=on i line n=0
+  # The first line holding the banner, counted in the shell (it was grep -n
+  # and cut, every tick, to find nothing on almost every one).
+  case "$2" in
+    *"$RESTART_BANNER_TEXT"*)
+      while IFS= read -r line; do
+        n=$(( n + 1 ))
+        case "$line" in *"$RESTART_BANNER_TEXT"*) row=$n; break ;; esac
+      done <<< "$2"
+      ;;
+  esac
   if [ -z "$row" ]; then
     panel_sleep "$1"
     return
@@ -4568,16 +4855,32 @@ PANEL_GW_LABEL="[View]"
 PANEL_GW_ROW=0
 PANEL_GW_COL=0
 panel_close_col() { # $1 = pane columns; first column of the [X]
-  printf '%s' "$(( $1 - 2 ))"
+  local c
+  panel_close_col_v c "$1"
+  printf '%s' "$c"
+}
+# The same into a variable. panel_read_clicks runs five times a second while
+# the panel waits, and its $(panel_close_col) was a fork every time: five
+# processes a second in every pane, doing nothing but subtract two.
+panel_close_col_v() { # $1 = variable to set, $2 = pane columns
+  printf -v "$1" '%s' "$(( $2 - 2 ))"
 }
 # Burst's dashboard URL, or nothing when Burst is not installed here.
 panel_gateway_url() {
-  command -v claude-burst >/dev/null 2>&1 || return 0
+  local u
+  panel_gateway_url_v u
+  printf '%s' "$u"
+}
+# The same into a variable, for callers in the main shell.
+panel_gateway_url_v() { # $1 = variable to set
   local cfg="$HOME/.config/claude-burst/config.json" a
+  printf -v "$1" '%s' ""
+  command -v claude-burst >/dev/null 2>&1 || return 0
   [ -f "$cfg" ] || return 0
-  a=$(jq -r '.admin_listen // "127.0.0.1:7788"' "$cfg" 2>/dev/null)
+  burst_cfg_load "$cfg"
+  a=$BURST_ADMIN
   case "$a" in ''|off|null) return 0 ;; esac
-  printf 'http://%s/' "$a"
+  printf -v "$1" 'http://%s/' "$a"
 }
 # Where [View] goes: the dashboard when it answers, else Burst's support
 # console (its own process, up when the gateway is not: audit, log,
@@ -4589,7 +4892,8 @@ panel_view_target() {
     printf '%s' "$PANEL_GW_URL"
     return
   fi
-  c=$(jq -r '.console_listen // "127.0.0.1:7789"' "$cfg" 2>/dev/null)
+  burst_cfg_load "$cfg"
+  c=$BURST_CONSOLE
   case "$c" in ''|off|null) printf '%s' "$PANEL_GW_URL" ;; *) printf 'http://%s/' "$c" ;; esac
 }
 # " [View]" for the end of the Proxy State line, when there is a dashboard.
@@ -4607,7 +4911,14 @@ panel_locate_view() { # $1 = the frame text
   while IFS= read -r line; do
     n=$(( n + 1 ))
     case "$line" in *"Proxy State:"*) ;; *) continue ;; esac
-    line=$(printf '%s' "$line" | sed $'s/\e\\[[0-9;]*m//g')
+    # The colours out, left to right as sed's s///g took them, in the shell.
+    local re=$'\e\\[[0-9;]*m' plain=""
+    while [[ $line =~ $re ]]; do
+      pre=${line%%"${BASH_REMATCH[0]}"*}
+      plain+=$pre
+      line=${line:${#pre}+${#BASH_REMATCH[0]}}
+    done
+    line=$plain$line
     case "$line" in *"$PANEL_GW_LABEL"*) ;; *) return 0 ;; esac
     pre=${line%%"$PANEL_GW_LABEL"*}
     PANEL_GW_ROW=$n PANEL_GW_COL=$(( ${#pre} + 2 ))
@@ -4616,8 +4927,10 @@ panel_locate_view() { # $1 = the frame text
 }
 draw_close_button() { # $1 = pane columns
   (( PANEL_CLOSE )) || return 0
-  PANEL_GW_URL=$(panel_gateway_url)
-  printf '\033[1;%dH%s[X]%s' "$(panel_close_col "$1")" "$C_BTN_CLOSE" "$C_RESET"
+  panel_gateway_url_v PANEL_GW_URL
+  local col
+  panel_close_col_v col "$1"
+  printf '\033[1;%dH%s[X]%s' "$col" "$C_BTN_CLOSE" "$C_RESET"
 }
 # Which button, if any, a left-button press in PANEL_INBUF landed on:
 # sets PANEL_CLICK to close, gateway or nothing. Consumes the buffer
@@ -4627,13 +4940,27 @@ panel_read_clicks() { # $1 = pane columns
   # only a left-button press (0 ... M) on a button counts: the [X] on row 1,
   # [View] where panel_locate_view found it. A close in the same read wins.
   local re=$'\e\\[<([0-9]+);([0-9]+);([0-9]+)([Mm])' rest="$PANEL_INBUF" col c r
-  col=$(panel_close_col "$1")
+  panel_close_col_v col "$1"
   PANEL_CLICK=""
   # Focus in (ESC [ I, reporting turned on beside the mouse) asks for a
   # redraw: back from a minimised window, Ghostty could show this pane
   # blank until a frame that differed from the last was written, which with
-  # nothing new could be most of a tick. Focus out means nothing here. Both
-  # come out before the mouse reports are read.
+  # nothing new could be most of a tick. Both come out before the mouse
+  # reports are read.
+  #
+  # They also say whether this pane has focus, which the pane's loop uses
+  # to slow down when it has not had it for a while (see panel_idle): the
+  # later of the two in this read is where focus now is. Focus out asks for
+  # no redraw.
+  if [[ $rest == *$'\e['[IO]* ]]; then
+    local before_last=${rest%$'\e['[IO]*}
+    if [ "${rest:${#before_last}+2:1}" = I ]; then
+      PANEL_FOCUSED=1
+    else
+      PANEL_FOCUSED=0
+      panel_now_v PANEL_FOCUS_LOST_AT
+    fi
+  fi
   [[ $rest == *$'\e[I'* ]] && PANEL_REDRAW=1
   rest=${rest//$'\e[I'/}
   rest=${rest//$'\e[O'/}
@@ -4700,8 +5027,36 @@ panel_poll_input() { # $1 = seconds
 }
 # sleep $1, answering clicks meanwhile. Without the button it is the old
 # backgrounded sleep, which a signal interrupts at once (see the main loop).
+#
+# Without the button it waits in a read on a FIFO this process holds open at
+# both ends, so nothing ever arrives and the read just times out: the wait
+# with no `sleep` process. A trapped signal runs its handler during the read
+# (TERM and INT exit at once, as they did out of `wait`), but the read then
+# carries on, so it waits in half-second slices and stops early once a
+# handler has asked for a redraw (WINCH), as the interrupted `wait` did. If
+# the FIFO cannot be made, it is the backgrounded sleep as before.
+PANEL_SLEEP_FD=""
+panel_sleep_fd() {
+  [ -n "$PANEL_SLEEP_FD" ] && return 0
+  local f="${TMPDIR:-/tmp}/ccusage-panel-sleep.$$.$RANDOM"
+  mkfifo -m 600 "$f" 2>/dev/null || return 1
+  exec {PANEL_SLEEP_FD}<>"$f" || { rm -f "$f"; PANEL_SLEEP_FD=""; return 1; }
+  rm -f "$f"
+}
 panel_sleep() { # $1 = whole seconds
   if (( ! PANEL_CLOSE )); then
+    if panel_sleep_fd; then
+      local end left t
+      end=$(( ${EPOCHREALTIME/./} + $1 * 1000000 ))
+      while (( ! PANEL_REDRAW )); do
+        left=$(( end - ${EPOCHREALTIME/./} ))
+        (( left > 0 )) || break
+        (( left > 500000 )) && left=500000
+        printf -v t '0.%06d' "$left"
+        read -r -t "$t" -u "$PANEL_SLEEP_FD" _ 2>/dev/null
+      done
+      return 0
+    fi
     sleep "$1" &
     wait $! 2>/dev/null
     return 0
@@ -4736,9 +5091,10 @@ MOD_DIR="$HOME/.cache/ccusage-panel-cache/mod"
 MOD_ALIVE_SECS="${PANEL_MOD_ALIVE_SECS:-90}"
 
 mod_alive() { # $1 = session id
-  local f="$MOD_DIR/$1.alive" m
+  local f="$MOD_DIR/$1.alive" m now
   m=$(stat -f %m "$f" 2>/dev/null) || return 1
-  (( $(panel_now) - m <= MOD_ALIVE_SECS ))
+  panel_now_v now
+  (( now - m <= MOD_ALIVE_SECS ))
 }
 
 # Claims mod/<id>.pid for this process. False when another live process holds
@@ -4985,7 +5341,8 @@ PYEOF
 burst_console_url() {
   [ -n "$(panel_gateway_url)" ] || return 0
   local c
-  c=$(jq -r '.console_listen // "127.0.0.1:7789"' "$HOME/.config/claude-burst/config.json" 2>/dev/null)
+  burst_cfg_load "$HOME/.config/claude-burst/config.json"
+  c=$BURST_CONSOLE
   case "$c" in ''|off|null) ;; *) printf 'http://%s/' "$c" ;; esac
 }
 
@@ -5020,9 +5377,23 @@ PANEL_BG_SLOW_SECS="${PANEL_BG_SLOW_SECS:-600}"
 PANEL_BG_WRITE_SECS="${PANEL_BG_WRITE_SECS:-60}"
 
 panel_in_view() { # $1 = session id, $2 = now epoch
+  panel_dock_view "$1" "$2"
+  (( $? != 1 ))
+}
+# What the Dock says about a session: 0 on screen, 1 not on screen, 2 no
+# Dock to ask (no file, or one over PANEL_VIEW_STALE_SECS old).
+panel_dock_view() { # $1 = session id, $2 = now epoch
   local m line
-  m=$(stat -f %m "$DOCK_VISIBLE_FILE" 2>/dev/null) || return 0
-  (( $2 - m > PANEL_VIEW_STALE_SECS )) && return 0
+  tick_stat "$DOCK_VISIBLE_FILE" m || return 2
+  m=${m%% *}
+  (( $2 - m > PANEL_VIEW_STALE_SECS )) && return 2
+  panel_dock_lists "$1"
+}
+# Whether the Dock's file names the session, read without a stat: the
+# freshness half of the question is panel_dock_view's.
+panel_dock_lists() { # $1 = session id
+  local line
+  [ -n "$1" ] && [ -r "$DOCK_VISIBLE_FILE" ] || return 1
   while IFS= read -r line; do
     [ "$line" = "$1" ] && return 0
   done < "$DOCK_VISIBLE_FILE"
@@ -5053,6 +5424,87 @@ summary_proxy_fresh_changed() {
   [ "$summary_block" != "$before" ]
 }
 
+# ---- the top of a tick, and the idle pane --------------------------------
+# panel_tick_begin: one stat for every file this tick asks about (see
+# tick_stat_batch), and Burst's config read once for the whole tick (see
+# burst_cfg_load). With "light" it keeps the config the last full tick read:
+# the idle wait's checks only need the dashboard address from it.
+panel_tick_begin() { # $1 = this panel's session id, $2 = light
+  tick_stat_batch "$PANEL_SELF" "${latest:-}" "$COMPACT_STATE_FILE" "$ALERT_FILE" \
+    "$DOCK_VISIBLE_FILE" ${1:+"$MOD_TOASTS_DIR/$1"}
+  [ "${2:-}" = light ] && return 0
+  local cfg="$HOME/.config/claude-burst/config.json"
+  BURST_CFG_HELD=0
+  if command -v claude-burst >/dev/null 2>&1 && [ -f "$cfg" ]; then
+    burst_cfg_load "$cfg"
+    BURST_CFG_HELD=1
+  fi
+}
+
+# An idle pane: one nobody is looking at, so it need not redraw every
+# REFRESH. Twelve panes open is twelve sessions, and one or two of them on
+# screen; every pane ticked at the full rate regardless.
+#
+# Idle when all of these hold:
+#   - focus reporting is on (PANEL_CLOSE), so the pane can be told it has
+#     been clicked into: without it there is no way back out of idle;
+#   - the pane has not had focus for PANEL_IDLE_AFTER seconds (ESC [ O, see
+#     panel_read_clicks; a pane that has never had it counts from its start);
+#   - the Dock does not list its session as on screen (panel_dock_view). The
+#     panel sits beside the session it reports on, and focus is in that
+#     session's pane, not this one, while someone reads it: on screen means
+#     not idle, focused or not. Without the Dock, focus alone decides.
+#
+# Idle, the pane draws every PANEL_IDLE_REFRESH (This Session then says so),
+# and between draws panel_idle_wait checks every REFRESH, with one stat and
+# no other process, whether to draw at once: focus in, a resize, the
+# transcript's mtime or size moving (a turn landed), its session coming on
+# screen, the slow tier falling due (it keeps its own SLOW_REFRESH, so every
+# other label stays true), or this script changing. The alerts over Ghostty
+# keep their REFRESH cadence throughout, as they do in headless_main for a
+# tab out of view.
+PANEL_FOCUSED=0
+PANEL_FOCUS_LOST_AT=$PANEL_START_EPOCH
+panel_idle() { # $1 = now epoch; reads panel_dock_rc
+  (( PANEL_CLOSE )) || return 1
+  (( PANEL_IDLE_REFRESH > REFRESH )) || return 1
+  (( PANEL_FOCUSED )) && return 1
+  (( $1 - PANEL_FOCUS_LOST_AT < PANEL_IDLE_AFTER )) && return 1
+  (( panel_dock_rc == 0 )) && return 1
+  return 0
+}
+panel_idle_wait() { # $1 = frame on screen
+  local now due st secs
+  while :; do
+    (( PANEL_REDRAW || PANEL_FOCUSED )) && return 0
+    panel_now_v now
+    due=$(( last_full + PANEL_IDLE_REFRESH ))
+    (( last_slow + SLOW_REFRESH < due )) && due=$(( last_slow + SLOW_REFRESH ))
+    (( now >= due )) && return 0
+    panel_tick_begin "$cur_sid" light
+    restart_if_changed
+    if [ -n "${latest:-}" ]; then
+      transcript_stamp_v st "$latest"
+      [ "$st" != "$idle_stamp" ] && { tick_stat_end; return 0; }
+    fi
+    # Its tab came on screen. Not asked when the last full tick found no
+    # Dock: that answer is the full tick's to change.
+    if (( panel_dock_rc == 1 )) && panel_dock_view "$cur_sid" "$now"; then
+      tick_stat_end
+      return 0
+    fi
+    panel_poll_input 0
+    compaction_overlay_tick "$cur_sid"
+    gateway_alerts_tick "$cur_sid"
+    tick_stat_end
+    (( PANEL_REDRAW || PANEL_FOCUSED )) && return 0
+    secs=$(( due - now ))
+    (( secs > REFRESH )) && secs=$REFRESH
+    (( secs < 1 )) && secs=1
+    flash_restart_banner "$secs" "$1"
+  done
+}
+
 headless_main() {
   # hsid, not sid: build_trailing reads rows into a variable named sid, and
   # bash's dynamic scoping would hand it this one.
@@ -5070,7 +5522,9 @@ headless_main() {
   trap "rm -f '$tmp_s' '$tmp_r' '$tmp_a'; [ \"\$(cat '$MOD_DIR/$hsid.pid' 2>/dev/null)\" = \"\$\$\" ] && rm -f '$MOD_DIR/$hsid.pid'" EXIT
   mod_prune
   local in_view=1 was_in_view=1 last_write=0
+  PANEL_MEMO=1
   while mod_alive "$hsid" && mod_still_ours "$hsid"; do
+    panel_tick_begin "$hsid"
     restart_if_changed "$REFRESH" "$TURN_ROWS" "$hsid"
     # Forget where commands were found. This loop runs for weeks, and bash
     # remembers the path of each command it ran: when Homebrew upgraded
@@ -5079,7 +5533,7 @@ headless_main() {
     # started before it, and their sidebars showed 3 Nov's figures, Proxy
     # State PRIMARY included, for two days.
     hash -r
-    now_epoch=$(panel_now)
+    panel_now_v now_epoch
     was_in_view=$in_view
     in_view=1
     panel_in_view "$hsid" "$now_epoch" || in_view=0
@@ -5087,6 +5541,7 @@ headless_main() {
     if (( ! in_view )) && (( now_epoch - last_write < PANEL_BG_WRITE_SECS )); then
       compaction_overlay_tick "$hsid"
       gateway_alerts_tick "$hsid"
+      tick_stat_end
       panel_sleep "$REFRESH"
       continue
     fi
@@ -5125,6 +5580,7 @@ headless_main() {
     MJ_RECENT_FILE="$tmp_r" MJ_ALL_SESS_FILE="$tmp_a" mod_json_write "$hsid"
     (( slow_due )) || band_write "$hsid" "$summary_block"
     last_write=$now_epoch
+    tick_stat_end
     panel_sleep "$REFRESH"
   done
 }
@@ -5170,8 +5626,17 @@ trap 'PANEL_REDRAW=1' WINCH
 last_frame=""
 last_size=""
 PANEL_REDRAW=0
+# The slow tier's sess_elapsed_h is worked out on the slow ticks that read it.
+PANEL_DEFER_ELAPSED=1
+PANEL_MEMO=1
+cur_sid=""
+idle_stamp=""
+panel_idle_now=0
+panel_dock_rc=2
+last_full=0
 
 while true; do
+  panel_tick_begin "$cur_sid"
   restart_if_changed
   # As in headless_main: a command's remembered path can go (a Homebrew upgrade).
   hash -r
@@ -5208,15 +5673,34 @@ while true; do
   # [X] closes the panel.
   panel_poll_input 0
 
-  now_epoch=$(panel_now)
+  panel_now_v now_epoch
+  last_full=$now_epoch
   resolve_session
+  # The session id, as basename "$latest" .jsonl gave it, without the two
+  # basenames a tick.
+  cur_sid=${latest:-}
+  cur_sid=${cur_sid##*/}
+  cur_sid=${cur_sid%.jsonl}
   remember_panel_width "$cols"
-  compaction_overlay_tick "$(basename "${latest:-}" .jsonl)"
-  gateway_alerts_tick "$(basename "${latest:-}" .jsonl)"
+  # Idle or not decides this tick's "(refresh ...)" on This Session and how
+  # long the wait after it is: see panel_idle.
+  panel_dock_view "$cur_sid" "$now_epoch"
+  panel_dock_rc=$?
+  if panel_idle "$now_epoch"; then
+    panel_idle_now=1
+    RATE_FAST=$RATE_IDLE
+  else
+    panel_idle_now=0
+    RATE_FAST=$RATE_FAST_ACTIVE
+  fi
+  compaction_overlay_tick "$cur_sid"
+  gateway_alerts_tick "$cur_sid"
   # Before either builder: the slow-tier summary and the fast-tier table
   # must read the same session from the same parse, or they can disagree
   # on screen about what this session has cost.
   session_stats_refresh
+  idle_stamp=""
+  [ -n "${latest:-}" ] && transcript_stamp_v idle_stamp "$latest"
 
   slow_due=0
   slow_frame_due "$now_epoch" && slow_due=1
@@ -5234,16 +5718,17 @@ while true; do
     # python traceback -- is a crash that would otherwise show as a
     # truncated block and nothing else. This is the general catch: it does
     # not need to know what broke to report that something did.
+    sess_elapsed_refresh
     summary_block=$(build_summary 2>>"$PANEL_ERR_FILE")
     trailing_raw=$(build_trailing 2>>"$PANEL_ERR_FILE")
-    band_write "$(basename "${latest:-}" .jsonl)" "$summary_block"
+    band_write "$cur_sid" "$summary_block"
     last_slow=$now_epoch
     last_cols=$cols
     last_model_label="${model_label:-}"
   fi
   # Every tick, not every slow one: see summary_proxy_fresh.
   if (( ! slow_due )) && summary_proxy_fresh_changed; then
-    band_write "$(basename "${latest:-}" .jsonl)" "$summary_block"
+    band_write "$cur_sid" "$summary_block"
   fi
 
   # Everything through the per-turn table is GUARANTEED, printed in full,
@@ -5264,7 +5749,10 @@ while true; do
     fi
   fi
   guaranteed="$summary_block"${errs:+$'\n'"$errs"}$'\n'"$(build_session_table 2>>"$PANEL_ERR_FILE")"
-  used_lines=$(printf '%s\n' "$guaranteed" | wc -l | tr -d ' ')
+  # Its lines, as `printf '%s\n' | wc -l` counted them (the newlines in it,
+  # plus the one printf adds), in the shell.
+  used_lines=${guaranteed//[!$'\n']/}
+  used_lines=$(( ${#used_lines} + 1 ))
   remaining=$(( rows - 1 - used_lines ))
 
   # Both blocks are written to the terminal once, together, below,
@@ -5274,9 +5762,13 @@ while true; do
   # redrew in two separate passes. A slow trailing fetch delays the whole
   # frame instead of half-updating it: the previous frame just stays up a
   # little longer, which reads as a pause, not a tear.
+  # The first $remaining lines, as `head -n` inside $(...) gave them:
+  # trailing newlines dropped.
   trailing=""
   if (( remaining > 0 )) && [ -n "$trailing_raw" ]; then
-    trailing=$(printf '%s\n' "$trailing_raw" | head -n "$remaining")
+    mapfile -t -n "$remaining" trailing_lines <<< "$trailing_raw"
+    printf -v trailing '%s\n' "${trailing_lines[@]}"
+    trailing=${trailing%"${trailing##*[!$'\n']}"}
   fi
 
   # Write only when the frame actually differs from the one already on
@@ -5310,7 +5802,9 @@ while true; do
   # measured at 9.06s on the 10s default. `wait` is interruptible, so the
   # handler runs the moment the signal lands. The orphaned sleep exits on
   # its own a few seconds later and costs nothing.
+  tick_stat_end
   flash_restart_banner "$REFRESH" "$guaranteed"
+  (( panel_idle_now )) && panel_idle_wait "$guaranteed"
 done
 PANEL_EOF
 # Mode before rename: the file must already be executable at the instant it
