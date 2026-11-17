@@ -24,6 +24,7 @@ STUB
   panel_front_pid() { echo "$BB_FRONT"; }
   # No dashboard to check here: the health check is driven by hand below.
   panel_gateway_url() { :; }
+  panel_gateway_url_v() { printf -v "$1" '%s' ""; }
   : > "$log"
   now=$(panel_now)
 
@@ -83,6 +84,7 @@ STUB
   # The gateway cannot report its own death: the panel does, after 3 misses.
   : > "$log"
   panel_gateway_url() { printf 'http://127.0.0.1:1/'; }
+  panel_gateway_url_v() { printf -v "$1" '%s' 'http://127.0.0.1:1/'; }
   curl() { return 7; }
   local i
   for i in 1 2; do ALERT_HEALTH_AT=0; gateway_alerts_tick; done

@@ -367,6 +367,35 @@ panel_date() {
 
 panel_now_v PANEL_START_EPOCH
 
+# The calendar day $2 days before today, in strftime format $3, into $1:
+# what `panel_date -v-<n>d +<fmt>` printed, with no date process. Counted
+# from today's local noon, so a DST change (an hour either way) cannot move
+# it across midnight. Honours PANEL_FAKE_NOW, as panel_date does.
+panel_day_v() { # $1 = variable to set, $2 = days ago, $3 = strftime format
+  local _pd_now _pd_h _pd_m _pd_s
+  panel_now_v _pd_now
+  printf -v _pd_h '%(%H)T' "$_pd_now"
+  printf -v _pd_m '%(%M)T' "$_pd_now"
+  printf -v _pd_s '%(%S)T' "$_pd_now"
+  printf -v "$1" "%($3)T" \
+    $(( _pd_now - 10#$_pd_h * 3600 - 10#$_pd_m * 60 - 10#$_pd_s + 43200 - $2 * 86400 ))
+}
+
+# The first 16 hex digits of the sha256 of $2, into $1: the cache keys. Kept
+# for the life of the process, so the long-lived loops hash each key once:
+# it was a shasum and a cut, two process starts, for every cache read.
+declare -gA PANEL_HASH_MEMO=()
+panel_hash16_v() { # $1 = variable to set, $2 = text
+  local _ph=""
+  [ -n "$2" ] && _ph=${PANEL_HASH_MEMO["$2"]-}
+  if [ -z "$_ph" ]; then
+    _ph=$(printf '%s' "$2" | shasum -a 256)
+    _ph=${_ph:0:16}
+    [ -n "$2" ] && PANEL_HASH_MEMO["$2"]=$_ph
+  fi
+  printf -v "$1" '%s' "$_ph"
+}
+
 # ---- one stat a tick ------------------------------------------------------
 # A tick asks the mtime of half a dozen files: this script (restart on
 # deploy), the transcript (did a turn land), Burst's compaction state and
@@ -385,18 +414,63 @@ declare -gA TICK_STAT=()
 TICK_STAT_LIVE=0
 TICK_STAT_ON=0
 case "${OSTYPE:-}" in darwin*) TICK_STAT_ON=1 ;; esac
+# Bash's own stat, when the bash running this ships it as a loadable builtin
+# (Homebrew's does, in lib/bash): a stat with no process at all. It is loaded
+# DISABLED and switched on only around its own calls, because enabled it
+# would shadow /usr/bin/stat, whose -f every other stat in this file uses.
+# The third field, which stat -f %Fm gives to the nanosecond, is mtime,
+# ctime and inode here: the same "rewritten within the second" signal for
+# alert_file_changed, since a rename changes the inode and a write the ctime.
+# PANEL_STAT_BUILTIN=0 turns it off.
+PANEL_STAT_BUILTIN="${PANEL_STAT_BUILTIN:-1}"
+panel_stat_builtin_load() {
+  local d f
+  (( PANEL_STAT_BUILTIN )) || return 0
+  PANEL_STAT_BUILTIN=0
+  for d in ${BASH_LOADABLES_PATH:+${BASH_LOADABLES_PATH//:/ }} \
+           "${BASH%/bin/*}/lib/bash" /opt/homebrew/lib/bash /usr/local/lib/bash /usr/lib/bash; do
+    f="$d/stat"
+    [ -f "$f" ] || continue
+    if enable -f "$f" stat 2>/dev/null; then
+      enable -n stat 2>/dev/null
+      PANEL_STAT_BUILTIN=1
+      return 0
+    fi
+  done
+  return 0
+}
+panel_stat_builtin_load
+# Sets $2 to "mtime size mtime.ctime.inode" for $1 from the builtin; false
+# when it is missing.
+panel_bstat_v() { # $1 = path, $2 = variable to set
+  local -A _bs=()
+  enable stat 2>/dev/null
+  if ! stat -A _bs "$1" 2>/dev/null || [ -z "${_bs[mtime]:-}" ]; then
+    enable -n stat 2>/dev/null
+    return 1
+  fi
+  enable -n stat 2>/dev/null
+  printf -v "$2" '%s %s %s.%s.%s' "${_bs[mtime]}" "${_bs[size]}" "${_bs[mtime]}" "${_bs[ctime]}" "${_bs[inode]}"
+}
 tick_stat_batch() { # $@ = paths; empty ones are skipped
   local p m z fm out
   local -a ps=()
   TICK_STAT=()
   TICK_STAT_LIVE=0
-  (( TICK_STAT_ON )) || return 0
+  (( TICK_STAT_ON || PANEL_STAT_BUILTIN )) || return 0
   for p in "$@"; do
     [ -n "$p" ] || continue
     TICK_STAT["$p"]=-
     ps+=("$p")
   done
   (( ${#ps[@]} )) || return 0
+  if (( PANEL_STAT_BUILTIN )); then
+    for p in "${ps[@]}"; do
+      panel_bstat_v "$p" m && TICK_STAT["$p"]=$m
+    done
+    TICK_STAT_LIVE=1
+    return 0
+  fi
   out=$(stat -f $'%m\t%z\t%Fm\t%N' "${ps[@]}" 2>/dev/null)
   while IFS=$'\t' read -r m z fm p; do
     [ -n "$p" ] && [ -n "${TICK_STAT[$p]+x}" ] && TICK_STAT["$p"]="$m $z $fm"
@@ -412,6 +486,8 @@ tick_stat() { # $1 = path, $2 = variable to set
     [ "$_ts_v" = - ] && return 1
   elif [ ! -e "$1" ]; then
     return 1
+  elif (( PANEL_STAT_BUILTIN )); then
+    panel_bstat_v "$1" _ts_v || return 1
   elif (( TICK_STAT_ON )); then
     _ts_v=$(stat -f '%m %z %Fm' "$1" 2>/dev/null) || return 1
   else
@@ -532,6 +608,67 @@ fmt_mt() {
 }
 fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 
+# ---- the same figures into a variable, without a process where it is safe
+# The slow tick formats a dozen figures and colours them, and each format or
+# comparison was an awk. Where bash gives exactly awk's answer these do it in
+# the shell: a plain decimal (no exponent, nothing awk would read differently)
+# printed by printf, which is C's printf on the same double on 64-bit ARM,
+# where long double is double. Anything else, and every other machine, is the
+# awk it always was.
+PANEL_FMT_BUILTIN=0
+case "${MACHTYPE:-}" in aarch64*|arm64*) PANEL_FMT_BUILTIN=1 ;; esac
+panel_plain_num() { [[ $1 =~ ^-?([0-9]+(\.[0-9]*)?|\.[0-9]+)$ ]]; }
+fmt_money_v() { # $1 = variable to set, $2 = amount
+  local _fm_n="${2:-0}" _fm_a _fm_r
+  if (( PANEL_FMT_BUILTIN )) && panel_plain_num "$_fm_n"; then
+    _fm_a=${_fm_n#-}
+    # a > 0 && a < 1: no whole part, and a digit other than 0 after the point.
+    if [[ $_fm_a =~ ^0*\.([0-9]*)$ ]] && [[ ${BASH_REMATCH[1]} == *[1-9]* ]]; then
+      printf -v "$1" '$%.2f' "$_fm_n"
+    else
+      printf -v "$1" '$%.0f' "$_fm_n"
+    fi
+    return 0
+  fi
+  _fm_r=$(fmt_money "$_fm_n")
+  printf -v "$1" '%s' "$_fm_r"
+}
+# fmt_m into $1: a whole number of tokens over a million to two places,
+# exactly (the quotient written out to twelve places is the double awk got).
+fmt_m_v() { # $1 = variable to set, $2 = tokens
+  local _mm_n="${2:-0}" _mm_r
+  if (( PANEL_FMT_BUILTIN )) && [[ $_mm_n =~ ^[0-9]{1,15}$ ]]; then
+    _mm_n=$(( 10#$_mm_n ))
+    printf -v _mm_r '%d.%06d' $(( _mm_n / 1000000 )) $(( _mm_n % 1000000 ))
+    printf -v "$1" '%.2fM' "$_mm_r"
+    return 0
+  fi
+  _mm_r=$(fmt_m "$_mm_n")
+  printf -v "$1" '%s' "$_mm_r"
+}
+# tier_color's three comparisons in one awk, into $1.
+tier_color_v() { # $1 = variable to set, $2.. = as tier_color
+  local _tv_t
+  _tv_t=$(awk -v v="$2" -v a="$3" -v ym="$4" -v rm="$5" -v f="${6:-0}" 'BEGIN{
+    if (!(a+0>0 && v+0>=f)) { print 0; exit }
+    t = 0; if (v+0>a*ym) t = 1; if (v+0>a*rm) t = 2; print t }')
+  case "$_tv_t" in
+    2) printf -v "$1" '%s' "$C_RED" ;;
+    1) printf -v "$1" '%s' "$C_YELLOW" ;;
+    *) printf -v "$1" '%s' "$C_GREEN" ;;
+  esac
+}
+# threshold_color's two comparisons in one awk, into $1.
+threshold_color_v() { # $1 = variable to set, $2 = value, $3 = yellow, $4 = red
+  local _th_t
+  _th_t=$(awk -v v="$2" -v yt="$3" -v rt="$4" 'BEGIN{ t = 0; if (v+0>yt) t = 1; if (v+0>rt) t = 2; print t }')
+  case "$_th_t" in
+    2) printf -v "$1" '%s' "$C_RED" ;;
+    1) printf -v "$1" '%s' "$C_YELLOW" ;;
+    *) printf -v "$1" '%s' "$C_GREEN" ;;
+  esac
+}
+
 # ---- Claude Burst's config.json and state.json, in one jq ----------------
 # The Proxy State line, the [View] button and the gateway health check read
 # nine fields from these two files, and each field was its own jq, eight or
@@ -545,9 +682,21 @@ fmt_hm() { local m=${1:-0}; m=${m%.*}; printf '%dh %02dm' $((m/60)) $((m%60)); }
 # Anywhere else every call reads the files afresh, as each jq did.
 BURST_CFG_HELD=0
 BURST_CFG_FOR=""
+# In the loops (PANEL_MEMO), the files' stat stamps as of the last read: an
+# unchanged pair is not read again. That jq was a process start every tick
+# in every panel, for two files that change when Burst is reconfigured or
+# fails over.
+BURST_CFG_STAMP=""
 burst_cfg_load() { # $1 = config.json
   local cfg="$1" state="$HOME/.config/claude-burst/state.json" out has_state=0
   (( BURST_CFG_HELD )) && [ "$BURST_CFG_FOR" = "$cfg" ] && return 0
+  if (( ${PANEL_MEMO:-0} )); then
+    local _bc_a="-" _bc_b="-"
+    tick_stat "$cfg" _bc_a
+    tick_stat "$state" _bc_b
+    [ "$cfg|$_bc_a|$_bc_b" = "$BURST_CFG_STAMP" ] && return 0
+    BURST_CFG_STAMP="$cfg|$_bc_a|$_bc_b"
+  fi
   BURST_CFG_FOR="$cfg"
   BURST_PRIMARY="" BURST_SECONDARY="" BURST_MODE="" BURST_HOST="" BURST_BUNDLE=""
   BURST_LISTEN="" BURST_ADMIN="" BURST_CONSOLE="" BURST_OVERFLOW=""
@@ -616,7 +765,32 @@ proxy_hosts_redirect() { # $1 = host, $2 = hosts file
   return 1
 }
 proxy_in_path() {
-  local cfg="$1" mode host listen bundle settings base_url
+  local why rc
+  proxy_in_path_v why "$1"
+  rc=$?
+  printf '%s' "$why"
+  return $rc
+}
+# ANTHROPIC_BASE_URL from settings.json, read again only when the file's stat
+# stamp moves (in the loops): this jq ran every tick in base-url mode.
+PROXY_SETTINGS_STAMP="" PROXY_SETTINGS_BASE=""
+proxy_base_url_v() { # $1 = variable to set, $2 = settings.json
+  local _pb_st="-"
+  if (( ${PANEL_MEMO:-0} )); then
+    tick_stat "$2" _pb_st
+    if [ "$2|$_pb_st" = "$PROXY_SETTINGS_STAMP" ]; then
+      printf -v "$1" '%s' "$PROXY_SETTINGS_BASE"
+      return 0
+    fi
+  fi
+  PROXY_SETTINGS_BASE=$(jq -r '.env.ANTHROPIC_BASE_URL // ""' "$2" 2>/dev/null)
+  PROXY_SETTINGS_STAMP="$2|$_pb_st"
+  printf -v "$1" '%s' "$PROXY_SETTINGS_BASE"
+}
+# proxy_in_path, with the reason it is not into $1 rather than printed.
+proxy_in_path_v() { # $1 = variable to set, $2 = config.json
+  local _pv_out="$1" cfg="$2" mode host listen bundle settings base_url
+  printf -v "$_pv_out" '%s' ""
   burst_cfg_load "$cfg"
   mode=$BURST_MODE
   if [ "$mode" = "transparent" ]; then
@@ -632,29 +806,49 @@ proxy_in_path() {
     # is lowercased ASCII as awk's tolower is under LC_ALL=C, and the CA
     # marker is a substring of the file exactly when grep finds it in a line.
     proxy_hosts_redirect "$host" "${CLAUDE_BURST_HOSTS_FILE:-/etc/hosts}" \
-      || { printf 'no /etc/hosts redirect'; return 1; }
+      || { printf -v "$_pv_out" 'no /etc/hosts redirect'; return 1; }
     local ca=""
     [ -r "$bundle" ] && [ -f "$bundle" ] && IFS= read -r -d '' ca < "$bundle"
     case "$ca" in
       *"# BEGIN claude-burst CA"*) ;;
-      *) printf 'CA untrusted, TLS will fail'; return 1 ;;
+      *) printf -v "$_pv_out" 'CA untrusted, TLS will fail'; return 1 ;;
     esac
     return 0
   fi
   listen=$BURST_LISTEN
   settings="$HOME/.claude/settings.json"
-  base_url=$(jq -r '.env.ANTHROPIC_BASE_URL // ""' "$settings" 2>/dev/null)
+  proxy_base_url_v base_url "$settings"
   case "$base_url" in
-    "")        printf 'ANTHROPIC_BASE_URL unset'; return 1 ;;
+    "")        printf -v "$_pv_out" 'ANTHROPIC_BASE_URL unset'; return 1 ;;
     *"$listen"*) return 0 ;;
-    *)         printf 'points at %s' "$base_url"; return 1 ;;
+    *)         printf -v "$_pv_out" 'points at %s' "$base_url"; return 1 ;;
   esac
 }
 
 proxy_state_line() {
-  command -v claude-burst >/dev/null 2>&1 || return
+  local line
+  proxy_state_line_v line
+  [ -n "$line" ] && printf '%s\n' "$line"
+  return 0
+}
+# The line, without its newline, into $1 ("" without Burst): the loops call
+# it every tick, and as $(proxy_state_line) it was a fork, with two more
+# inside it.
+proxy_state_line_v() { # $1 = variable to set
+  local _pl_out="$1" tag
+  printf -v "$_pl_out" '%s' ""
+  # Worked out by the collector this tick, both ways.
+  if (( COLLECTOR_LIVE )); then
+    if (( PANEL_CLOSE )); then
+      printf -v "$_pl_out" '%s' "$CS_PROXY_LINE_VIEW"
+    else
+      printf -v "$_pl_out" '%s' "$CS_PROXY_LINE"
+    fi
+    return 0
+  fi
+  command -v claude-burst >/dev/null 2>&1 || return 0
   local cfg="$HOME/.config/claude-burst/config.json"
-  [ -f "$cfg" ] || return
+  [ -f "$cfg" ] || return 0
   local primary secondary overflow_until now route_label route_color why
   burst_cfg_load "$cfg"
   primary=$BURST_PRIMARY
@@ -664,14 +858,15 @@ proxy_state_line() {
 
   # Which slot the proxy would choose only matters if it is in the path at
   # all, so this outranks PRIMARY/SECONDARY rather than sitting beside it.
-  if ! why=$(proxy_in_path "$cfg"); then
+  panel_view_tag_v tag
+  if ! proxy_in_path_v why "$cfg"; then
     # The whole line in a true red: Burst is out of the path, so nothing it
     # promises (failover, compaction, masking) is happening. 24-bit because
     # the theme's basic red renders as a muted pink, and the reason was in
     # yellow inside brackets, which read as a footnote rather than the alarm.
-    printf '  🔀 %sProxy State: NOT IN USE, %s%s%s\n' \
-      "$C_ALARM" "$why" "$C_RESET" "$(panel_view_tag)"
-    return
+    printf -v "$_pl_out" '  🔀 %sProxy State: NOT IN USE, %s%s%s' \
+      "$C_ALARM" "$why" "$C_RESET" "$tag"
+    return 0
   fi
 
   overflow_until=$BURST_OVERFLOW
@@ -681,7 +876,7 @@ proxy_state_line() {
   else
     route_label="PRIMARY ($primary)"; route_color="$C_GREEN"
   fi
-  printf '  🔀 Proxy State: %s%s%s%s\n' "$route_color" "$route_label" "$C_RESET" "$(panel_view_tag)"
+  printf -v "$_pl_out" '  🔀 Proxy State: %s%s%s%s' "$route_color" "$route_label" "$C_RESET" "$tag"
 }
 
 # There's no Anthropic API call for "what plan is this account on", the
@@ -711,13 +906,15 @@ license_line() {
   if command -v claude-burst >/dev/null 2>&1; then
     local cfg="$HOME/.config/claude-burst/config.json"
     if [ -f "$cfg" ]; then
-      local state="$HOME/.config/claude-burst/state.json" overflow_until active_provider
-      overflow_until=0
-      [ -f "$state" ] && overflow_until=$(jq -r '.overflow_until // 0' "$state" 2>/dev/null)
+      local overflow_until active_provider
+      # The same three fields burst_cfg_load already holds (it reads them
+      # with the same defaults), rather than two more jq runs.
+      burst_cfg_load "$cfg"
+      overflow_until=$BURST_OVERFLOW
       if [ "${overflow_until:-0}" -gt "$now" ] 2>/dev/null; then
-        active_provider=$(jq -r '.secondary.provider // "?"' "$cfg" 2>/dev/null)
+        active_provider=$BURST_SECONDARY
       else
-        active_provider=$(jq -r '.primary.provider // "?"' "$cfg" 2>/dev/null)
+        active_provider=$BURST_PRIMARY
       fi
       if [[ "$active_provider" != *oauth* ]]; then
         printf '  📜 License: %s%s%s\n' "$C_YELLOW" "API key (${active_provider%-passthrough})" "$C_RESET"
@@ -727,9 +924,12 @@ license_line() {
   fi
 
   if [ -f "$LICENSE_CACHE" ]; then
-    mtime=$(stat -f %m "$LICENSE_CACHE" 2>/dev/null || stat -c %Y "$LICENSE_CACHE" 2>/dev/null || echo 0)
+    mtime=0
+    tick_stat "$LICENSE_CACHE" mtime && mtime=${mtime%% *}
     if (( now - mtime < LICENSE_CACHE_TTL )); then
-      label=$(cat "$LICENSE_CACHE")
+      label=""
+      IFS= read -r -d '' label < "$LICENSE_CACHE"
+      label=${label%"${label##*[!$'\n']}"}
     fi
   fi
   if [ -z "${label:-}" ]; then
@@ -814,6 +1014,31 @@ ctx_tier_color() {
 # on a standing alarm that never cleared and could not be acted on, which
 # dulls the red that does mean something. Spend on an expensive model still
 # shows up in red, on the Session/Today/Burn lines that actually measure it.
+# ctx_tier_color into $1: whole numbers compared in the shell, as awk
+# compares them; anything else by ctx_tier_color.
+ctx_tier_color_v() { # $1 = variable to set, $2 = value, $3 $4 $5 = thresholds
+  local _ct_c=$C_GREEN _ct_v
+  if [[ $2 =~ ^(-?)([0-9]{1,15})$ ]]; then
+    _ct_v=$(( 10#${BASH_REMATCH[2]} ))
+    [ -n "${BASH_REMATCH[1]}" ] && _ct_v=$(( -_ct_v ))
+  fi
+  if [ -n "${_ct_v:-}" ] && [[ $3 =~ ^[0-9]{1,15}$ && $4 =~ ^[0-9]{1,15}$ && $5 =~ ^[0-9]{1,15}$ ]]; then
+    (( _ct_v > 10#$3 )) && _ct_c=$C_YELLOW
+    (( _ct_v > 10#$4 )) && _ct_c=$C_RED
+    (( _ct_v > 10#$5 )) && _ct_c=$C_MAGENTA
+  else
+    _ct_c=$(ctx_tier_color "$2" "$3" "$4" "$5")
+  fi
+  printf -v "$1" '%s' "$_ct_c"
+}
+model_tier_color_v() { # $1 = variable to set, $2 = model id
+  local _mt=$C_YELLOW
+  case "${2,,}" in
+    *haiku*) _mt=$C_GREEN ;;
+    *opus*|*fable*|*mythos*) _mt=$C_CYAN ;;
+  esac
+  printf -v "$1" '%s' "$_mt"
+}
 model_tier_color() {
   case "${1,,}" in
     *haiku*) printf '%s' "$C_GREEN" ;;
@@ -1246,83 +1471,119 @@ ccusage_query_is_gated() { :; }
 # $1... = ccusage subcommand + args, e.g. `blocks --active --json --offline`.
 # Prints the (possibly cached) JSON to stdout.
 ccusage_cached() {
-  local key cache_file lock_dir now_epoch cache_mtime lock_age waited out have_lock
-  local ttl
-  key=$(printf '%s' "$*" | shasum -a 256 | cut -c1-16)
-  cache_file="$CCUSAGE_CACHE_DIR/$key.json"
-  lock_dir="$cache_file.lock"
-  panel_now_v now_epoch
-  ttl=$(ccusage_ttl_jittered "$1" "$key" "${2:-}")
+  local _cc_r
+  ccusage_fetch_v _cc_r "$@"
+  printf '%s' "$_cc_r"
+}
 
-  if [ -f "$cache_file" ]; then
-    cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null || echo 0)
-    if (( now_epoch - cache_mtime < ttl )); then
-      cat "$cache_file"
-      return
+# The cache file's text into $1, as $(cat file) gave it.
+ccusage_file_v() { # $1 = variable to set, $2 = file
+  local _cr_t=""
+  IFS= read -r -d '' _cr_t < "$2"
+  _cr_t=${_cr_t%"${_cr_t##*[!$'\n']}"}
+  printf -v "$1" '%s' "$_cr_t"
+}
+
+# ccusage_cached's work, into $1. The key's hash is kept (panel_hash16_v),
+# the TTL and its jitter are worked out in the shell (ccusage_ttl_jittered's
+# figure) and ages come from tick_stat, so a miss starts the ccusage run, the
+# corpus gate's find and the file moves, and nothing else: each of those
+# was a $(...) of its own, about a dozen process starts a miss, and the
+# collector's slow job misses on every run while transcripts are written.
+ccusage_fetch_v() { # $1 = variable to set, $2... = ccusage arguments
+  local _cf_out="$1" _cf_key _cf_file _cf_lock _cf_now _cf_st _cf_m _cf_ttl _cf_q
+  local _cf_age _cf_waited _cf_have=1 _cf_err _cf_rc _cf_txt="" _cf_msg
+  shift
+  panel_hash16_v _cf_key "$*"
+  _cf_file="$CCUSAGE_CACHE_DIR/$_cf_key.json"
+  _cf_lock="$_cf_file.lock"
+  panel_now_v _cf_now
+  _cf_q=$1
+  [ "$_cf_q" = claude ] && _cf_q=${2:-}
+  case "$_cf_q" in
+    session|weekly|monthly) _cf_ttl=$TTL_HISTORY ;;
+    *) _cf_ttl=$TTL_LIVE ;;
+  esac
+  _cf_ttl=$(( _cf_ttl - _cf_ttl * ( 0x${_cf_key:0:2} % 15 ) / 100 ))
+
+  if [ -f "$_cf_file" ]; then
+    _cf_st=""
+    tick_stat "$_cf_file" _cf_st
+    _cf_m=${_cf_st%% *}
+    if (( _cf_now - ${_cf_m:-0} < _cf_ttl )); then
+      ccusage_file_v "$_cf_out" "$_cf_file"
+      return 0
     fi
     # TTL lapsed, but nothing this answer depends on has changed.
-    if ccusage_query_is_gated "$1" && ! corpus_changed_since "$cache_file"; then
-      cat "$cache_file"
-      return
+    if ccusage_query_is_gated "$1" && ! corpus_changed_since "$_cf_file"; then
+      ccusage_file_v "$_cf_out" "$_cf_file"
+      return 0
     fi
   fi
 
-  have_lock=1
-  if ! mkdir "$lock_dir" 2>/dev/null; then
-    have_lock=0
+  if ! mkdir "$_cf_lock" 2>/dev/null; then
+    _cf_have=0
     # A real ccusage call finishes in well under this -- a lock this old was
     # left behind by a panel that died mid-fetch. Reclaim it rather than
     # leaving every panel serving a permanently stale cache forever.
-    lock_age=$(( now_epoch - $(stat -f %m "$lock_dir" 2>/dev/null || stat -c %Y "$lock_dir" 2>/dev/null || echo "$now_epoch") ))
-    if (( lock_age > 30 )); then
-      rmdir "$lock_dir" 2>/dev/null
-      mkdir "$lock_dir" 2>/dev/null && have_lock=1
+    _cf_st=""
+    tick_stat "$_cf_lock" _cf_st
+    _cf_m=${_cf_st%% *}
+    _cf_age=$(( _cf_now - ${_cf_m:-$_cf_now} ))
+    if (( _cf_age > 30 )); then
+      rmdir "$_cf_lock" 2>/dev/null
+      mkdir "$_cf_lock" 2>/dev/null && _cf_have=1
     fi
   fi
 
-  if [ "$have_lock" = 0 ]; then
+  if [ "$_cf_have" = 0 ]; then
     # Another panel is already refetching this exact query -- serve the
     # stale-but-recent copy rather than block this panel's whole refresh on
     # someone else's in-flight fetch.
-    if [ -f "$cache_file" ]; then
-      cat "$cache_file"
-      return
+    if [ -f "$_cf_file" ]; then
+      ccusage_file_v "$_cf_out" "$_cf_file"
+      return 0
     fi
     # No cache at all yet for this key (its very first fetch, e.g. two
     # panels launched together) -- briefly wait for the winner instead of
     # rendering this row blank for a whole refresh cycle.
-    waited=0
-    while [ -d "$lock_dir" ] && [ ! -f "$cache_file" ] && (( waited < 10 )); do
+    _cf_waited=0
+    while [ -d "$_cf_lock" ] && [ ! -f "$_cf_file" ] && (( _cf_waited < 10 )); do
       sleep 0.1
-      waited=$(( waited + 1 ))
+      _cf_waited=$(( _cf_waited + 1 ))
     done
-    if [ -f "$cache_file" ]; then
-      cat "$cache_file"
-      return
+    if [ -f "$_cf_file" ]; then
+      ccusage_file_v "$_cf_out" "$_cf_file"
+      return 0
     fi
     # Still nothing -- fetch it ourselves, unlocked, rather than wait
     # indefinitely; an occasional duplicate fetch beats a stuck panel.
   fi
 
-  local err_tmp rc
-  err_tmp="$cache_file.err"
-  out=$(ccusage "$@" 2>"$err_tmp"); rc=$?
+  _cf_err="$_cf_file.err"
+  _cf_txt=$(ccusage "$@" 2>"$_cf_err"); _cf_rc=$?
   # Empty counts as failure as much as a non-zero exit: every query here
   # returns a JSON object, and "" parses to nothing while looking like a
   # quiet day.
-  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
-    panel_error "ccusage $1 ${2:-} failed (exit $rc): $(tr -d '\n' < "$err_tmp" | cut -c1-80)"
-    rm -f "$err_tmp"
+  if [ "$_cf_rc" -ne 0 ] || [ -z "$_cf_txt" ]; then
+    _cf_msg=""
+    IFS= read -r -d '' _cf_msg < "$_cf_err"
+    _cf_msg=${_cf_msg//$'\n'/}
+    panel_error "ccusage $1 ${2:-} failed (exit $_cf_rc): ${_cf_msg:0:80}"
+    rm -f "$_cf_err"
     # Serve the last good answer if there is one, rather than replacing it
     # with the failure -- but the failure is on screen either way.
-    [ -f "$cache_file" ] && cat "$cache_file"
-    [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
+    _cf_txt=""
+    [ -f "$_cf_file" ] && ccusage_file_v _cf_txt "$_cf_file"
+    printf -v "$_cf_out" '%s' "$_cf_txt"
+    [ "$_cf_have" = 1 ] && rmdir "$_cf_lock" 2>/dev/null
     return 0
   fi
-  rm -f "$err_tmp"
-  printf '%s' "$out" > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
-  [ "$have_lock" = 1 ] && rmdir "$lock_dir" 2>/dev/null
-  printf '%s' "$out"
+  # An empty one stays, one a key, for the next fetch to overwrite.
+  [ -s "$_cf_err" ] && rm -f "$_cf_err"
+  printf '%s' "$_cf_txt" > "$_cf_file.$$.tmp" && mv "$_cf_file.$$.tmp" "$_cf_file"
+  [ "$_cf_have" = 1 ] && rmdir "$_cf_lock" 2>/dev/null
+  printf -v "$_cf_out" '%s' "$_cf_txt"
 }
 
 # ---- one daily+weekly+monthly load instead of four separate ones ----
@@ -1359,11 +1620,46 @@ ccusage_cached() {
 # bucket (0.73 + 0.72, 96 fetches a day instead of 720) for about +2.3
 # CPU-min/day. Merged back into the shape every caller already reads, so
 # nothing downstream knows the difference.
+# ccusage_cached into $1, with no process on a hit: the key's hash kept
+# (panel_hash16_v), the TTL and its jitter in the shell, the file's age from
+# tick_stat and its text read with read. A hit past its TTL still asks the
+# corpus gate (one find), and anything else is ccusage_cached's own, in a
+# $(...), as it was.
+ccusage_cached_v() { # $1 = variable to set, $2... = ccusage arguments
+  local _cv_out="$1" _cv_key _cv_file _cv_ttl _cv_q _cv_now _cv_st _cv_txt=""
+  shift
+  panel_hash16_v _cv_key "$*"
+  _cv_file="$CCUSAGE_CACHE_DIR/$_cv_key.json"
+  if [ -f "$_cv_file" ] && tick_stat "$_cv_file" _cv_st; then
+    _cv_q=$1
+    [ "$_cv_q" = claude ] && _cv_q=${2:-}
+    case "$_cv_q" in
+      session|weekly|monthly) _cv_ttl=$TTL_HISTORY ;;
+      *) _cv_ttl=$TTL_LIVE ;;
+    esac
+    _cv_ttl=$(( _cv_ttl - _cv_ttl * ( 0x${_cv_key:0:2} % 15 ) / 100 ))
+    panel_now_v _cv_now
+    if (( _cv_now - ${_cv_st%% *} < _cv_ttl )) \
+       || { ccusage_query_is_gated "$1" && ! corpus_changed_since "$_cv_file"; }; then
+      IFS= read -r -d '' _cv_txt < "$_cv_file"
+      _cv_txt=${_cv_txt%"${_cv_txt##*[!$'\n']}"}
+      printf -v "$_cv_out" '%s' "$_cv_txt"
+      return 0
+    fi
+  fi
+  ccusage_fetch_v "$_cv_out" "$@"
+}
+
 recent_sections_fetch() {
-  local d w m
-  d=$(ccusage_cached claude daily --json --offline)
-  w=$(ccusage_cached claude weekly --json --offline)
-  m=$(ccusage_cached claude monthly --json --offline)
+  local r
+  recent_sections_fetch_v r
+  printf '%s' "$r"
+}
+recent_sections_fetch_v() { # $1 = variable to set
+  local _rf_out="$1" d w m _rf_res
+  ccusage_cached_v d claude daily --json --offline
+  ccusage_cached_v w claude weekly --json --offline
+  ccusage_cached_v m claude monthly --json --offline
   # The scoped reports do NOT use the unified report's key names -- the
   # period each row covers is `date`, `week` and `month` respectively, where
   # `--sections` called all three `period`. Nothing errors on the
@@ -1379,7 +1675,8 @@ recent_sections_fetch() {
     '{ daily:   [ ($d.daily   // [])[] | .period = .date  ],
        weekly:  [ ($w.weekly  // [])[] | .period = .week  ],
        monthly: [ ($m.monthly // [])[] | .period = .month ] }' 2>/dev/null)
-  backfill_unpriced "$merged"
+  _rf_res=$(backfill_unpriced "$merged")
+  printf -v "$_rf_out" '%s' "$_rf_res"
 }
 
 # Fills in what ccusage priced at $0 (see unpriced_models) from the panel's
@@ -1627,8 +1924,8 @@ unpriced_share_pct() {
 # previous week the way `[-1]` would.
 current_week_cost() { # $1 = recent_sections payload
   local floor today cost
-  today=$(panel_date +%Y-%m-%d)
-  floor=$(panel_date -v-6d +%Y-%m-%d 2>/dev/null || panel_date -d '6 days ago' +%Y-%m-%d)
+  panel_day_v today 0 %Y-%m-%d
+  panel_day_v floor 6 %Y-%m-%d
   # ISO dates sort correctly as strings, so no date parsing is needed in jq.
   cost=$(jq -r --arg f "$floor" --arg t "$today" '
     [ .weekly[]? | select(.period >= $f and .period <= $t) ]
@@ -1781,6 +2078,25 @@ transcript_stamp_v() { # $1 = variable to set, $2 = path
 # at its LARGEST usage: streamed copies grow, and copies of a rewound
 # session carry zeros, so neither the first nor the last copy matches.
 # And the day is the timestamp's own UTC prefix, as ccusage's entries are.
+# The cache's answer for a session's tokens today into $1, with no process:
+# true on a hit; false when it must be worked out (session_today_tokens_cached).
+session_today_tokens_hit_v() { # $1 = variable to set, $2 = session id, $3 = today
+  local _st_c _st_path="" _st_key _st_file _st_stamp _st_line="" _st_cached
+  for _st_c in "$HOME"/.claude/projects/*/"$2".jsonl; do
+    [ -f "$_st_c" ] && { _st_path="$_st_c"; break; }
+  done
+  [ -n "$_st_path" ] || return 1
+  panel_hash16_v _st_key "$2"
+  _st_file="$CCUSAGE_CACHE_DIR/todaytok-$_st_key.tsv"
+  [ -f "$_st_file" ] || return 1
+  transcript_stamp_v _st_stamp "$_st_path"
+  IFS= read -r _st_line < "$_st_file"
+  _st_cached=${_st_line%%$'\t'*}
+  [ "$_st_cached" = "$_st_stamp:$3" ] || return 1
+  # cut -f2-: everything after the first tab (the line itself when none).
+  [[ $_st_line == *$'\t'* ]] && _st_line=${_st_line#*$'\t'}
+  printf -v "$1" '%s' "$_st_line"
+}
 session_today_tokens_cached() {
   local sid="$1" today="$2" path key cache_file stamp cached out
   path=""
@@ -1842,6 +2158,20 @@ TODAYTOK_PYEOF
 # $1 = transcript path. Prints the cached "sid\tmodel\tlabel\tfolder\tepoch"
 # tsv line, calling the identity-scan python only when path+mtime+size
 # changed since the last call (by any panel).
+# The cache's line for a transcript, fields 2 on, into $1 with no process:
+# true on a hit (session_identity_cached does the rest).
+session_identity_hit_v() { # $1 = variable to set, $2 = transcript path
+  local _si_key _si_file _si_stamp _si_line="" _si_cached
+  panel_hash16_v _si_key "$2"
+  _si_file="$CCUSAGE_CACHE_DIR/sessid-$_si_key.tsv"
+  [ -f "$_si_file" ] || return 1
+  transcript_stamp_v _si_stamp "$2"
+  IFS= read -r _si_line < "$_si_file"
+  _si_cached=${_si_line%%$'\t'*}
+  [ "$_si_cached" = "$_si_stamp" ] || return 1
+  [[ $_si_line == *$'\t'* ]] && _si_line=${_si_line#*$'\t'}
+  printf -v "$1" '%s' "$_si_line"
+}
 session_identity_cached() {
   local path="$1" key cache_file stamp cached
   key=$(printf '%s' "$path" | shasum -a 256 | cut -c1-16)
@@ -2553,6 +2883,40 @@ PYEOF
 # for exactly what session_stats_refresh asks for: the arguments are part of
 # the cache key, so anything else would parse every other session's
 # transcript a second time instead of reading the entry its own panel wrote.
+# turn_table_cached into $1, as $(...) gave it, with no process at all when
+# the cache holds this transcript's mtime and size: the key's hash is kept
+# (panel_hash16_v) and the file read with read. Anything else is
+# turn_table_cached's, in a $(...), as it was.
+turn_table_cached_v() { # $1 = variable to set, $2 = path, $3... = as turn_table_cached
+  local _tv_out="$1" _tv_path="$2" _tv_key _tv_file _tv_stamp _tv_all="" _tv_first _tv_res _tv_rc
+  shift 2
+  panel_hash16_v _tv_key "$_tv_path $* $PANEL_SELF_MTIME"
+  _tv_file="$CCUSAGE_CACHE_DIR/turns-$_tv_key.out"
+  transcript_stamp_v _tv_stamp "$_tv_path"
+  if [ -f "$_tv_file" ]; then
+    IFS= read -r -d '' _tv_all < "$_tv_file"
+    _tv_first=${_tv_all%%$'\n'*}
+    # As `IFS=$'\t' read -r cached` took the line: tabs at its ends dropped.
+    _tv_first=${_tv_first#"${_tv_first%%[!$'\t']*}"}
+    _tv_first=${_tv_first%"${_tv_first##*[!$'\t']}"}
+    if [ "$_tv_first" = "$_tv_stamp" ]; then
+      if [[ $_tv_all == *$'\n'* ]]; then _tv_all=${_tv_all#*$'\n'}; else _tv_all=""; fi
+      _tv_all=${_tv_all%"${_tv_all##*[!$'\n']}"}
+      printf -v "$_tv_out" '%s' "$_tv_all"
+      return 0
+    fi
+  fi
+  _tv_res=$(turn_table_cached "$_tv_path" "$@")
+  _tv_rc=$?
+  printf -v "$_tv_out" '%s' "$_tv_res"
+  return $_tv_rc
+}
+turn_table_series_v() { # $1 = variable to set, $2 = transcript path
+  turn_table_cached_v "$1" "$2" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
+    "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
+    "$C_MAGENTA" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE" \
+    "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DELTA_ALERT" "$C_ELECTRIC" series
+}
 turn_table_series() { # $1 = transcript path
   turn_table_cached "$1" "$TURN_ROWS" "$C_BOLD$C_CYAN" "$C_RESET" \
     "$C_CYAN" "$C_CYAN" "$C_GREEN" "$C_BLUE" "$C_RED" "$C_YELLOW" \
@@ -2599,17 +2963,32 @@ shared_memo() { # $1 = name, $2 = function, $3... = the variables it sets
   # build_trailing's "read -r day" emptied a local "day" here, so its file
   # was headed "# " and never read back.
   local _sm_f="$CCUSAGE_CACHE_DIR/shared-$1.sh" _sm_m _sm_day _sm_line _sm_now
-  _sm_day=$(panel_date +%Y-%m-%d)
-  if (( PANEL_SHARED_TTL > 0 )) && _sm_m=$(stat -f %m "$_sm_f" 2>/dev/null) \
-     && panel_now_v _sm_now && (( _sm_now - _sm_m < PANEL_SHARED_TTL )) \
+  # The day and the file's age in the shell: a date and a stat were two
+  # process starts a call, three calls a slow tick, in every panel.
+  panel_now_v _sm_now
+  printf -v _sm_day '%(%Y-%m-%d)T' "$_sm_now"
+  # The collector keeps these files for every panel (collector_slow_job), so
+  # while it is live a panel takes today's file however old: the collector
+  # replaces it every SLOW_REFRESH. The collector itself always computes.
+  if (( ! ${COLLECTOR_COMPUTE:-0} )) && (( COLLECTOR_LIVE && CS_SLOW_AT > 0 )) \
+     && [ -r "$_sm_f" ] && IFS= read -r _sm_line < "$_sm_f" && [ "$_sm_line" = "# $_sm_day" ]; then
+    # shellcheck disable=SC1090
+    source "$_sm_f" && return 0
+  fi
+  if (( ! ${COLLECTOR_COMPUTE:-0} )) && (( PANEL_SHARED_TTL > 0 )) && tick_stat "$_sm_f" _sm_m \
+     && (( _sm_now - ${_sm_m%% *} < PANEL_SHARED_TTL )) \
      && IFS= read -r _sm_line < "$_sm_f" && [ "$_sm_line" = "# $_sm_day" ]; then
     # shellcheck disable=SC1090
     source "$_sm_f" && return 0
   fi
   "$2"
-  mkdir -p "$CCUSAGE_CACHE_DIR"
+  [ -d "$CCUSAGE_CACHE_DIR" ] || mkdir -p "$CCUSAGE_CACHE_DIR"
   # declare -g: sourced inside this function, a plain declare makes locals.
-  { printf '# %s\n' "$_sm_day"; declare -p "${@:3}" 2>/dev/null | sed 's/^declare /declare -g /'; } \
+  # Each line's "declare " made "declare -g " in the shell, as sed did it.
+  local _sm_d
+  _sm_d=$'\n'$(declare -p "${@:3}" 2>/dev/null)
+  _sm_d=${_sm_d//$'\n'declare /$'\n'declare -g }
+  { printf '# %s' "$_sm_day"; printf '%s\n' "$_sm_d"; } \
     > "$_sm_f.$$.tmp" && mv -f "$_sm_f.$$.tmp" "$_sm_f"
 }
 
@@ -2630,8 +3009,10 @@ top_turns_compute() {
   tmp=$(mktemp "${TMPDIR:-/tmp}/ccusage-top-turns.XXXXXX") || return 0
   while IFS= read -r f; do
     [ -f "$f" ] || continue
-    out=$(turn_table_series "$f" 2>/dev/null) || continue
-    series=$(printf '%s\n' "$out" | sed -n '2p')
+    turn_table_series_v out "$f" 2>/dev/null || continue
+    # Its second line, as sed -n 2p gave it.
+    series=""
+    if [[ $out == *$'\n'* ]]; then series=${out#*$'\n'}; series=${series%%$'\n'*}; fi
     case "$series" in
       '#SERIES'*) printf '%s\t%s\n' "$f" "${series#*$'\t'}" >> "$tmp" ;;
     esac
@@ -2720,7 +3101,19 @@ TOPTURNS_PYEOF
       CACHE_LOSS_TURNS="$path"; CACHE_LOSS_USD="$turn"; CACHE_LOSS_30="$cost"; CACHE_LOSS_DAYS="$ctx"
       continue
     fi
-    folder=$(session_identity_cached "$path" 2>/dev/null | cut -f4)
+    if session_identity_hit_v folder "$path"; then
+      # cut -f4 of it: empty fields count, and a line with no tab is
+      # printed whole.
+      if [[ $folder == *$'\t'* ]]; then
+        local k
+        for k in 1 2 3; do
+          if [[ $folder == *$'\t'* ]]; then folder=${folder#*$'\t'}; else folder=""; break; fi
+        done
+        folder=${folder%%$'\t'*}
+      fi
+    else
+      folder=$(session_identity_cached "$path" 2>/dev/null | cut -f4)
+    fi
     json=$(jq -c --arg sid "$sid" --arg folder "$folder" --argjson turn "$turn" --argjson cost "$cost" \
       --argjson ctx "$ctx" --argjson at "$at" --argjson cache "$cache" --argjson delta "$delta" \
       --argjson gap "$gap" --argjson prev "$prev" --argjson reply "$reply" \
@@ -2751,7 +3144,7 @@ session_stats_refresh() {
   if (( PANEL_MEMO )) && [ "$latest|$ss_stamp" = "$SESS_MEMO_KEY" ]; then
     out=$SESS_MEMO_OUT
   else
-    out=$(turn_table_series "$latest")
+    turn_table_series_v out "$latest"
     SESS_MEMO_KEY=""
     if [ -n "$out" ]; then
       SESS_MEMO_KEY="$latest|$ss_stamp"
@@ -2942,7 +3335,7 @@ refresh_active_block() {
   # ---- active 5h block: fetched once here (not down in the ACTIVE BLOCK
   # section) so the summary line above can show the same burn-rate-derived
   # color as the detailed section, one source of truth, one API call.
-  block_json=$(ccusage_cached claude blocks --active --json --offline)
+  ccusage_cached_v block_json claude blocks --active --json --offline
   has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
   if [ "${has_block:-0}" = "1" ]; then
     # `localtime` before `strftime` is required, fromdateiso8601 hands back
@@ -2988,6 +3381,11 @@ refresh_active_block() {
 # $0.81 in 44 minutes, a true rate of ~$1.11/hr). Floor elapsed at 3
 # minutes for the same reason sess_elapsed_h does.
 block_clock_tick() {
+  # The collector's block, clock and all, worked out this tick for everyone.
+  if (( COLLECTOR_LIVE )) && [ -n "$CS_BLOCK" ]; then
+    eval "$CS_BLOCK"
+    return 0
+  fi
   [ "${has_block:-0}" = "1" ] || return
   local now_s
   panel_now_v now_s
@@ -3534,8 +3932,15 @@ resolve_session() {
     if [ -n "$PIN_SESSION_ID" ]; then
       latest="$project_dir/$PIN_SESSION_ID.jsonl"
       if [ ! -f "$latest" ]; then
-        latest=$(ls "$HOME"/.claude/projects/*/"$PIN_SESSION_ID".jsonl 2>/dev/null | head -1)
-        [ -n "$latest" ] && project_dir=$(dirname "$latest")
+        # The session's transcript under another project (its cwd moved):
+        # a glob and the first match, as `ls | head -1` and dirname gave it
+        # with three process starts a tick.
+        latest=""
+        local _rs_c
+        for _rs_c in "$HOME"/.claude/projects/*/"$PIN_SESSION_ID".jsonl; do
+          [ -e "$_rs_c" ] && { latest=$_rs_c; break; }
+        done
+        [ -n "$latest" ] && project_dir=${latest%/*}
       fi
     fi
     resolve_identity
@@ -3673,7 +4078,9 @@ resolve_identity() {
       sess_id=${ID_MEMO[0]} model_id=${ID_MEMO[1]} model_label=${ID_MEMO[2]}
       folder_name=${ID_MEMO[3]} sess_start_epoch=${ID_MEMO[4]}
     else
-      IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch < <(session_identity_cached "$latest")
+      local id_line=""
+      session_identity_hit_v id_line "$latest" || id_line=$(session_identity_cached "$latest")
+      IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch <<< "$id_line"
       ID_MEMO_KEY=""
       if [ -n "$sess_id" ]; then
         ID_MEMO_KEY="$latest|$id_stamp"
@@ -3689,7 +4096,22 @@ sess_elapsed_refresh() {
   [ -n "$latest" ] || return 0
   local now
   panel_now_v now
-  sess_elapsed_h=$(awk -v s="$sess_start_epoch" -v n="$now" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
+  local s="${sess_start_epoch:-}" d
+  case "$s" in
+    ''|*[!0-9]*)
+      sess_elapsed_h=$(awk -v s="$s" -v n="$now" 'BEGIN{ h=(n-s)/3600; if(h<0.05) h=0.05; print h }')
+      return 0 ;;
+  esac
+  # awk's `print h` in the shell: hours to twelve places, then %.6g, which
+  # is awk's OFMT (and prints a whole number of hours without a point, as
+  # awk does). Every headless tick ran this awk.
+  d=$(( now - s ))
+  if (( d < 180 )); then
+    sess_elapsed_h=0.05
+  else
+    printf -v sess_elapsed_h '%d.%012d' $(( d / 3600 )) $(( (d % 3600) * 1000000000000 / 3600 ))
+    printf -v sess_elapsed_h '%.6g' "$sess_elapsed_h"
+  fi
 }
 
 # ---- slow-tier render: the summary block ----
@@ -3703,23 +4125,29 @@ sess_elapsed_refresh() {
 # which is the honest reading of it: it is the "as of" stamp for every
 # number underneath, and it advances at exactly the rate the header claims.
 build_summary() {
-  printf '%sClaude Code Usage: %s %s\n' \
-    "$C_BOLD$C_CYAN" "$(panel_date '+%H:%M:%S')" "$(rate_tag "$RATE_SLOW")"
+  local bs_now bs_clock
+  panel_now_v bs_now
+  printf -v bs_clock '%(%H:%M:%S)T' "$bs_now"
+  printf '%sClaude Code Usage: %s %s(refresh %s)%s\n' \
+    "$C_BOLD$C_CYAN" "$bs_clock" "$C_ELECTRIC" "$RATE_SLOW" "$C_RESET"
   # ---- baselines: average per-session cost over 7 days, total spend over
   # 30 days. Session average needs >=3 real sessions to trust, otherwise a
   # single earlier tiny/huge session would skew it.
-  shared_memo summary summary_globals since7 since7_iso all_sess baseline_json avg_session_cost \
-    since30 since30_iso recent_json spend30 avg_daily_30 prev7_since prev7_until prev7_since_iso \
-    prev7_until_iso prev7_avg prev30_since prev30_until prev30_since_iso prev30_until_iso \
-    prev_spend30 prev_avg_daily_30 today_daily_json today_amt current_hour today_pred \
-    typical_so_far remaining_avg _pred_frac
+  # shellcheck disable=SC2086
+  shared_memo summary summary_globals $SUMMARY_MEMO_VARS
   summary_session
 }
+# What summary_globals sets, kept by shared_memo (and by the collector).
+SUMMARY_MEMO_VARS="since7 since7_iso all_sess baseline_json avg_session_cost \
+  since30 since30_iso recent_json spend30 avg_daily_30 prev7_since prev7_until prev7_since_iso \
+  prev7_until_iso prev7_avg prev30_since prev30_until prev30_since_iso prev30_until_iso \
+  prev_spend30 prev_avg_daily_30 today_daily_json today_amt current_hour today_pred \
+  typical_so_far remaining_avg _pred_frac"
 
 # The part of the summary that is every panel's: shared_memo's to share.
 summary_globals() {
-  since7=$(panel_date -v-7d +%Y%m%d 2>/dev/null || panel_date -d '7 days ago' +%Y%m%d)
-  since7_iso=$(panel_date -v-7d +%Y-%m-%d 2>/dev/null || panel_date -d '7 days ago' +%Y-%m-%d)
+  panel_day_v since7 7 %Y%m%d
+  panel_day_v since7_iso 7 %Y-%m-%d
   # Fetched ONCE for the whole frame. Three sections below are three views of
   # this one report -- the 7-day baseline, the previous 7 days it is compared
   # against, and this project's share of it -- and each used to call
@@ -3742,8 +4170,8 @@ summary_globals() {
   ' <<<"$baseline_json" 2>/dev/null)
   [ -z "$avg_session_cost" ] && avg_session_cost=0
 
-  since30=$(panel_date -v-29d +%Y%m%d 2>/dev/null || panel_date -d '29 days ago' +%Y%m%d)
-  since30_iso=$(panel_date -v-29d +%Y-%m-%d 2>/dev/null || panel_date -d '29 days ago' +%Y-%m-%d)
+  panel_day_v since30 29 %Y%m%d
+  panel_day_v since30_iso 29 %Y-%m-%d
   recent_json=$(recent_sections)
   # Same 30-day window `daily --since "$since30"` covered; summing the rows
   # reproduces that call's .totals.totalCost exactly (verified).
@@ -3755,20 +4183,20 @@ summary_globals() {
   # 7-day-avg and 30-day-spend lines can be traffic-lit against "am I
   # spending more than I was a week/month ago" rather than against
   # themselves (a baseline has nothing to compare to but its own past).
-  prev7_since=$(panel_date -v-14d +%Y%m%d 2>/dev/null || panel_date -d '14 days ago' +%Y%m%d)
-  prev7_until=$(panel_date -v-8d +%Y%m%d 2>/dev/null || panel_date -d '8 days ago' +%Y%m%d)
-  prev7_since_iso=$(panel_date -v-14d +%Y-%m-%d 2>/dev/null || panel_date -d '14 days ago' +%Y-%m-%d)
-  prev7_until_iso=$(panel_date -v-8d +%Y-%m-%d 2>/dev/null || panel_date -d '8 days ago' +%Y-%m-%d)
+  panel_day_v prev7_since 14 %Y%m%d
+  panel_day_v prev7_until 8 %Y%m%d
+  panel_day_v prev7_since_iso 14 %Y-%m-%d
+  panel_day_v prev7_until_iso 8 %Y-%m-%d
   prev7_avg=$(sessions_window "$all_sess" "$prev7_since_iso" "$prev7_until_iso" | jq -r '
     [.session[].totalCost] | map(select(. > 0.05)) |
     if length >= 3 then (add/length) else 0 end
   ' 2>/dev/null)
   [ -z "$prev7_avg" ] && prev7_avg=0
 
-  prev30_since=$(panel_date -v-58d +%Y%m%d 2>/dev/null || panel_date -d '58 days ago' +%Y%m%d)
-  prev30_until=$(panel_date -v-30d +%Y%m%d 2>/dev/null || panel_date -d '30 days ago' +%Y%m%d)
-  prev30_since_iso=$(panel_date -v-58d +%Y-%m-%d 2>/dev/null || panel_date -d '58 days ago' +%Y-%m-%d)
-  prev30_until_iso=$(panel_date -v-30d +%Y-%m-%d 2>/dev/null || panel_date -d '30 days ago' +%Y-%m-%d)
+  panel_day_v prev30_since 58 %Y%m%d
+  panel_day_v prev30_until 30 %Y%m%d
+  panel_day_v prev30_since_iso 58 %Y-%m-%d
+  panel_day_v prev30_until_iso 30 %Y-%m-%d
   prev_spend30=$(daily_window "$(recent_sections)" "$prev30_since_iso" "$prev30_until_iso" | jq -r '.totals.totalCost // 0')
   [ -z "$prev_spend30" ] && prev_spend30=0
   prev_avg_daily_30=$(awk -v s="$prev_spend30" 'BEGIN{ printf "%.4f", s/29 }')
@@ -3802,7 +4230,10 @@ summary_globals() {
   # The arithmetic moved to claude-day-projection.sh, which the cost-alert
   # hook also sources: it now ALERTS on this projection, and a panel drawing
   # one number while an alert fires on another is drift with consequences.
-  current_hour=$(( 10#$(panel_date +%H) ))
+  local _sg_now
+  panel_now_v _sg_now
+  printf -v current_hour '%(%H)T' "$_sg_now"
+  current_hour=$(( 10#$current_hour ))
   read -r today_pred typical_so_far remaining_avg _pred_frac <<<"$(
     project_today "$today_amt" "$HOURLY_BUCKET_CACHE" "$current_hour")"
   today_pred=$(LC_ALL=C awk -v v="$today_pred" 'BEGIN{printf "%.2f", v}')
@@ -3831,7 +4262,7 @@ summary_session() {
     # Model: already resolved from the transcript by resolve_session(). It
     # used to be sent to ccusage inside the statusline payload and read back
     # out of the rendered string it came home in.
-    mtc=$(model_tier_color "${model_id:-}")
+    model_tier_color_v mtc "${model_id:-}"
     # The session's own id, in the same last-5-characters form the Top
     # Sessions rows use, so the two can be read against each other -- that
     # matching is the whole reason it is on screen twice. After the model,
@@ -3886,32 +4317,47 @@ summary_session() {
   # per-session costs (not a token-repricing estimate), shown next to
   # the folder name rather than the account-wide block projection that
   # used to sit here. $project_dir needs no resolved session either.
-  proj_ids_json=$(ls "$project_dir"/*.jsonl 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.jsonl$//' | jq -R -s -c 'split("\n") | map(select(length>0))')
-  proj_spend=$(printf '%s' "$all_sess" | jq -r --argjson ids "$proj_ids_json" '
-    [.session[] | select(.period as $p | $ids | index($p) != null) | .totalCost] | add // 0
-  ')
+  # The ids are this project's transcripts, by a glob rather than
+  # ls | xargs basename | sed | jq, handed to the one jq as its arguments.
+  local -a proj_ids=()
+  local proj_f proj_money
+  for proj_f in "$project_dir"/*.jsonl; do
+    [ -e "$proj_f" ] || continue
+    proj_f=${proj_f##*/}
+    proj_ids+=("${proj_f%.jsonl}")
+  done
+  proj_spend=$(jq -r '
+    [.session[] | select(.period as $p | $ARGS.positional | index($p) != null) | .totalCost] | add // 0
+  ' --args ${proj_ids[@]+"${proj_ids[@]}"} <<<"$all_sess")
   # Electric blue on the name, for the same reason SID carries it: these are
   # strings you go looking for, not numbers you watch move, and the colour is
   # what separates the identity rows from the tier-coloured money below them.
   # The spend stays uncoloured, it has no threshold to be coloured against.
-  printf '  📁 Folder: %s%s%s%s (%s)\n' "$folder_cut" "$C_ELECTRIC" "$folder_disp" "$C_RESET" "$(fmt_money "$proj_spend")"
+  fmt_money_v proj_money "$proj_spend"
+  printf '  📁 Folder: %s%s%s%s (%s)\n' "$folder_cut" "$C_ELECTRIC" "$folder_disp" "$C_RESET" "$proj_money"
 
   # Session spend needs BOTH a resolved session and a priced turn in it;
   # the two used to be nested, which is why the "--" fallback had to be
   # written out twice with near-identical reasoning attached to each.
   if [ -n "$latest" ] && [ -n "$SESS_COST" ]; then
-    sess_amt=$(awk -v c="$SESS_COST" 'BEGIN{ printf "%.2f", c }')
+    if (( PANEL_FMT_BUILTIN )) && panel_plain_num "$SESS_COST"; then
+      printf -v sess_amt '%.2f' "$SESS_COST"
+    else
+      sess_amt=$(awk -v c="$SESS_COST" 'BEGIN{ printf "%.2f", c }')
+    fi
     # The same floor as the chat alert (CLAUDE_PANEL_ALERT_MIN_USD, the
     # dashboard's "Session alert only above"): the $5 default was hardcoded
     # here, so raising the setting quietened the alert but not this colour.
-    sc=$(tier_color "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$(panel_option_usd CLAUDE_PANEL_ALERT_MIN_USD "$MIN_SESSION_ALERT")")
+    local min_usd
+    panel_option_usd_v min_usd CLAUDE_PANEL_ALERT_MIN_USD "$MIN_SESSION_ALERT"
+    tier_color_v sc "$sess_amt" "$avg_session_cost" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$min_usd"
     # THIS session's own $/hr (spend so far ÷ time since its first
     # message), separate from the block burn rate below, which is
     # every session's combined spend in the current 5h window, not
     # just this one. Shown on the same row as the spend it's derived
     # from rather than its own line.
     sess_rate=$(awk -v c="$sess_amt" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.2f", c/h }')
-    src=$(threshold_color "$sess_rate" "$BURN_YELLOW" "$BURN_RED")
+    threshold_color_v src "$sess_rate" "$BURN_YELLOW" "$BURN_RED"
     printf '  💰 Session: %s$%s%s, Burn %s$%s/hr%s\n' \
       "$sc" "$sess_amt" "$C_RESET" "$src" "$sess_rate" "$C_RESET"
   else
@@ -3943,18 +4389,22 @@ summary_session() {
   if [ -n "$today_unpriced" ] && [ "$today_unpriced_small" != 1 ]; then
     printf '  📅 Today: %s? (unpriced model)%s\n' "$C_YELLOW" "$C_RESET"
   elif [ -n "$today_unpriced" ]; then
-    tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
+    tier_color_v tc "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT"
     printf '  📅 Today: %s$%s%s %s(+ unpriced, under 1%%)%s\n' \
       "$tc" "$today_amt" "$C_RESET" "$C_YELLOW" "$C_RESET"
   else
-    tc=$(tier_color "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
-    pc=$(tier_color "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT")
+    tier_color_v tc "$today_amt" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT"
+    tier_color_v pc "$today_pred" "$avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_DAILY_ALERT"
     printf '  📅 Today: %s$%s%s (by EOD: %s$%s%s)\n' \
       "$tc" "$today_amt" "$C_RESET" "$pc" "$today_pred" "$C_RESET"
   fi
 
   if [ "${has_block:-0}" = "1" ]; then
-    printf '  ⏳ Current Block: %s%s%s (%s left)\n' "$burn_color" "$(fmt_money "$blk_cost")" "$C_RESET" "$(fmt_hm "$blk_rem")"
+    local blk_money blk_left blk_rate_money
+    fmt_money_v blk_money "$blk_cost"
+    fmt_money_v blk_rate_money "$blk_cph"
+    blk_left=$(fmt_hm "$blk_rem")
+    printf '  ⏳ Current Block: %s%s%s (%s left)\n' "$burn_color" "$blk_money" "$C_RESET" "$blk_left"
     # This is the true average burn rate (blk_cost ÷ elapsed time) across
     # ALL sessions active in the current 5h block, not just this one,
     # ccusage's block cost total is already aggregated across every
@@ -3962,7 +4412,7 @@ summary_session() {
     # recomputed here instead of trusting ccusage's own
     # burnRate.costPerHour.
     printf '  🔥 All Sessions: %s%s/hr%s (%s)\n' \
-      "$burn_color" "$(fmt_money "$blk_cph")" "$C_RESET" "$burn_label"
+      "$burn_color" "$blk_rate_money" "$C_RESET" "$burn_label"
   else
     printf '  ⏳ Current Time Block: (no active block)\n'
   fi
@@ -3981,8 +4431,16 @@ summary_session() {
       # usage impossible to keep in check this week.
       ctx_tokens="$SESS_CTX"
       win_size="$SESS_WIN"
-      ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
-      ctx_color=$(ctx_tier_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")
+      # Whole numbers of tokens: the quotient to twelve places is exact
+      # enough that %.0f rounds it as awk rounded the double.
+      if [[ $ctx_tokens =~ ^[0-9]{1,12}$ && $win_size =~ ^[0-9]{1,7}$ ]] && (( 10#$win_size > 0 )); then
+        local ct=$(( 10#$ctx_tokens * 100 )) cw=$(( 10#$win_size ))
+        printf -v ctx_pct '%d.%012d' $(( ct / cw )) $(( (ct % cw) * 1000000000000 / cw ))
+        printf -v ctx_pct '%.0f' "$ctx_pct"
+      else
+        ctx_pct=$(awk -v t="$ctx_tokens" -v w="$win_size" 'BEGIN{ printf "%.0f", (w>0? t*100/w:0) }')
+      fi
+      ctx_tier_color_v ctx_color "$ctx_pct" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE"
       forced_note=""
       # Check the env var directly rather than re-deriving "was this model
       # actually forced down" from a hardcoded model-name list, that list
@@ -3997,9 +4455,16 @@ summary_session() {
       # Below that only the figure is tinted, so a routine yellow does not
       # make the whole header line shout.
       label_color=""
-      awk -v v="$ctx_pct" -v t="$CTX_RED" 'BEGIN{exit !(v+0>t)}' && label_color="$ctx_color"
+      if [[ $ctx_pct =~ ^[0-9]{1,15}$ && $CTX_RED =~ ^[0-9]{1,15}$ ]]; then
+        (( 10#$ctx_pct > 10#$CTX_RED )) && label_color="$ctx_color"
+      else
+        awk -v v="$ctx_pct" -v t="$CTX_RED" 'BEGIN{exit !(v+0>t)}' && label_color="$ctx_color"
+      fi
+      local ctx_m win_m
+      fmt_m_v ctx_m "$ctx_tokens"
+      fmt_m_v win_m "$win_size"
       printf '  %s🧠 Context: %s%s / %s tokens (%s%%)%s%s\n' \
-        "$label_color" "$ctx_color" "$(fmt_m "$ctx_tokens")" "$(fmt_m "$win_size")" "$ctx_pct" "$C_RESET" "$forced_note"
+        "$label_color" "$ctx_color" "$ctx_m" "$win_m" "$ctx_pct" "$C_RESET" "$forced_note"
       # Not while a pauseless compaction is about to replace this context:
       # the summary is ready, so restarting would only throw it away.
       [ "$SESS_COMPACTING" = 1 ] || restart_banner "$ctx_tokens"
@@ -4018,13 +4483,22 @@ summary_session() {
   # month's), a baseline has no natural threshold of its own, but a
   # widening gap vs its own past is exactly the "am I burning through
   # tokens faster than before" signal worth a color for.
-  spendc=$(tier_color "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
-  if awk -v a="$avg_daily_30" 'BEGIN{exit !(a>0)}'; then
-    avgc=$(tier_color "$avg_daily_30" "$prev_avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT")
+  tier_color_v spendc "$spend30" "$prev_spend30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT"
+  local spend_money avg_money avg_pos=0
+  fmt_money_v spend_money "$spend30"
+  # a > 0, in the shell for a plain decimal: no sign and a digit not 0.
+  if panel_plain_num "$avg_daily_30"; then
+    [[ $avg_daily_30 != -* && $avg_daily_30 == *[1-9]* ]] && avg_pos=1
+  elif awk -v a="$avg_daily_30" 'BEGIN{exit !(a>0)}'; then
+    avg_pos=1
+  fi
+  if (( avg_pos )); then
+    tier_color_v avgc "$avg_daily_30" "$prev_avg_daily_30" "$TIER_YELLOW_MULT" "$TIER_RED_MULT" "$MIN_TREND_ALERT"
+    fmt_money_v avg_money "$avg_daily_30"
     printf '  💵 30-Day Value: %s%s%s (avg %s%s/day%s)\n' \
-      "$spendc" "$(fmt_money "$spend30")" "$C_RESET" "$avgc" "$(fmt_money "$avg_daily_30")" "$C_RESET"
+      "$spendc" "$spend_money" "$C_RESET" "$avgc" "$avg_money" "$C_RESET"
   else
-    printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$(fmt_money "$spend30")" "$C_RESET"
+    printf '  💵 30-Day Value: %s%s%s\n' "$spendc" "$spend_money" "$C_RESET"
   fi
   proxy_state_line
   license_line
@@ -4038,12 +4512,19 @@ summary_session() {
 # ccusage call, no corpus scan -- which is why it can afford to run at
 # $REFRESH while everything else runs at $SLOW_REFRESH.
 build_session_table() {
+  local t
+  build_session_table_v t
+  printf '%s\n' "$t"
+}
+# The table into $1, with no subshell: the pane's loop asks for it every tick.
+build_session_table_v() { # $1 = variable to set
+  local _bt_out="$1" burn_money tag t
+  printf -v tag '%s(refresh %s)%s' "$C_ELECTRIC" "$RATE_FAST" "$C_RESET"
   # The blank separator line between the summary block and this one. It
   # lives at the top of this function rather than the bottom of
   # build_summary(), because $(...) strips trailing newlines -- a blank line
   # emitted as the last thing in the summary would simply not survive into
-  # the cached string.
-  echo
+  # the cached string. (The leading \n of t below.)
   # ---- per-turn breakdown of the current session ----
   # ccusage doesn't expose per-message cost (session/daily/blocks only give
   # per-session/day/block totals), so this reads the transcript directly and
@@ -4061,20 +4542,20 @@ build_session_table() {
     # never the burn figure it annotates.
     # block_clock_tick formats the rate as it computes it; fmt_money only
     # when that is not the rate here (no block yet, or one set by hand).
-    local burn_money
     if [ -n "${blk_cph_money:-}" ] && [ "${blk_cph:-0}" = "${blk_cph_money_of:-}" ]; then
       burn_money=$blk_cph_money
     else
       burn_money=$(fmt_money "${blk_cph:-0}")
     fi
-    printf '%sThis Session%s, Burn  %s%s/hr%s %s\n' \
+    printf -v t '\n%sThis Session%s, Burn  %s%s/hr%s %s\n%s' \
       "$C_BOLD$C_CYAN" "$C_RESET" "${burn_color:-$C_RESET}" "$burn_money" "$C_RESET" \
-      "$(rate_tag "$RATE_FAST")"
-    printf '%s\n' "$SESS_TABLE"
+      "$tag" "$SESS_TABLE"
   else
-    header "This Session $(rate_tag "$RATE_FAST")"
-    echo "  (no active Claude Code session found)"
+    printf -v t '\n%s%s%s\n  (no active Claude Code session found)' "$C_BOLD$C_CYAN" "This Session $tag" "$C_RESET"
   fi
+  # As $(build_session_table) gave it: trailing newlines dropped.
+  t=${t%"${t##*[!$'\n']}"}
+  printf -v "$_bt_out" '%s' "$t"
 }
 
 # ---- slow-tier render: Recent + Top Sessions Today ----
@@ -4187,8 +4668,8 @@ build_trailing() {
   else
     echo "  (no usage yet today)"
   fi
-  since3=$(panel_date -v-2d +%Y%m%d 2>/dev/null || panel_date -d '2 days ago' +%Y%m%d)
-  since3_iso=$(panel_date -v-2d +%Y-%m-%d 2>/dev/null || panel_date -d '2 days ago' +%Y-%m-%d)
+  panel_day_v since3 2 %Y%m%d
+  panel_day_v since3_iso 2 %Y-%m-%d
   trend_json=$(daily_window "$(recent_sections)" "$since3_iso" "")
   if [ -n "$trend_json" ]; then
     trend_line=""
@@ -4298,7 +4779,53 @@ build_trailing() {
 # every panel; its text, with this session's row marked, goes nowhere. So
 # they are worked out once for all panels, as the summary's are: 0.87 CPU-s
 # a slow tick per panel, the most of any slow step.
-trailing_figures() { build_trailing > /dev/null; }
+# The three figures shared_memo keeps of build_trailing (week, month and the
+# day's top sessions), worked out as build_trailing works them out, without
+# its text: that was a hundred and more process starts on a slow tick, for
+# lines nobody headless or in the collector reads. A session's tokens today
+# come from the cache in the shell; only the ones not cached run their
+# python, in parallel as before.
+trailing_figures() {
+  local rj session_json today month n rows sid all_cost all_tok slast tt tmpdir="" i fanout_pids="" tab=$'\t' input=""
+  local -a r_sid=() r_cost=() r_tok=() r_last=() r_today=()
+  rj=$(recent_sections)
+  week_cost=$(current_week_cost "$rj")
+  panel_day_v month 0 '%Y-%m'
+  month_cost=$(jq -r --arg m "$month" '[.monthly[]? | select(.period == $m) | .totalCost][0] // 0' <<<"$rj" 2>/dev/null)
+  [ -z "$month_cost" ] && month_cost=0
+  panel_day_v today 0 '%Y-%m-%d'
+  session_json=$(sessions_window "$(all_sessions)" "$today" "")
+  [ -n "$session_json" ] || return 0
+  n=$(jq -r '.session | length' <<<"$session_json" 2>/dev/null)
+  [ "$n" != "0" ] || return 0
+  rows=$(jq -r '.session[] | [.period, .totalCost, .totalTokens, .metadata.lastActivity] | @tsv' <<<"$session_json")
+  while IFS=$'\t' read -r sid all_cost all_tok slast; do
+    [ -z "$sid" ] && continue
+    r_sid+=("$sid") r_cost+=("$all_cost") r_tok+=("$all_tok") r_last+=("$slast")
+    tt=""
+    if ! session_today_tokens_hit_v tt "$sid" "$today"; then
+      [ -n "$tmpdir" ] || tmpdir=$(mktemp -d)
+      ( session_today_tokens_cached "$sid" "$today" > "$tmpdir/$sid.tok" ) &
+      fanout_pids="$fanout_pids $!"
+      tt="-"
+    fi
+    r_today+=("$tt")
+  done <<< "$rows"
+  for i in $fanout_pids; do wait "$i" 2>/dev/null; done
+  for (( i = 0; i < ${#r_sid[@]}; i++ )); do
+    tt=${r_today[i]}
+    if [ "$tt" = "-" ]; then
+      tt=""
+      [ -s "$tmpdir/${r_sid[i]}.tok" ] && IFS= read -r tt < "$tmpdir/${r_sid[i]}.tok"
+    fi
+    [ -z "$tt" ] && tt=${r_tok[i]}
+    input+="${r_sid[i]}$tab${r_cost[i]}$tab$tt$tab${r_tok[i]}$tab${r_last[i]}"$'\n'
+  done
+  [ -n "$tmpdir" ] && rm -rf "$tmpdir"
+  # Today's share of each session's cost, in one awk rather than one a row:
+  # the same %.10f of c*tt/at with the same numbers.
+  top_rows=$(awk -F'\t' 'NF { printf "%s\t%.10f\t%s\t%s\n", $1, ($4>0 ? $2*$3/$4 : 0), $3, $5 }' <<<"${input%$'\n'}")
+}
 trailing_refresh() { shared_memo trailing trailing_figures week_cost month_cost top_rows; }
 
 # Slow-tier render cache: the last string each slow section produced, plus
@@ -4315,10 +4842,17 @@ trailing_raw=""
 # same numbers and colours as this pane, with no second ccusage run. One file
 # per session, with the ANSI colours left in; files older than two days go.
 BAND_DIR="$HOME/.cache/ccusage-panel-cache/band"
+# Written when the block differs from what this panel last wrote there: the
+# mod reads the text, never the file's age, and the headless loop calls this
+# every tick, a mkdir, an mv and a find each time. Old files are swept when
+# it does write.
+BAND_LAST=""
 band_write() { # $1 = session id, $2 = summary block
   [ -n "$1" ] && [ -n "$2" ] || return 0
-  mkdir -p "$BAND_DIR" 2>/dev/null || return 0
-  printf '%s\n' "$2" > "$BAND_DIR/$1.ansi.$$" && mv -f "$BAND_DIR/$1.ansi.$$" "$BAND_DIR/$1.ansi"
+  local f="$BAND_DIR/$1.ansi"
+  [ "$1|$2" = "$BAND_LAST" ] && [ -f "$f" ] && return 0
+  [ -d "$BAND_DIR" ] || mkdir -p "$BAND_DIR" 2>/dev/null || return 0
+  printf '%s\n' "$2" > "$f.$$" && mv -f "$f.$$" "$f" && BAND_LAST="$1|$2"
   find "$BAND_DIR" -name '*.ansi' -mtime +2 -delete 2>/dev/null
   return 0
 }
@@ -4396,9 +4930,19 @@ compaction_pending() { # $1 = session id
   (( now - m > 900 )) && return 1
   if [ "$m|$1" != "$COMPACT_STATE_MTIME" ]; then
     COMPACT_STATE_MTIME="$m|$1"
-    COMPACT_PENDING=$(jq -r --arg p "$1|" \
-      '[to_entries[] | select(.key | startswith($p)) | select(.value.pending == true)] | length' \
-      "$COMPACT_STATE_FILE" 2>/dev/null)
+    local full="" key
+    tick_stat "$COMPACT_STATE_FILE" full
+    if (( COLLECTOR_LIVE )) && [ -n "$CS_COMPACT_STAMP" ] && [ "$CS_COMPACT_STAMP" = "$full" ]; then
+      # The collector's list of the pending keys, counted as the jq below.
+      COMPACT_PENDING=0
+      while IFS= read -r key; do
+        [[ $key == "$1|"* ]] && COMPACT_PENDING=$(( COMPACT_PENDING + 1 ))
+      done <<< "$CS_COMPACT_PENDING"
+    else
+      COMPACT_PENDING=$(jq -r --arg p "$1|" \
+        '[to_entries[] | select(.key | startswith($p)) | select(.value.pending == true)] | length' \
+        "$COMPACT_STATE_FILE" 2>/dev/null)
+    fi
   fi
   (( ${COMPACT_PENDING:-0} > 0 ))
 }
@@ -4564,16 +5108,26 @@ alert_alive() {
 }
 # The panel's own check that the gateway answers: its dashboard, every 10s.
 alert_health_tick() {
-  local url now
-  url=$(panel_gateway_url)
-  [ -n "$url" ] || return 0
-  panel_now_v now
-  (( now - ALERT_HEALTH_AT < 10 )) && return 0
-  ALERT_HEALTH_AT=$now
+  local url now ok
+  # The collector's check, when there is one: one curl for every panel.
+  if collector_health_v ok; then
+    [ -n "$CS_GW_URL" ] || return 0
+    (( ok == 2 )) && return 0
+    panel_now_v now
+    ALERT_HEALTH_AT=$now
+  else
+    panel_gateway_url_v url
+    [ -n "$url" ] || return 0
+    panel_now_v now
+    (( now - ALERT_HEALTH_AT < 10 )) && return 0
+    ALERT_HEALTH_AT=$now
+    ok=0
+    curl -s -o /dev/null -m 2 "$url" 2>/dev/null && ok=1
+  fi
   # Every panel notices on its own and holds the news like any other event
   # for no one session, so it shows over the Ghostty window in front, once.
   local item keep=()
-  if curl -s -o /dev/null -m 2 "$url" 2>/dev/null; then
+  if (( ok )); then
     ALERT_HEALTH_MISSES=0
     if (( ALERT_GW_DOWN )); then
       ALERT_GW_DOWN=0
@@ -4615,12 +5169,20 @@ alert_resolve() { # $1 = kind an ok resolves
 alert_held_tick() { # $1 = now
   (( ${#ALERT_HELD[@]} )) || return 0
   local front item id at sev kind title detail resolves keep=()
-  front=$(panel_front_pid)
+  # The app in front, asked once a tick by the collector for every panel
+  # while anything may be held; otherwise this panel asks.
+  if (( COLLECTOR_LIVE )) && [ -n "$CS_FRONT_AT" ] && [ "$CS_FRONT_AT" = "$CS_AT" ]; then
+    front=$CS_FRONT_PID
+  else
+    front=$(panel_front_pid)
+  fi
+  # Worked out once and kept: called here, not as $(...) in the loop.
+  panel_ghostty_pid >/dev/null
   for item in "${ALERT_HELD[@]}"; do
     IFS=$'\x1f' read -r id at sev kind title detail resolves <<< "$item"
     [ -d "$ALERT_CLAIMS/$id" ] && continue
     (( $1 - at < ALERT_HELD_FOR )) || continue
-    if [ -n "$front" ] && [ "$front" = "$(panel_ghostty_pid)" ]; then
+    if [ -n "$front" ] && [ "$front" = "$PANEL_GHOSTTY_PID" ]; then
       alert_claim "$id" && alert_take "$sev" "$kind" "$title" "$detail" "$resolves"
       continue
     fi
@@ -4665,9 +5227,18 @@ gateway_alerts_tick() { # $1 = this panel's session id
   # An unchanged file holds nothing this panel has not already taken in, so
   # it is not read again: ALERT_LAST_ID and ALERT_SINCE, which pick the new
   # events out of it, only move in this loop and in the branch above.
-  local alert_events=""
+  local alert_events="" alert_was=$ALERT_MTIME
   if alert_file_changed; then
-    alert_events=$(alert_new_events) || ALERT_MTIME=""
+    if collector_alert_events_v alert_events; then
+      :
+    elif (( COLLECTOR_LIVE )) && [ -n "$CS_ALERT_STAMP" ]; then
+      # The collector has not read this version yet: it will within a
+      # tick, and then this panel reads its copy rather than running a jq
+      # of its own, one for each panel every time the file changes.
+      ALERT_MTIME=$alert_was
+    else
+      alert_events=$(alert_new_events) || ALERT_MTIME=""
+    fi
   fi
   while IFS=$'\x1f' read -r sev kind title detail resolves id session; do
     [ -n "$id" ] || continue
@@ -4729,16 +5300,30 @@ gateway_alerts_tick() { # $1 = this panel's session id
 # silently disable a warning, so anything unparseable falls back.
 panel_option_int() { # $1 = KEY, $2 = default
   local v
-  panel_option_raw "$1" v
-  v=${v//[\"\' _,]/}
-  case "$v" in
-    ''|*[!0-9]*) printf '%s' "$2" ;;
-    *) printf '%s' "$((10#$v))" ;;
+  panel_option_int_v v "$1" "$2"
+  printf '%s' "$v"
+}
+panel_option_int_v() { # $1 = variable to set, $2 = KEY, $3 = default
+  local _pi
+  panel_option_raw "$2" _pi
+  _pi=${_pi//[\"\' _,]/}
+  case "$_pi" in
+    ''|*[!0-9]*) printf -v "$1" '%s' "$3" ;;
+    *) printf -v "$1" '%s' "$((10#$_pi))" ;;
   esac
 }
 
 # A dollar option: a plain non-negative number with at most one point, else
 # the default ($2). Same precedence and tolerance as the two above.
+panel_option_usd_v() { # $1 = variable to set, $2 = KEY, $3 = default
+  local _pu
+  panel_option_raw "$2" _pu
+  _pu=${_pu//[\"\' \$]/}
+  case "$_pu" in
+    ''|.|*[!0-9.]*|*.*.*) printf -v "$1" '%s' "$3" ;;
+    *) printf -v "$1" '%s' "$_pu" ;;
+  esac
+}
 panel_option_usd() { # $1 = KEY, $2 = default
   local v
   panel_option_raw "$1" v
@@ -4755,7 +5340,7 @@ panel_option_usd() { # $1 = KEY, $2 = default
 # token -- every turn re-reads it -- whether the window is 200k or 1M.
 restart_banner() { # $1 = context tokens
   local limit
-  limit=$(panel_option_int CLAUDE_PANEL_RESTART_TOKENS 400000)
+  panel_option_int_v limit CLAUDE_PANEL_RESTART_TOKENS 400000
   [ "$limit" -gt 0 ] && [ "${1:-0}" -ge "$limit" ] || return 0
   restart_banner_line off
   printf '\n'
@@ -4848,6 +5433,12 @@ remember_panel_width() { # $1 = this pane's columns
 # opens Burst's dashboard (admin_listen in its config.json, 127.0.0.1:7788
 # unless changed; none when it is "off").
 PANEL_CLOSE=0
+# Set here, above headless_main, and not only by the pane's loop below it:
+# panel_sleep reads it, and under set -u the headless panel, which never
+# reaches that loop, died on its first sleep. ccusage-panel-mod-start then
+# started it again every 30 seconds, 258 process starts a time, for every
+# session (v1.21.7, 17 Nov 2026).
+PANEL_REDRAW=0
 PANEL_INBUF=""
 PANEL_CLICK=""
 PANEL_GW_URL=""
@@ -4898,9 +5489,17 @@ panel_view_target() {
 }
 # " [View]" for the end of the Proxy State line, when there is a dashboard.
 panel_view_tag() {
+  local t
+  panel_view_tag_v t
+  printf '%s' "$t"
+}
+panel_view_tag_v() { # $1 = variable to set
+  local _vt_u
+  printf -v "$1" '%s' ""
   (( PANEL_CLOSE )) || return 0
-  [ -n "$(panel_gateway_url)" ] || return 0
-  printf ' %s%s%s' "$C_BTN_VIEW" "$PANEL_GW_LABEL" "$C_RESET"
+  panel_gateway_url_v _vt_u
+  [ -n "$_vt_u" ] || return 0
+  printf -v "$1" ' %s%s%s' "$C_BTN_VIEW" "$PANEL_GW_LABEL" "$C_RESET"
 }
 # Where [View] landed in a frame drawn from row 1: sets PANEL_GW_ROW and
 # PANEL_GW_COL, 0 when it is not there. The line's one emoji is two
@@ -5046,14 +5645,23 @@ panel_sleep_fd() {
 panel_sleep() { # $1 = whole seconds
   if (( ! PANEL_CLOSE )); then
     if panel_sleep_fd; then
-      local end left t
+      local end left t rc
       end=$(( ${EPOCHREALTIME/./} + $1 * 1000000 ))
-      while (( ! PANEL_REDRAW )); do
-        left=$(( end - ${EPOCHREALTIME/./} ))
-        (( left > 0 )) || break
+      # No `break` in here: on 17 Nov 2026 two panels killed in this loop
+      # went on running it, printing "break: only meaningful in a loop"
+      # without end (230 MB of it each). A read that ends any way but by
+      # timing out means the FIFO is no use: the rest is slept by sleep.
+      while (( ! PANEL_REDRAW )) && left=$(( end - ${EPOCHREALTIME/./} )) && (( left > 0 )); do
         (( left > 500000 )) && left=500000
         printf -v t '0.%06d' "$left"
         read -r -t "$t" -u "$PANEL_SLEEP_FD" _ 2>/dev/null
+        rc=$?
+        if (( rc <= 128 )); then
+          left=$(( (end - ${EPOCHREALTIME/./}) / 1000000 + 1 ))
+          sleep "$left" &
+          wait $! 2>/dev/null
+          return 0
+        fi
       done
       return 0
     fi
@@ -5070,9 +5678,22 @@ panel_sleep() { # $1 = whole seconds
 # The slow tier's fetches, shared by the pane's loop and the headless one: the
 # error file is cleared first, so what shows is this tick's failures rather
 # than every failure since the panel started.
+COLLECTOR_RECENT_SEQ=""
 slow_fetch() {
   : > "$PANEL_ERR_FILE"
-  RECENT_JSON=$(recent_sections_fetch 2>>"$PANEL_ERR_FILE")
+  # The collector's reports and block, when it is live and has fetched them:
+  # its failures are this panel's to show, as its own fetch's were.
+  if (( COLLECTOR_LIVE && ! ${COLLECTOR_COMPUTE:-0} )) && (( CS_SLOW_AT > 0 )) && [ -r "$COLLECTOR_RECENT" ]; then
+    if [ "$CS_SLOW_SEQ" != "$COLLECTOR_RECENT_SEQ" ]; then
+      RECENT_JSON=""
+      IFS= read -r -d '' RECENT_JSON < "$COLLECTOR_RECENT"
+      COLLECTOR_RECENT_SEQ=$CS_SLOW_SEQ
+    fi
+    [ -n "$CS_ERRORS" ] && printf '%s' "$CS_ERRORS" >> "$PANEL_ERR_FILE"
+    [ -n "$CS_BLOCK" ] && eval "$CS_BLOCK"
+    return 0
+  fi
+  recent_sections_fetch_v RECENT_JSON 2>>"$PANEL_ERR_FILE"
   refresh_active_block
 }
 
@@ -5092,7 +5713,8 @@ MOD_ALIVE_SECS="${PANEL_MOD_ALIVE_SECS:-90}"
 
 mod_alive() { # $1 = session id
   local f="$MOD_DIR/$1.alive" m now
-  m=$(stat -f %m "$f" 2>/dev/null) || return 1
+  tick_stat "$f" m || return 1
+  m=${m%% *}
   panel_now_v now
   (( now - m <= MOD_ALIVE_SECS ))
 }
@@ -5111,60 +5733,67 @@ mod_claim() { # $1 = session id
 
 # A colour code from the tier helpers, as the word the mod draws it with.
 tier_name() { # $1 = colour code
-  case "$1" in
-    "$C_GREEN") printf green ;;
-    "$C_YELLOW") printf yellow ;;
-    "$C_RED") printf red ;;
-    "$C_MAGENTA") printf purple ;;
-    "$C_CYAN") printf cyan ;;
-    *) printf '' ;;
+  local n
+  tier_name_v n "$1"
+  printf '%s' "$n"
+}
+tier_name_v() { # $1 = variable to set, $2 = colour code
+  local _tn=""
+  case "$2" in
+    "$C_GREEN") _tn=green ;;
+    "$C_YELLOW") _tn=yellow ;;
+    "$C_RED") _tn=red ;;
+    "$C_MAGENTA") _tn=purple ;;
+    "$C_CYAN") _tn=cyan ;;
   esac
+  printf -v "$1" '%s' "$_tn"
 }
 
 # Writes mod/<id>.json: the figures build_summary and build_trailing computed
 # on the last slow tick, this tick's turn figures, and the series behind the
 # graphs. Replaced whole, by rename, so the mod never reads half a file.
+mj_restart="" mj_dashboard="" mj_console=""
 mod_json_write() { # $1 = session id
   local sid="$1" out="$MOD_DIR/$1.json"
   [ -n "$sid" ] || return 0
-  mkdir -p "$MOD_DIR"
-  local sess_tier="" rate_tier="" today_tier="" pred_tier="" ctx_tier="" spend_tier="" avg_tier="" model_tier=""
-  [ -n "${sc:-}" ] && sess_tier=$(tier_name "$sc")
-  [ -n "${src:-}" ] && rate_tier=$(tier_name "$src")
-  [ -n "${tc:-}" ] && today_tier=$(tier_name "$tc")
-  [ -n "${pc:-}" ] && pred_tier=$(tier_name "$pc")
-  [ -n "${spendc:-}" ] && spend_tier=$(tier_name "$spendc")
-  [ -n "${avgc:-}" ] && avg_tier=$(tier_name "$avgc")
-  [ -n "${mtc:-}" ] && model_tier=$(tier_name "$mtc")
-  if [ -n "$SESS_CTX" ] && [ -n "$SESS_WIN" ] && [ "$SESS_WIN" != 0 ]; then
-    ctx_tier=$(tier_name "$(ctx_tier_color "$(awk -v t="$SESS_CTX" -v w="$SESS_WIN" 'BEGIN{printf "%.0f", t*100/w}')" "$CTX_YELLOW" "$CTX_RED" "$CTX_PURPLE")")
-  fi
-  local sess_rate_now="" sess_rate_tier=""
-  if [ -n "$SESS_COST" ] && [ -n "${sess_elapsed_h:-}" ]; then
-    sess_rate_now=$(awk -v c="$SESS_COST" -v h="$sess_elapsed_h" 'BEGIN{ printf "%.4f", c/h }')
-    sess_rate_tier=$(tier_name "$(threshold_color "$sess_rate_now" "$BURN_YELLOW" "$BURN_RED")")
-  fi
-  local errs_file="${PANEL_ERR_FILE:-/dev/null}"
-  # Settings read from files (two jq runs and a grep), looked up again only
-  # after a slow tick rather than on every write: a fifth of the write's cost.
+  [ -d "$MOD_DIR" ] || mkdir -p "$MOD_DIR"
+  # Every name here is set in the shell (tier_name_v), and the session's
+  # context tier and burn rate are worked out by the python below, which runs
+  # anyway: they were an awk and a dozen $(...) a write, every tick.
+  local sess_tier="" rate_tier="" today_tier="" pred_tier="" spend_tier="" avg_tier="" model_tier="" burn_tier=""
+  [ -n "${sc:-}" ] && tier_name_v sess_tier "$sc"
+  [ -n "${src:-}" ] && tier_name_v rate_tier "$src"
+  [ -n "${tc:-}" ] && tier_name_v today_tier "$tc"
+  [ -n "${pc:-}" ] && tier_name_v pred_tier "$pc"
+  [ -n "${spendc:-}" ] && tier_name_v spend_tier "$spendc"
+  [ -n "${avgc:-}" ] && tier_name_v avg_tier "$avgc"
+  [ -n "${mtc:-}" ] && tier_name_v model_tier "$mtc"
+  tier_name_v burn_tier "${burn_color:-}"
+  local errs_file="${PANEL_ERR_FILE:-/dev/null}" mj_errors="" mj_now
+  # Read only when there is something in it: sort and head were two process
+  # starts every write, for an empty file nearly always.
+  [ -s "$errs_file" ] && mj_errors=$(sort -u "$errs_file" 2>/dev/null | head -5)
+  panel_now_v mj_now
+  # Settings read from files, looked up again only after a slow tick rather
+  # than on every write.
   if [ "${mj_conf_at-unset}" != "${last_slow:-0}" ]; then
-    mj_restart=$(panel_option_int CLAUDE_PANEL_RESTART_TOKENS 400000)
-    mj_dashboard=$(panel_gateway_url)
-    mj_console=$(burst_console_url)
+    panel_option_int_v mj_restart CLAUDE_PANEL_RESTART_TOKENS 400000
+    panel_gateway_url_v mj_dashboard
+    burst_console_url_v mj_console
     mj_conf_at=${last_slow:-0}
   fi
-  MJ_SID="$sid" MJ_NOW="$(panel_now)" MJ_SLOW_AT="${last_slow:-0}" \
+  MJ_SID="$sid" MJ_NOW="$mj_now" MJ_SLOW_AT="${last_slow:-0}" \
   MJ_REFRESH="$REFRESH" MJ_SLOW_REFRESH="$SLOW_REFRESH" \
   MJ_MODEL="${model_label:-}" MJ_MODEL_ID="${model_id:-}" MJ_MODEL_TIER="$model_tier" \
   MJ_FOLDER="${folder_name:-}" MJ_FOLDER_SPEND="${proj_spend:-}" \
-  MJ_SESS_COST="$SESS_COST" MJ_SESS_TIER="$sess_tier" MJ_SESS_RATE="$sess_rate_now" MJ_SESS_RATE_TIER="$sess_rate_tier" \
+  MJ_SESS_COST="$SESS_COST" MJ_SESS_TIER="$sess_tier" MJ_SESS_ELAPSED_H="${sess_elapsed_h:-}" \
   MJ_SESS_START="${sess_start_epoch:-0}" MJ_AVG_SESSION="${avg_session_cost:-0}" \
-  MJ_CTX="$SESS_CTX" MJ_WIN="$SESS_WIN" MJ_CTX_TIER="$ctx_tier" MJ_COMPACTING="$SESS_COMPACTING" \
+  MJ_CTX="$SESS_CTX" MJ_WIN="$SESS_WIN" MJ_COMPACTING="$SESS_COMPACTING" \
   MJ_RESTART_TOKENS="$mj_restart" \
   MJ_TODAY="${today_amt:-}" MJ_TODAY_TIER="$today_tier" MJ_PRED="${today_pred:-}" MJ_PRED_TIER="$pred_tier" \
   MJ_TODAY_UNPRICED="${today_unpriced:-}" MJ_TYPICAL_SO_FAR="${typical_so_far:-}" \
   MJ_BLOCK="${has_block:-0}" MJ_BLK_COST="${blk_cost:-0}" MJ_BLK_CPH="${blk_cph:-0}" MJ_BLK_REM="${blk_rem:-0}" \
-  MJ_BURN_LABEL="${burn_label:-}" MJ_BURN_TIER="$(tier_name "${burn_color:-}")" \
+  MJ_BURN_LABEL="${burn_label:-}" MJ_BURN_TIER="$burn_tier" \
   MJ_SPEND30="${spend30:-0}" MJ_PREV_SPEND30="${prev_spend30:-0}" MJ_SPEND_TIER="$spend_tier" \
   MJ_AVG30="${avg_daily_30:-0}" MJ_PREV_AVG30="${prev_avg_daily_30:-0}" MJ_AVG_TIER="$avg_tier" \
   MJ_WEEK="${week_cost:-0}" MJ_MONTH="${month_cost:-0}" \
@@ -5173,7 +5802,7 @@ mod_json_write() { # $1 = session id
   MJ_CACHE_LOSS="${CACHE_LOSS_USD:-}" MJ_CACHE_LOSS_TURNS="${CACHE_LOSS_TURNS:-}" \
   MJ_CACHE_LOSS_30="${CACHE_LOSS_30:-}" MJ_CACHE_LOSS_DAYS="${CACHE_LOSS_DAYS:-}" \
   MJ_SUMMARY="${summary_block:-}" MJ_TABLE="$SESS_TABLE" \
-  MJ_ERRORS="$(sort -u "$errs_file" 2>/dev/null | head -5)" \
+  MJ_ERRORS="$mj_errors" \
   MJ_THRESHOLDS="$CTX_YELLOW $CTX_RED $CTX_PURPLE $BURN_YELLOW $BURN_RED $TIER_YELLOW_MULT $TIER_RED_MULT" \
   MJ_HOURLY="${HOURLY_BUCKET_CACHE:-}" \
   MJ_BURST_DASHBOARD="$mj_dashboard" MJ_BURST_CONSOLE="$mj_console" \
@@ -5281,6 +5910,39 @@ for line in E.get("MJ_TOP", "").splitlines():
 top.sort(key=lambda r: -r["cost"])
 
 th = (E.get("MJ_THRESHOLDS", "") + " 0 0 0 0 0 0 0").split()
+
+def over(v, t):
+    try:
+        return float(v) > float(t)
+    except ValueError:
+        return False
+
+# What the shell did with awk before this python ran: the context as a whole
+# percent of the window, coloured by ctx_tier_color's three thresholds, and
+# the session's cost over its hours to four places, coloured by
+# threshold_color's two. Same doubles, same %.0f and %.4f, same comparisons
+# of the printed figure.
+ctx_tier = ""
+if text("MJ_CTX") and text("MJ_WIN") and text("MJ_WIN") != "0":
+    try:
+        pct = "%.0f" % (float(text("MJ_CTX")) * 100 / float(text("MJ_WIN")))
+        ctx_tier = "green"
+        if over(pct, th[0]): ctx_tier = "yellow"
+        if over(pct, th[1]): ctx_tier = "red"
+        if over(pct, th[2]): ctx_tier = "purple"
+    except (ValueError, ZeroDivisionError):
+        ctx_tier = ""
+sess_rate, sess_rate_tier = None, ""
+if text("MJ_SESS_COST") and text("MJ_SESS_ELAPSED_H"):
+    try:
+        rs = "%.4f" % (float(text("MJ_SESS_COST")) / float(text("MJ_SESS_ELAPSED_H")))
+        sess_rate = float(rs)
+        sess_rate_tier = "green"
+        if over(rs, th[3]): sess_rate_tier = "yellow"
+        if over(rs, th[4]): sess_rate_tier = "red"
+    except (ValueError, ZeroDivisionError):
+        sess_rate, sess_rate_tier = None, ""
+
 doc = {
     "v": 1,
     "at": int(num("MJ_NOW") or time.time()),
@@ -5292,9 +5954,9 @@ doc = {
         "model": text("MJ_MODEL"), "model_id": text("MJ_MODEL_ID"), "model_tier": text("MJ_MODEL_TIER"),
         "folder": text("MJ_FOLDER"), "folder_spend": num("MJ_FOLDER_SPEND"),
         "cost": num("MJ_SESS_COST"), "tier": text("MJ_SESS_TIER"),
-        "rate": num("MJ_SESS_RATE"), "rate_tier": text("MJ_SESS_RATE_TIER"),
+        "rate": sess_rate, "rate_tier": sess_rate_tier,
         "started": int(num("MJ_SESS_START") or 0), "avg_session": num("MJ_AVG_SESSION"),
-        "ctx": num("MJ_CTX"), "win": num("MJ_WIN"), "ctx_tier": text("MJ_CTX_TIER"),
+        "ctx": num("MJ_CTX"), "win": num("MJ_WIN"), "ctx_tier": ctx_tier,
         "compacting": text("MJ_COMPACTING") == "1", "restart_tokens": num("MJ_RESTART_TOKENS"),
     },
     "today": {
@@ -5339,11 +6001,18 @@ PYEOF
 # Claude Burst's support console, for [View] when the dashboard does not
 # answer (see panel_view_target). Empty without Burst.
 burst_console_url() {
-  [ -n "$(panel_gateway_url)" ] || return 0
-  local c
+  local u
+  burst_console_url_v u
+  printf '%s' "$u"
+}
+burst_console_url_v() { # $1 = variable to set
+  local c g
+  printf -v "$1" '%s' ""
+  panel_gateway_url_v g
+  [ -n "$g" ] || return 0
   burst_cfg_load "$HOME/.config/claude-burst/config.json"
   c=$BURST_CONSOLE
-  case "$c" in ''|off|null) ;; *) printf 'http://%s/' "$c" ;; esac
+  case "$c" in ''|off|null) ;; *) printf -v "$1" 'http://%s/' "$c" ;; esac
 }
 
 # Files of sessions whose mod has gone, after two days. Not the .pid files:
@@ -5358,8 +6027,9 @@ mod_prune() {
 # True while this process still holds mod/<id>.pid: a panel that finds
 # another live one holding it stops, so one session never has two.
 mod_still_ours() { # $1 = session id
-  local held
-  held=$(<"$MOD_DIR/$1.pid") 2>/dev/null
+  local held=""
+  # read, not $(<...): a command substitution is a fork, every tick.
+  { IFS= read -r held < "$MOD_DIR/$1.pid"; } 2>/dev/null
   [ -z "$held" ] || [ "$held" = "$$" ] || ! kill -0 "$held" 2>/dev/null
 }
 
@@ -5408,8 +6078,10 @@ panel_dock_lists() { # $1 = session id
 summary_proxy_fresh() {
   local fresh line out="" nl=$'\n'
   case "$summary_block" in *"Proxy State:"*) ;; *) return 0 ;; esac
-  fresh=$(proxy_state_line 2>/dev/null) || return 0
+  proxy_state_line_v fresh 2>/dev/null || return 0
   [ -n "$fresh" ] || return 0
+  # Unchanged, the block is as it was: no rebuild.
+  case "$summary_block" in *"$fresh"*) return 0 ;; esac
   while IFS= read -r line; do
     case "$line" in *"Proxy State:"*) line="$fresh" ;; esac
     out+="$line$nl"
@@ -5432,6 +6104,10 @@ summary_proxy_fresh_changed() {
 panel_tick_begin() { # $1 = this panel's session id, $2 = light
   tick_stat_batch "$PANEL_SELF" "${latest:-}" "$COMPACT_STATE_FILE" "$ALERT_FILE" \
     "$DOCK_VISIBLE_FILE" ${1:+"$MOD_TOASTS_DIR/$1"}
+  # What the collector worked out for every panel, and a collector when
+  # there is none (see collector_read).
+  collector_read
+  collector_ensure
   [ "${2:-}" = light ] && return 0
   local cfg="$HOME/.config/claude-burst/config.json"
   BURST_CFG_HELD=0
@@ -5505,6 +6181,423 @@ panel_idle_wait() { # $1 = frame on screen
   done
 }
 
+# ---- one collector for every panel ----------------------------------------
+# A dozen sessions is a dozen panels, and most of what each worked out every
+# tick was the same in all of them: whether Burst's gateway answers (a curl),
+# Burst's config (a jq), the Proxy State line, the 5h block's clock (an awk),
+# which notices are new and which sessions are compacting (a jq each), and
+# on the slow tier every ccusage report, the 30-day baselines, the week and
+# month, the day's top sessions and turns. ccusage-panel-collector works that
+# out once a tick for all of them and writes it to collector/state.sh; each
+# panel reads that file (a builtin read, no process) and keeps to itself only
+# what is its own: its transcript, its turn table, its alerts, its files.
+#
+# Lifecycle. The first panel that finds no fresh state.sh starts the
+# collector, detached (collector_ensure). The collector holds collector/lock
+# (mkdir, atomic; the pid inside), so two panels starting one at once leave
+# one running. Panels list themselves in collector/panels/<pid>; when none of
+# those pids is alive for COLLECTOR_LINGER seconds the collector exits, and
+# the next panel to start brings it back. One that dies is started again by
+# the next panel to find state.sh stale. It re-execs, as the panels do, when
+# ccusage-panel.sh changes.
+#
+# state.sh is bash: "# collector <seq>", assignments printed with %q, then
+# "# end <seq>". It is rewritten in place, with no temporary file and no mv
+# (a process start a tick): a panel that reads it mid-write finds the two
+# seq lines missing or different and keeps what it had, for one tick.
+#
+# A panel never depends on it. With no collector, or a state.sh older than
+# COLLECTOR_STALE_SECS, or PANEL_COLLECTOR=0, every figure is worked out in
+# the panel exactly as before there was a collector, so a collector that has
+# died costs process starts, never a wrong or blank figure.
+COLLECTOR_DIR="$CCUSAGE_CACHE_DIR/collector"
+COLLECTOR_STATE="$COLLECTOR_DIR/state.sh"
+COLLECTOR_LOCK="$COLLECTOR_DIR/lock"
+COLLECTOR_PANELS="$COLLECTOR_DIR/panels"
+COLLECTOR_RECENT="$COLLECTOR_DIR/recent.json"
+COLLECTOR_SLOW="$COLLECTOR_DIR/slow.sh"
+COLLECTOR_ERRS="$COLLECTOR_DIR/errors.log"
+COLLECTOR_STALE_SECS="${COLLECTOR_STALE_SECS:-$(( REFRESH * 3 ))}"
+COLLECTOR_LINGER="${COLLECTOR_LINGER:-60}"
+PANEL_COLLECTOR="${PANEL_COLLECTOR:-1}"
+COLLECTOR_SELF="${COLLECTOR_SELF:-${PANEL_SELF%/*}/ccusage-panel-collector}"
+COLLECTOR_LIVE=0
+COLLECTOR_SEQ_SEEN=""
+COLLECTOR_SPAWN_OK=0
+COLLECTOR_SPAWNED_AT=0
+COLLECTOR_REGISTERED=""
+# What state.sh sets. Defaults, so a panel that has never read one still
+# runs under set -u.
+CS_SEQ="" CS_AT=0 CS_PID=0 CS_GW_URL="" CS_GW_SEQ=0 CS_GW_OK=0
+CS_PROXY_LINE="" CS_PROXY_LINE_VIEW="" CS_ALERT_STAMP="" CS_ALERT_EVENTS=""
+CS_COMPACT_STAMP="" CS_COMPACT_PENDING="" CS_SLOW_SEQ=0 CS_SLOW_AT=0 CS_BLOCK=""
+CS_ERRORS="" CS_FRONT_AT="" CS_FRONT_PID=""
+# The block's figures, set together by refresh_active_block and
+# block_clock_tick, and carried in state.sh together.
+COLLECTOR_BLOCK_VARS="has_block blk_start blk_end blk_start_epoch blk_end_epoch blk_cost blk_tokens blk_tpm blk_projCost blk_projTokens blk_models blk_elapsed_h blk_cph blk_rem burn_color burn_label blk_cph_money blk_cph_money_of"
+
+# Reads state.sh into this shell when it is whole and new, and decides
+# COLLECTOR_LIVE: a whole file under COLLECTOR_STALE_SECS old whose
+# collector is alive. No process starts.
+collector_read() {
+  COLLECTOR_LIVE=0
+  (( PANEL_COLLECTOR )) || return 0
+  [ -r "$COLLECTOR_STATE" ] || return 0
+  local _cr_txt="" _cr_head _cr_seq _cr_tail _cr_now
+  IFS= read -r -d '' _cr_txt < "$COLLECTOR_STATE"
+  _cr_head=${_cr_txt%%$'\n'*}
+  case "$_cr_head" in '# collector '*) ;; *) return 0 ;; esac
+  _cr_seq=${_cr_head#'# collector '}
+  _cr_tail=${_cr_txt%$'\n'}
+  _cr_tail=${_cr_tail##*$'\n'}
+  [ "$_cr_tail" = "# end $_cr_seq" ] || return 0
+  if [ "$_cr_seq" != "$COLLECTOR_SEQ_SEEN" ]; then
+    eval "$_cr_txt" 2>/dev/null || return 0
+    COLLECTOR_SEQ_SEEN=$_cr_seq
+  fi
+  panel_now_v _cr_now
+  (( _cr_now - CS_AT <= COLLECTOR_STALE_SECS )) || return 0
+  [ "$CS_PID" -gt 1 ] 2>/dev/null && kill -0 "$CS_PID" 2>/dev/null || return 0
+  COLLECTOR_LIVE=1
+}
+
+# A panel in a loop lists itself, so the collector knows someone still wants
+# it. Rewritten only when the session changes.
+collector_register() { # $1 = session id
+  (( PANEL_COLLECTOR )) || return 0
+  [ "${1:-}|$$" = "$COLLECTOR_REGISTERED" ] && return 0
+  [ -d "$COLLECTOR_PANELS" ] || mkdir -p "$COLLECTOR_PANELS" 2>/dev/null || return 0
+  printf '%s\n' "${1:-}" > "$COLLECTOR_PANELS/$$" 2>/dev/null && COLLECTOR_REGISTERED="${1:-}|$$"
+}
+
+# Starts the collector when there is none: no live state.sh, and no live pid
+# in the lock. At most once a minute from one panel, so a collector that
+# cannot start does not cost a process start every tick.
+collector_ensure() {
+  (( PANEL_COLLECTOR && COLLECTOR_SPAWN_OK && ! COLLECTOR_LIVE )) || return 0
+  [ -x "$COLLECTOR_SELF" ] || return 0
+  local now held=""
+  panel_now_v now
+  (( now - COLLECTOR_SPAWNED_AT < 60 )) && return 0
+  { IFS= read -r held < "$COLLECTOR_LOCK/pid"; } 2>/dev/null
+  if [ -n "$held" ] && kill -0 "$held" 2>/dev/null; then
+    return 0
+  fi
+  COLLECTOR_SPAWNED_AT=$now
+  # It serves every panel, so closing this one's terminal must not take it:
+  # SIGHUP is ignored before the exec, and a signal ignored when bash starts
+  # stays ignored; an async command of a script already ignores SIGINT.
+  ( trap '' HUP; exec "${BASH:-bash}" "$COLLECTOR_SELF" "$REFRESH" "$TURN_ROWS" </dev/null >/dev/null 2>&1 ) &
+}
+
+# How many panels still want the collector; dead ones' files go.
+collector_panels_alive() {
+  local f pid n=0
+  for f in "$COLLECTOR_PANELS"/*; do
+    [ -e "$f" ] || continue
+    pid=${f##*/}
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    if kill -0 "$pid" 2>/dev/null; then
+      n=$(( n + 1 ))
+    else
+      rm -f "$f"
+    fi
+  done
+  return $(( n == 0 ))
+}
+
+# Takes the lock, or returns 1 when another live collector has it.
+collector_lock() {
+  local held="" m now
+  mkdir -p "$COLLECTOR_DIR" 2>/dev/null
+  if ! mkdir "$COLLECTOR_LOCK" 2>/dev/null; then
+    { IFS= read -r held < "$COLLECTOR_LOCK/pid"; } 2>/dev/null
+    [ "$held" = "$$" ] && return 0
+    if [ -n "$held" ] && kill -0 "$held" 2>/dev/null; then
+      return 1
+    fi
+    # No pid yet: one that has just made the lock is writing it.
+    if [ -z "$held" ] && tick_stat "$COLLECTOR_LOCK" m; then
+      panel_now_v now
+      (( now - ${m%% *} < 5 )) && return 1
+    fi
+    rm -rf "$COLLECTOR_LOCK"
+    mkdir "$COLLECTOR_LOCK" 2>/dev/null || return 1
+  fi
+  printf '%s\n' "$$" > "$COLLECTOR_LOCK/pid"
+}
+collector_unlock() {
+  local held=""
+  { IFS= read -r held < "$COLLECTOR_LOCK/pid"; } 2>/dev/null
+  [ "$held" = "$$" ] && rm -rf "$COLLECTOR_LOCK"
+}
+
+# The slow tier, for everyone: every ccusage report and the figures shared_memo
+# keeps (summary, trailing, top turns), written where the panels read them.
+# Run in the background, so a cold corpus scan (a minute or more) does not
+# hold up the fast tick, which the panels are waiting on.
+collector_slow_job() {
+  COLLECTOR_COMPUTE=1
+  PANEL_ERR_FILE="$COLLECTOR_ERRS.$BASHPID"
+  slow_fetch
+  printf '%s' "$RECENT_JSON" > "$COLLECTOR_RECENT.$BASHPID" && mv -f "$COLLECTOR_RECENT.$BASHPID" "$COLLECTOR_RECENT"
+  # The figures summary_globals and build_trailing set, kept by shared_memo
+  # for the panels; the session-specific parts of both stay in each panel.
+  shared_memo summary summary_globals $SUMMARY_MEMO_VARS 2>>"$PANEL_ERR_FILE"
+  trailing_refresh 2>>"$PANEL_ERR_FILE"
+  top_turns_refresh 2>>"$PANEL_ERR_FILE"
+  {
+    local v
+    printf 'CS_SLOW_AT=%q\n' "$(panel_now)"
+    for v in $COLLECTOR_BLOCK_VARS; do printf '%s=%q\n' "$v" "${!v-}"; done
+    # The keys this job hashed, for the next: each job is a fork of the
+    # collector, and a hash it learns would otherwise die with it.
+    for v in "${!PANEL_HASH_MEMO[@]}"; do printf 'PANEL_HASH_MEMO[%q]=%q\n' "$v" "${PANEL_HASH_MEMO[$v]}"; done
+  } > "$COLLECTOR_SLOW.$BASHPID" && mv -f "$COLLECTOR_SLOW.$BASHPID" "$COLLECTOR_SLOW"
+  mv -f "$PANEL_ERR_FILE" "$COLLECTOR_ERRS"
+}
+
+# notices.json, every event, in the shape alert_new_events gives one plus its
+# id and its ts first, so a panel picks its new ones out in the shell. ts is
+# "n<number>", or "g"/"l" for a value jq orders above or below every number.
+collector_alert_events() {
+  jq -r '(.events // [])[]
+    | [ (.ts | if type == "number" then "n" + tostring
+               elif (type == "null" or type == "boolean") then "l" else "g" end),
+        .severity, .kind, .title, (.detail // ""), (.resolves // ""), .id, (.session // "")]
+    | map(gsub("[\u001f\n]"; " ")) | join("\u001f")' "$ALERT_FILE" 2>/dev/null
+}
+
+# Does the gateway answer: curl -s -o /dev/null -m 2, which passes on any
+# HTTP reply. A plain http URL on this Mac is asked through bash's own
+# /dev/tcp, with no process: the curl was one process start every tick.
+# Anything else (https, another host) still goes to curl.
+collector_gw_probe() { # $1 = url
+  local hp path host port fd line=""
+  case "$1" in
+    http://*) hp=${1#http://} ;;
+    *) curl -s -o /dev/null -m 2 "$1" 2>/dev/null; return ;;
+  esac
+  path=/${hp#*/}
+  [[ $hp == */* ]] || path=/
+  hp=${hp%%/*}
+  host=${hp%:*} port=${hp##*:}
+  if [[ $hp != *:* || ! $port =~ ^[0-9]+$ ]] \
+     || [[ $host != 127.0.0.1 && $host != localhost ]]; then
+    curl -s -o /dev/null -m 2 "$1" 2>/dev/null
+    return
+  fi
+  { exec {fd}<>"/dev/tcp/$host/$port"; } 2>/dev/null || return 1
+  printf 'GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' "$path" "$hp" >&"$fd" 2>/dev/null
+  IFS= read -r -t 2 line <&"$fd" 2>/dev/null
+  exec {fd}>&-
+  [[ $line == HTTP/* ]]
+}
+
+collector_tick() {
+  local st
+  panel_now_v CS_AT
+  CS_PID=$$
+  # The gateway, once for every panel: alert_health_tick's curl.
+  panel_gateway_url_v CS_GW_URL
+  if [ -n "$CS_GW_URL" ]; then
+    CS_GW_OK=0
+    collector_gw_probe "$CS_GW_URL" && CS_GW_OK=1
+    CS_GW_SEQ=$(( CS_GW_SEQ + 1 ))
+  fi
+  # The Proxy State line, as a pane with the [View] button draws it and as
+  # one without (and the headless panel) does.
+  local PANEL_CLOSE=0
+  proxy_state_line_v CS_PROXY_LINE 2>/dev/null
+  PANEL_CLOSE=1
+  proxy_state_line_v CS_PROXY_LINE_VIEW 2>/dev/null
+  PANEL_CLOSE=0
+  # New notices and compaction states, read when their files move.
+  st=""
+  tick_stat "$ALERT_FILE" st
+  if [ "$st" != "$CS_ALERT_STAMP" ]; then
+    if [ -n "$st" ] && CS_ALERT_EVENTS=$(collector_alert_events); then
+      CS_ALERT_STAMP=$st
+    else
+      CS_ALERT_STAMP="" CS_ALERT_EVENTS=""
+    fi
+  fi
+  st=""
+  tick_stat "$COMPACT_STATE_FILE" st
+  if [ "$st" != "$CS_COMPACT_STAMP" ]; then
+    if [ -n "$st" ] && CS_COMPACT_PENDING=$(jq -r 'to_entries[] | select(.value.pending == true) | .key' \
+         "$COMPACT_STATE_FILE" 2>/dev/null); then
+      CS_COMPACT_STAMP=$st
+    else
+      CS_COMPACT_STAMP="" CS_COMPACT_PENDING=""
+    fi
+  fi
+  # The app in front, for panels holding an event for whichever Ghostty is
+  # in front: asked here once, and only while one may be held (a notice
+  # less than ALERT_HELD_FOR old, or the gateway not answering).
+  CS_FRONT_AT="" CS_FRONT_PID=""
+  if [ -x "$HOME/.local/bin/claude-panel-overlay" ] && collector_front_wanted; then
+    CS_FRONT_PID=$(panel_front_pid)
+    CS_FRONT_AT=$CS_AT
+  fi
+  # The block's clock, from the slow job's block.
+  block_clock_tick
+}
+collector_front_wanted() {
+  [ -n "$CS_GW_URL" ] && (( ! CS_GW_OK )) && return 0
+  local line ts
+  while IFS= read -r line; do
+    ts=${line%%$'\x1f'*}
+    case "$ts" in
+      g) return 0 ;;
+      n*) ts=${ts#n}; ts=${ts%%.*}
+          [[ $ts =~ ^[0-9]{1,17}$ ]] && (( CS_AT - 10#$ts < ALERT_HELD_FOR + 120 )) && return 0 ;;
+    esac
+  done <<< "$CS_ALERT_EVENTS"
+  return 1
+}
+
+collector_write() {
+  local v out
+  CS_SEQ=$(( ${CS_SEQ:-0} + 1 ))
+  CS_BLOCK=""
+  for v in $COLLECTOR_BLOCK_VARS; do printf -v CS_BLOCK '%s%s=%q\n' "$CS_BLOCK" "$v" "${!v-}"; done
+  out="# collector $CS_SEQ"$'\n'
+  for v in CS_AT CS_PID CS_GW_URL CS_GW_SEQ CS_GW_OK CS_PROXY_LINE CS_PROXY_LINE_VIEW \
+           CS_ALERT_STAMP CS_ALERT_EVENTS CS_COMPACT_STAMP CS_COMPACT_PENDING CS_SLOW_SEQ CS_SLOW_AT \
+           CS_BLOCK CS_ERRORS CS_FRONT_AT CS_FRONT_PID; do
+    printf -v out '%s%s=%q\n' "$out" "$v" "${!v}"
+  done
+  out+="# end $CS_SEQ"$'\n'
+  printf '%s' "$out" > "$COLLECTOR_STATE"
+}
+
+collector_main() {
+  local now last_slow_start=0 slow_pid="" slow_stamp="" st idle_since=0
+  collector_lock || return 0
+  # shellcheck disable=SC2064
+  trap "collector_unlock; rm -f '$PANEL_ERR_FILE'" EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  COLS=60 cols=60 rows=40
+  export COLS
+  PANEL_MEMO=1
+  CS_SEQ=$(( EPOCHSECONDS % 100000 * 1000 ))
+  # A slow figure that a panel computed in the last SLOW_REFRESH is as good as
+  # this collector's: the first slow job runs at once regardless, so state.sh
+  # names the block from the start.
+  while :; do
+    tick_stat_batch "$PANEL_SELF" "$ALERT_FILE" "$COMPACT_STATE_FILE" "$COLLECTOR_SLOW" \
+      "$HOME/.config/claude-burst/config.json" "$HOME/.config/claude-burst/state.json" \
+      "$HOME/.claude/settings.json"
+    if tick_stat "$PANEL_SELF" st && [ "${st%% *}" != "$PANEL_SELF_MTIME" ] && bash -n "$PANEL_SELF" 2>/dev/null; then
+      [ -n "${PANEL_SLEEP_FD:-}" ] && exec {PANEL_SLEEP_FD}>&-
+      exec bash "$COLLECTOR_SELF" "$REFRESH" "$TURN_ROWS"
+    fi
+    hash -r
+    panel_now_v now
+    if collector_panels_alive; then
+      idle_since=0
+    else
+      (( idle_since )) || idle_since=$now
+      (( now - idle_since >= COLLECTOR_LINGER )) && break
+    fi
+    # The slow job's results, when it has written new ones.
+    st=""
+    tick_stat "$COLLECTOR_SLOW" st
+    if [ -n "$st" ] && [ "$st" != "$slow_stamp" ]; then
+      slow_stamp=$st
+      # shellcheck disable=SC1090
+      source "$COLLECTOR_SLOW"
+      CS_SLOW_SEQ=$(( CS_SLOW_SEQ + 1 ))
+      CS_ERRORS=""
+      [ -s "$COLLECTOR_ERRS" ] && IFS= read -r -d '' CS_ERRORS < "$COLLECTOR_ERRS"
+    fi
+    if [ -n "$slow_pid" ] && ! kill -0 "$slow_pid" 2>/dev/null; then
+      wait "$slow_pid" 2>/dev/null
+      slow_pid=""
+    fi
+    if [ -z "$slow_pid" ] && (( now - last_slow_start >= SLOW_REFRESH )); then
+      last_slow_start=$now
+      collector_slow_job </dev/null >/dev/null 2>>"$PANEL_ERR_FILE" &
+      slow_pid=$!
+    fi
+    collector_tick
+    collector_write
+    tick_stat_end
+    panel_sleep "$REFRESH"
+  done
+  return 0
+}
+
+# ---- reading what the collector worked out ------------------------------
+# Each returns 1 when the collector is not live, and the caller then works
+# it out itself, as it always did.
+
+# The gateway check: a new result from the collector is this panel's check.
+ALERT_HEALTH_SEQ=0
+collector_health_v() { # $1 = variable to set to 1 (answers) or 0; 2 = no new result
+  (( COLLECTOR_LIVE )) || return 1
+  if [ "$CS_GW_SEQ" = "$ALERT_HEALTH_SEQ" ]; then
+    printf -v "$1" 2
+  else
+    ALERT_HEALTH_SEQ=$CS_GW_SEQ
+    printf -v "$1" '%s' "$CS_GW_OK"
+  fi
+}
+
+# alert_new_events, from the collector's copy of notices.json: true when it
+# answered (the file it read is the one this panel just saw change).
+collector_alert_events_v() { # $1 = variable to set
+  (( COLLECTOR_LIVE )) && [ -n "$CS_ALERT_STAMP" ] && [ "$CS_ALERT_STAMP" = "$ALERT_MTIME" ] || return 1
+  local _ca_line _ca_ts _ca_rest _ca_id _ca_out="" _ca_found=0 _ca_i=0 _ca_k=-1
+  local -a _ca_lines=()
+  [ -n "$CS_ALERT_EVENTS" ] && mapfile -t _ca_lines <<< "$CS_ALERT_EVENTS"
+  # The first event whose id is the last one taken, as jq's index() finds it.
+  if [ -n "$ALERT_LAST_ID" ]; then
+    for _ca_line in ${_ca_lines[@]+"${_ca_lines[@]}"}; do
+      IFS=$'\x1f' read -r _ _ _ _ _ _ _ca_id _ <<< "$_ca_line"
+      if [ "$_ca_id" = "$ALERT_LAST_ID" ]; then _ca_k=$_ca_i; break; fi
+      _ca_i=$(( _ca_i + 1 ))
+    done
+  fi
+  _ca_i=0
+  for _ca_line in ${_ca_lines[@]+"${_ca_lines[@]}"}; do
+    _ca_ts=${_ca_line%%$'\x1f'*}
+    _ca_rest=${_ca_line#*$'\x1f'}
+    if (( _ca_k >= 0 )); then
+      (( _ca_i > _ca_k )) && _ca_out+="$_ca_rest"$'\n'
+    else
+      collector_ts_after "$_ca_ts" "${ALERT_SINCE:-0}"
+      _ca_found=$?
+      (( _ca_found == 2 )) && return 1
+      (( _ca_found == 0 )) && _ca_out+="$_ca_rest"$'\n'
+    fi
+    _ca_i=$(( _ca_i + 1 ))
+  done
+  printf -v "$1" '%s' "${_ca_out%$'\n'}"
+}
+# jq's .ts > $since for the tagged ts: 0 true, 1 false, 2 cannot tell here.
+collector_ts_after() { # $1 = tagged ts, $2 = since (an integer)
+  local t fp n
+  case "$1" in
+    g) return 0 ;;
+    l) return 1 ;;
+    n*) t=${1#n} ;;
+    *) return 2 ;;
+  esac
+  [[ $t =~ ^(-?)([0-9]{1,17})(\.([0-9]+))?$ ]] || return 2
+  n=$(( 10#${BASH_REMATCH[2]} )) fp=${BASH_REMATCH[4]}
+  [ -n "${BASH_REMATCH[1]}" ] && n=$(( -n ))
+  # After the captures are read: a second =~ replaces BASH_REMATCH.
+  [[ $2 =~ ^-?[0-9]{1,17}$ ]] || return 2
+  (( n > $2 )) && return 0
+  (( n < $2 )) && return 1
+  # Equal whole parts: after it when a positive number has a fraction.
+  [[ $t != -* && $fp =~ [1-9] ]] && return 0
+  return 1
+}
+
 headless_main() {
   # hsid, not sid: build_trailing reads rows into a variable named sid, and
   # bash's dynamic scoping would hand it this one.
@@ -5519,10 +6612,17 @@ headless_main() {
   tmp_r=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-r.XXXXXX")
   tmp_a=$(mktemp "${TMPDIR:-/tmp}/ccusage-mod-a.XXXXXX")
   # shellcheck disable=SC2064
-  trap "rm -f '$tmp_s' '$tmp_r' '$tmp_a'; [ \"\$(cat '$MOD_DIR/$hsid.pid' 2>/dev/null)\" = \"\$\$\" ] && rm -f '$MOD_DIR/$hsid.pid'" EXIT
+  trap "rm -f '$tmp_s' '$tmp_r' '$tmp_a' '$COLLECTOR_PANELS/$$' '$PANEL_ERR_FILE'; [ \"\$(cat '$MOD_DIR/$hsid.pid' 2>/dev/null)\" = \"\$\$\" ] && rm -f '$MOD_DIR/$hsid.pid'" EXIT
+  # Exits on these at once, by way of the EXIT trap above, rather than by
+  # bash's own handling of a signal that lands inside panel_sleep's read.
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
   mod_prune
   local in_view=1 was_in_view=1 last_write=0
   PANEL_MEMO=1
+  COLLECTOR_SPAWN_OK=1
+  collector_register "$hsid"
   while mod_alive "$hsid" && mod_still_ours "$hsid"; do
     panel_tick_begin "$hsid"
     restart_if_changed "$REFRESH" "$TURN_ROWS" "$hsid"
@@ -5564,7 +6664,10 @@ headless_main() {
       # Run in this shell, not a $(...), so the figures each builder
       # computes on the way are still set when mod_json_write reads them.
       build_summary > "$tmp_s" 2>>"$PANEL_ERR_FILE"
-      summary_block=$(cat "$tmp_s")
+      # As $(cat) gave it, trailing newlines dropped, without the cat.
+      summary_block=""
+      IFS= read -r -d '' summary_block < "$tmp_s"
+      summary_block=${summary_block%"${summary_block##*[!$'\n']}"}
       trailing_refresh 2>>"$PANEL_ERR_FILE"
       top_turns_refresh
       band_write "$hsid" "$summary_block"
@@ -5634,9 +6737,13 @@ idle_stamp=""
 panel_idle_now=0
 panel_dock_rc=2
 last_full=0
+COLLECTOR_SPAWN_OK=1
+size_asked=0
+session_table=""
 
 while true; do
   panel_tick_begin "$cur_sid"
+  collector_register "$cur_sid"
   restart_if_changed
   # As in headless_main: a command's remembered path can go (a Homebrew upgrade).
   hash -r
@@ -5654,7 +6761,14 @@ while true; do
   # to do with the pane's actual height. `stty size` doesn't have this
   # problem because it reads the size off the fd it's given, so pointing it
   # at fd3 (see above) gets the real, live pane dimensions.
-  read -r rows cols < <(stty size <&3 2>/dev/null)
+  # Asked when the pane may have changed size, not every tick: the <(...)
+  # is a fork and stty a process start. A resize sends WINCH (trap below),
+  # which sets PANEL_REDRAW; the size is asked again on every slow tick too,
+  # in case one was missed.
+  if (( PANEL_REDRAW || ! size_asked )) || slow_frame_due "$EPOCHSECONDS"; then
+    read -r rows cols < <(stty size <&3 2>/dev/null)
+    size_asked=1
+  fi
   [ -z "$cols" ] && cols=60
   [ -z "$rows" ] && rows=24
   (( cols < 40 )) && cols=40
@@ -5748,7 +6862,8 @@ while true; do
       errs="$errs"$'\n'"$(printf '  %s! and %d more failure(s)%s' "$C_RED" "$(( err_n - 3 ))" "$C_RESET")"
     fi
   fi
-  guaranteed="$summary_block"${errs:+$'\n'"$errs"}$'\n'"$(build_session_table 2>>"$PANEL_ERR_FILE")"
+  build_session_table_v session_table 2>>"$PANEL_ERR_FILE"
+  guaranteed="$summary_block"${errs:+$'\n'"$errs"}$'\n'"$session_table"
   # Its lines, as `printf '%s\n' | wc -l` counted them (the newlines in it,
   # plus the one printf adds), in the shell.
   used_lines=${guaranteed//[!$'\n']/}
@@ -5820,6 +6935,30 @@ else
   mv -f "$BIN_DIR/.ccusage-panel.sh.new" "$BIN_DIR/ccusage-panel.sh"
 fi
 
+echo "Installing ccusage-panel-collector (one collector for every panel) ..."
+# What every panel used to work out for itself each tick, worked out once:
+# see "one collector for every panel" in ccusage-panel.sh. The panels start
+# it and it leaves when they have gone; nothing else runs it. It sources
+# ccusage-panel.sh for its functions, so the two always match, and it is not
+# named ccusage-panel.sh, so the launcher's pgrep for panels does not see it.
+cat > "$BIN_DIR/.ccusage-panel-collector.new" <<'COLLECTOR_EOF'
+#!/usr/bin/env bash
+# Usage: ccusage-panel-collector [fast secs] [turn rows]
+# The usage panels' shared collector. Started by the panels, one at a time
+# (collector/lock), gone a minute after the last panel. Harmless by hand: a
+# second one finds the lock held and exits.
+COLLECTOR_SELF="${BASH_SOURCE[0]}"
+case "$COLLECTOR_SELF" in /*) ;; *) COLLECTOR_SELF="$PWD/$COLLECTOR_SELF" ;; esac
+PANEL_LIB_ONLY=1 source "${COLLECTOR_SELF%/*}/ccusage-panel.sh" "${1:-10}" "${2:-12}" </dev/null || exit 1
+collector_main
+COLLECTOR_EOF
+chmod +x "$BIN_DIR/.ccusage-panel-collector.new"
+if cmp -s "$BIN_DIR/.ccusage-panel-collector.new" "$BIN_DIR/ccusage-panel-collector"; then
+  rm -f "$BIN_DIR/.ccusage-panel-collector.new"
+else
+  mv -f "$BIN_DIR/.ccusage-panel-collector.new" "$BIN_DIR/ccusage-panel-collector"
+fi
+
 echo "Installing ccusage-panel-mod-start (the usage-panel mod's data feed) ..."
 # What the usage-panel mod runs every 30 seconds: says the mod is still there
 # (mod/<id>.alive), and starts the headless panel for its session when none is
@@ -5834,9 +6973,48 @@ case "$sid" in
   ''|*[!0-9a-fA-F-]*) echo "ccusage-panel-mod-start: not a session id: '$sid'" >&2; exit 2 ;;
 esac
 dir="$HOME/.cache/ccusage-panel-cache/mod"
-mkdir -p "$dir"
-touch "$dir/$sid.alive"
-held=$(cat "$dir/$sid.pid" 2>/dev/null)
+[ -d "$dir" ] || mkdir -p "$dir"
+# A panel only for a session in a terminal (entrypoint "cli"). Claude Desktop
+# runs the mod too (entrypoint "claude-desktop"), and so can the SDK
+# ("sdk-cli", "sdk-ts", ...) and local agents: none has a terminal for the
+# alerts to sit over or a dashboard tab to show, and each kept a panel
+# running, and with it the shared collector, for nothing. Asked of
+# CLAUDE_CODE_ENTRYPOINT, which Claude Code sets for what it runs, else of
+# the transcript's own "entrypoint", and remembered in <id>.entry. Unknown
+# (a session with no transcript yet) starts one, as before. Checked before
+# .alive is touched, so a panel already running for such a session stops by
+# itself within MOD_ALIVE_SECS.
+entry="${CLAUDE_CODE_ENTRYPOINT:-}"
+if [ -z "$entry" ]; then
+  { IFS= read -r entry < "$dir/$sid.entry"; } 2>/dev/null
+fi
+if [ -z "$entry" ]; then
+  for t in "$HOME"/.claude/projects/*/"$sid".jsonl; do
+    [ -f "$t" ] || continue
+    n=0
+    while (( n < 400 )) && IFS= read -r -n 65536 chunk; do
+      n=$(( n + 1 ))
+      if [[ $chunk =~ \"entrypoint\":\"([^\"]*)\" ]]; then
+        entry=${BASH_REMATCH[1]}
+        printf '%s\n' "$entry" > "$dir/$sid.entry"
+        break
+      fi
+    done < "$t"
+    break
+  done
+fi
+case "$entry" in
+  ''|cli) ;;
+  claude-desktop) echo "skipped: Claude Desktop session, no terminal"; exit 0 ;;
+  *) echo "skipped: $entry session, no terminal"; exit 0 ;;
+esac
+# Says the session still wants its panel: the panel reads this file's mtime.
+# Written, not touched, and the pid read, not cat'ed: the mod runs this every
+# 30 seconds for every session, and a running panel is the usual answer, so
+# that answer costs no process start beyond this script.
+printf '%s\n' "${EPOCHSECONDS:-}" > "$dir/$sid.alive"
+held=""
+{ IFS= read -r held < "$dir/$sid.pid"; } 2>/dev/null
 if [ -n "$held" ] && kill -0 "$held" 2>/dev/null; then
   echo running
   exit 0

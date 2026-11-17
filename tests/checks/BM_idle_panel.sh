@@ -124,9 +124,9 @@ check_BM_idle_panel() {
   alert_file_changed && _pass || _fail "a rewrite in the same second is" "changed" "same"
 
   # ---- the turn table is reused while the transcript holds still ----------
-  # Counted in a file: session_stats_refresh asks inside $(...).
+  # Counted in a file, as it was when session_stats_refresh asked inside $(...).
   : > "$SBX/tables"
-  turn_table_series() { echo x >> "$SBX/tables"; printf '#META\t1\t2\t3\t0\nrow'; }
+  turn_table_series_v() { echo x >> "$SBX/tables"; printf -v "$1" '#META\t1\t2\t3\t0\nrow'; }
   bm_tables() { wc -l < "$SBX/tables" | tr -d ' '; }
   latest="$SBX/b" PANEL_MEMO=1
   session_stats_refresh; session_stats_refresh
@@ -138,6 +138,6 @@ check_BM_idle_panel() {
   PANEL_MEMO=0
   session_stats_refresh
   assert_eq "outside the loop every call asks" 3 "$(bm_tables)"
-  unset -f turn_table_series bm_tables
+  unset -f turn_table_series_v bm_tables
   return 0
 }

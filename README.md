@@ -92,7 +92,7 @@ The sidebar has a **Hide** button at its top right, which does what `/hide-cost-
 
 <sub>Illustration: Claude Code draws the band, the prompt and the line under it; this is a copy of how they look.</sub>
 
-The numbers are the panel's own, not a second implementation: for each session the mod starts `ccusage-panel.sh` without a terminal (`PANEL_HEADLESS=1`, via `~/.local/bin/ccusage-panel-mod-start`), and it runs its usual two refresh tiers and writes what it would have drawn, as numbers, to `~/.cache/ccusage-panel-cache/mod/<session id>.json`. The mod reads that file every 5 seconds. When the session ends the mod stops saying it is there, and the headless panel exits by itself 90 seconds later. The floating alerts over Ghostty still come from it.
+The numbers are the panel's own, not a second implementation: for each session the mod starts `ccusage-panel.sh` without a terminal (`PANEL_HEADLESS=1`, via `~/.local/bin/ccusage-panel-mod-start`), and it runs its usual two refresh tiers and writes what it would have drawn, as numbers, to `~/.cache/ccusage-panel-cache/mod/<session id>.json`. The mod reads that file every 5 seconds. When the session ends the mod stops saying it is there, and the headless panel exits by itself 90 seconds later. The floating alerts over Ghostty still come from it. Only a session in a terminal gets one: for a Claude Desktop session (or an SDK or local-agent one, any entrypoint other than `cli`), `ccusage-panel-mod-start` prints `skipped: Claude Desktop session, no terminal` and starts nothing.
 
 While the mod is installed the Ghostty split below stands aside. Set `CLAUDE_PANEL_SPLIT=true` in the options file to have the split as well, or `CLAUDE_PANEL_MOD=no bash claude-panel-setup.sh` to install without the mod.
 
@@ -530,6 +530,41 @@ transcript's mtime or size moving), focus coming back, a resize, its session
 coming on screen, or the slow tier falling due, which keeps its own rate. The
 floating alerts keep their usual cadence. Without focus reporting (the close
 button turned off) a pane is never idle.
+
+### One collector for every panel
+
+Most of what a panel works out each tick is the same in every panel: whether
+Burst's gateway answers, Burst's config and the Proxy State line, the 5h
+block's clock, which notices are new, which sessions are compacting, and on
+the slow tier every `ccusage` report, the 30-day baselines, week and month,
+and the day's top sessions and turns. `~/.local/bin/ccusage-panel-collector`
+works that out once a tick for all of them and writes it to
+`~/.cache/ccusage-panel-cache/collector/state.sh`; each panel reads that file
+with a builtin and keeps to itself only its own session: its transcript, turn
+table, alerts and files.
+
+- **Lifecycle.** The first panel that finds no fresh `state.sh` starts the
+  collector, detached. It holds `collector/lock` (one `mkdir`, so two panels
+  starting one at once leave one), re-execs when `ccusage-panel.sh` changes,
+  and exits a minute (`COLLECTOR_LINGER`) after the last panel listed in
+  `collector/panels/` has gone. One that dies is started again by the next
+  panel to find `state.sh` stale.
+- **Format.** Bash assignments printed with `%q`, between `# collector <seq>`
+  and `# end <seq>`, rewritten in place: a panel that reads it half-written
+  sees the two lines disagree and keeps what it had for a tick.
+- **Fallback.** A panel never depends on it. With no collector, a `state.sh`
+  older than three ticks (`COLLECTOR_STALE_SECS`), or `PANEL_COLLECTOR=0`, the
+  panel works every figure out itself, exactly as before: a dead collector
+  costs process starts, never a wrong or missing figure.
+
+The tick itself starts as few processes as it can: values are set with
+`printf -v` rather than captured with `$(...)`, files are read with `read`,
+and file stats use bash's own `stat` builtin where the running bash ships it
+(Homebrew's does), so a tick with nothing new starts no process at all. The
+panel on screen starts one a tick, the python that writes the mod's JSON.
+`tests/checks/BP_fork_budget.sh` counts what the kernel counts (every fork
+and spawn, through a small library loaded into each bash) and fails if that
+grows.
 
 Both tiers sit behind a corpus-change gate: if nothing has been written under
 `~/.claude/projects` since a cached answer was computed, that answer cannot

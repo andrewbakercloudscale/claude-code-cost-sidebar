@@ -30,14 +30,15 @@ check_BL_shared_figures() {
   shared_memo bl bl_compute BL_A BL_B
   assert_eq "off at 0" "4" "$BL_RUNS"
 
-  # build_trailing's figures, headless: a top-sessions table with tabs and
-  # lines in it comes back as it went in.
+  # The trailing figures (trailing_figures, which build_trailing's three
+  # became), headless: a top-sessions table with tabs and lines in it comes
+  # back as it went in.
   PANEL_SHARED_TTL=100
   # It reads rows into day, f and line, which once emptied shared_memo's own.
-  build_trailing() { day=""; f=""; line=""; m=""; week_cost=12.5; month_cost=40; top_rows=$'aaa\t1.5\t100\tt1\nbbb\t2\t200\tt2'; echo text; }
+  trailing_figures() { day=""; f=""; line=""; m=""; week_cost=12.5; month_cost=40; top_rows=$'aaa\t1.5\t100\tt1\nbbb\t2\t200\tt2'; echo text; }
   trailing_refresh
   week_cost=""; month_cost=""; top_rows=""
-  build_trailing() { week_cost=99; }
+  trailing_figures() { week_cost=99; }
   trailing_refresh
   assert_eq "trailing: week shared" "12.5" "$week_cost"
   assert_eq "trailing: month shared" "40" "$month_cost"
@@ -46,7 +47,8 @@ check_BL_shared_figures() {
 
   # session_stats_refresh splits its cache line with expansions now: an
   # empty field must not shift the ones after it.
-  turn_table_series() { printf '#META\t1.25\t\t200000\t1\n#SERIES\ts1\ts2\nrow one\nrow two'; }
+  # The seam is turn_table_series_v now: the table without a $(...).
+  turn_table_series_v() { printf -v "$1" '#META\t1.25\t\t200000\t1\n#SERIES\ts1\ts2\nrow one\nrow two'; }
   latest=/x; session_stats_refresh
   assert_eq "stats: cost" "1.25" "$SESS_COST"
   assert_eq "stats: empty context stays empty" "" "$SESS_CTX"
@@ -54,11 +56,11 @@ check_BL_shared_figures() {
   assert_eq "stats: compacting" "1" "$SESS_COMPACTING"
   assert_eq "stats: series" $'s1\ts2' "$SESS_SERIES"
   assert_eq "stats: table" $'row one\nrow two' "$SESS_TABLE"
-  turn_table_series() { printf '#META\t2\t5\t9\t0\n#SERIES\ts'; }
+  turn_table_series_v() { printf -v "$1" '#META\t2\t5\t9\t0\n#SERIES\ts'; }
   session_stats_refresh
   assert_eq "stats: series alone, no table" "" "$SESS_TABLE"
   assert_eq "stats: series alone" "s" "$SESS_SERIES"
-  turn_table_series() { printf 'old table'; }
+  turn_table_series_v() { printf -v "$1" 'old table'; }
   session_stats_refresh
   assert_eq "stats: old cache entry is the table" "old table" "$SESS_TABLE"
   assert_eq "stats: with no figures" "" "$SESS_COST"
