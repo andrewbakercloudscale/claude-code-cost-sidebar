@@ -506,8 +506,9 @@ own rate** so you can always see how old the number under it can be:
 
 The split exists because the two tiers cost wildly different amounts. The
 per-turn table reads one transcript file and is cached on that file's own
-mtime+size, so an idle pane re-renders it for free, it can afford to be
-near-live. Everything else is built from `ccusage` reports, and every
+mtime+size, so an idle pane re-renders it for free, and a busy one reads
+only the lines appended since its last read (its state is kept in
+`inc-*.json` in the cache directory), so it can afford to be near-live. Everything else is built from `ccusage` reports, and every
 `ccusage` invocation reparses the whole transcript corpus (hundreds of MB,
 ~0.3-1s of CPU each); at a single 10s tier an actively-used pane was paying
 several of those *every ten seconds*, which is what made the fans spin.

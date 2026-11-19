@@ -16,7 +16,8 @@ check_BH_full_compaction_marker() {
 {"type":"user","message":{"role":"user","content":"a prompt that quotes \"compact_boundary\""}}
 JSON
   local fn got
-  fn=$(awk '/^def full_compaction_markers\(lines\):/{on=1} on&&/^COMPACTION_MARKERS =/{exit} on' "$PANEL_SH")
+  # The function, to the next top-level line.
+  fn=$(awk '/^def full_compaction_markers\(lines\):/{on=1; print; next} on&&/^[^ \t#]/{exit} on' "$PANEL_SH")
   assert_eq "the marker function is in the panel" "1" "$(printf '%s' "$fn" | grep -c '^def full_compaction_markers')"
   got=$(T="$t" FN="$fn" python3 -c '
 import json, os
