@@ -1329,9 +1329,15 @@ mkdir -p "$CCUSAGE_CACHE_DIR"
 # Once per panel launch, not per tick: a `find` over a few hundred small
 # files is cheap, but it is not free, and nothing here changes fast enough
 # to need it more often.
+#
+# inc-*.json is panel_parse_py's state, one or two a session, kept like the
+# entries it feeds. An EMPTY error log is nothing to read and goes after a
+# day: they piled up at one per panel process, 10,800 on 2026-11-19, almost
+# all of them empty. One with something in it keeps the week.
 find "$CCUSAGE_CACHE_DIR" -maxdepth 1 \
   \( -name 'turns-*.out' -o -name 'sessid-*.tsv' -o -name 'todaytok-*.tsv' \
-     -o -name 'errors-*.log' -o -name '*.tmp' \) -mtime +7 -delete 2>/dev/null
+     -o -name 'inc-*.json' -o -name 'errors-*.log' -o -name '*.tmp' \) -mtime +7 -delete 2>/dev/null
+find "$CCUSAGE_CACHE_DIR" -maxdepth 1 -name 'errors-*.log' -empty -mtime +0 -delete 2>/dev/null
 
 # ---- why every temp file carries a pid -----------------------------------
 # The write pattern throughout this file is `> "$f.tmp" && mv "$f.tmp" "$f"`,
@@ -2047,222 +2053,372 @@ transcript_stamp_v() { # $1 = variable to set, $2 = path
   fi
 }
 
-# $1 = session id, $2 = today's date (YYYY-MM-DD). Prints that session's
-# token count for today.
-#
-# The underlying `ccusage session --json -i <sid>` parses EVERY transcript
-# under ~/.claude/projects to answer -- the `-i` only filters the OUTPUT, it
-# does not narrow the scan. So the unconditional fan-out that used to live at
-# the "Top Sessions Today" block re-scanned the entire corpus once per
-# active session, concurrently, every refresh: 8 sessions today meant 8 full
-# scans every 10s, each pegging a core. That was the single largest CPU cost
-# in this panel by a wide margin, and ccusage_cached() could not help --
-# every sid is a DIFFERENT cache key, so the TTL and the mkdir-lock only
-# dedupe a query against itself, never the eight against each other.
-#
-# A session's today-slice can only change when that session's own transcript
-# is written to, which is an exact signal rather than a guess -- so key on
-# mtime+size like session_identity_cached() above instead of a TTL. An idle
-# session then pays nothing at all, and an ordinary tick rescans only the one
-# session actually being typed into. $today is folded into the stamp so the
-# slice invalidates by itself at midnight rather than serving yesterday's.
-#
-# That still left one full scan per BUSY session per panel per slow tick, and
-# on 16 Oct 2026 six panels over three or four busy sessions kept about one
-# core occupied (2.5 CPU-s a scan over a 2GB corpus). So the count no longer
-# asks ccusage at all: it reads the session's own transcript and its
-# subagents', which takes 0.06 CPU-s, and counts as ccusage does. Checked
-# against ccusage on 39 session-days from 14 to 16 Oct 2026, all identical;
-# two rules were needed for that. A message logged more than once (once per
-# content block, and again when a session is rewound or copied) counts once,
-# at its LARGEST usage: streamed copies grow, and copies of a rewound
-# session carry zeros, so neither the first nor the last copy matches.
-# And the day is the timestamp's own UTC prefix, as ccusage's entries are.
-# The cache's answer for a session's tokens today into $1, with no process:
-# true on a hit; false when it must be worked out (session_today_tokens_cached).
-session_today_tokens_hit_v() { # $1 = variable to set, $2 = session id, $3 = today
-  local _st_c _st_path="" _st_key _st_file _st_stamp _st_line="" _st_cached
-  for _st_c in "$HOME"/.claude/projects/*/"$2".jsonl; do
-    [ -f "$_st_c" ] && { _st_path="$_st_c"; break; }
-  done
-  [ -n "$_st_path" ] || return 1
-  panel_hash16_v _st_key "$2"
-  _st_file="$CCUSAGE_CACHE_DIR/todaytok-$_st_key.tsv"
-  [ -f "$_st_file" ] || return 1
-  transcript_stamp_v _st_stamp "$_st_path"
-  IFS= read -r _st_line < "$_st_file"
-  _st_cached=${_st_line%%$'\t'*}
-  [ "$_st_cached" = "$_st_stamp:$3" ] || return 1
-  # cut -f2-: everything after the first tab (the line itself when none).
-  [[ $_st_line == *$'\t'* ]] && _st_line=${_st_line#*$'\t'}
-  printf -v "$1" '%s' "$_st_line"
-}
-session_today_tokens_cached() {
-  local sid="$1" today="$2" path key cache_file stamp cached out
-  path=""
-  for c in "$HOME"/.claude/projects/*/"$sid".jsonl; do
-    [ -f "$c" ] && { path="$c"; break; }
-  done
-  [ -n "$path" ] || return
-  key=$(printf '%s' "$sid" | shasum -a 256 | cut -c1-16)
-  cache_file="$CCUSAGE_CACHE_DIR/todaytok-$key.tsv"
-  transcript_stamp_v stamp "$path"
-  if [ -f "$cache_file" ]; then
-    IFS=$'\t' read -r cached _ < "$cache_file"
-    if [ "$cached" = "$stamp:$today" ]; then
-      cut -f2- "$cache_file"
-      return
-    fi
-  fi
-  out=$(python3 - "$path" "$today" <<'TODAYTOK_PYEOF' 2>/dev/null
-import glob, json, os, sys
+# The three readers of one session's transcript (identity, today's tokens,
+# the turn table) as one python program: see its own header for how each
+# reads only what was appended since its last run. $1 = identity, todaytok
+# or turns, $2 = the transcript, $3... = that mode's arguments. Its state
+# files are inc-*.json in the cache directory, and the panel's own mtime is
+# part of them, so a deploy starts every session's state again.
+panel_parse_py() {
+  CCP_STATE_DIR="$CCUSAGE_CACHE_DIR" CCP_VERSION="${PANEL_SELF_MTIME:-}" python3 - "$@" <<'PARSE_PYEOF'
+import glob, hashlib, io, json, locale, os, sys
+from datetime import datetime
 
-path, today = sys.argv[1], sys.argv[2]
-files = [path] + sorted(glob.glob(os.path.join(path[:-len(".jsonl")], "subagents", "*.jsonl")))
-FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
-by_key = {}
-for p in files:
+# One program for the three readers of a session's transcript, so they share
+# one incremental reader and, in "turns" mode, one process:
+#   identity <path>             sid, model, label, folder, start epoch
+#   todaytok <path> <today>     the session's tokens today, subagents included
+#   turns <path> <table args>   the turn table, #META and #SERIES lines first
+#
+# Each used to read the WHOLE transcript every time it changed, which is
+# every tick while the session is working: 1.6 CPU-s a tick on a 102MB
+# transcript (2026-11-19), in every panel showing a busy session. Now each
+# keeps what it has worked out so far, and the byte offset it got to, in an
+# inc-*.json file in the cache directory, and reads only what was appended.
+# It starts again from the top when the file got smaller, is another file
+# (inode), no longer has the bytes it ended on (a fingerprint of the last
+# FP_LEN), the panel script changed (CCP_VERSION), or the state is missing or
+# unreadable. Only complete lines are kept in the state: a line still being
+# written is read for this answer and read again, whole, next time, so the
+# answer is the one a full read would give.
+MODE = sys.argv.pop(1) if len(sys.argv) > 1 else ""
+STATE_DIR = os.environ.get("CCP_STATE_DIR", "")
+STATE_TAG = "1:" + os.environ.get("CCP_VERSION", "")
+# What open(path) decodes with, so a line here is the line it would read.
+ENCODING = locale.getpreferredencoding(False)
+FP_LEN = 64
+CHUNK = 1 << 24
+
+def parse_iso(t):
+    if not t:
+        return None
     try:
-        f = open(p)
-    except OSError:
-        continue
-    with f:
-        for n, line in enumerate(f):
-            if '"usage"' not in line:
-                continue
-            try:
-                d = json.loads(line)
-            except ValueError:
-                continue
-            msg = d.get("message") or {}
-            usage = msg.get("usage")
-            if d.get("type") != "assistant" or not usage:
-                continue
-            if not str(d.get("timestamp", "")).startswith(today):
-                continue
-            key = (msg.get("id"), d.get("requestId"))
-            if None in key:
-                key = (p, n)
-            tokens = sum(int(usage.get(x) or 0) for x in FIELDS)
-            by_key[key] = max(by_key.get(key, 0), tokens)
-print(sum(by_key.values()))
-TODAYTOK_PYEOF
-)
-  # Only a real answer gets cached -- caching "" on a failed/interrupted
-  # fetch would pin the empty result until the next turn landed.
-  [ -n "$out" ] || return
-  printf '%s\t%s\n' "$stamp:$today" "$out" > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
-  printf '%s' "$out"
-}
+        # Python's fromisoformat rejects the trailing "Z" the transcript uses.
+        return datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
-# $1 = transcript path. Prints the cached "sid\tmodel\tlabel\tfolder\tepoch"
-# tsv line, calling the identity-scan python only when path+mtime+size
-# changed since the last call (by any panel).
-# The cache's line for a transcript, fields 2 on, into $1 with no process:
-# true on a hit (session_identity_cached does the rest).
-session_identity_hit_v() { # $1 = variable to set, $2 = transcript path
-  local _si_key _si_file _si_stamp _si_line="" _si_cached
-  panel_hash16_v _si_key "$2"
-  _si_file="$CCUSAGE_CACHE_DIR/sessid-$_si_key.tsv"
-  [ -f "$_si_file" ] || return 1
-  transcript_stamp_v _si_stamp "$2"
-  IFS= read -r _si_line < "$_si_file"
-  _si_cached=${_si_line%%$'\t'*}
-  [ "$_si_cached" = "$_si_stamp" ] || return 1
-  [[ $_si_line == *$'\t'* ]] && _si_line=${_si_line#*$'\t'}
-  printf -v "$1" '%s' "$_si_line"
-}
-session_identity_cached() {
-  local path="$1" key cache_file stamp cached
-  key=$(printf '%s' "$path" | shasum -a 256 | cut -c1-16)
-  cache_file="$CCUSAGE_CACHE_DIR/sessid-$key.tsv"
-  transcript_stamp_v stamp "$path"
-  if [ -f "$cache_file" ]; then
-    IFS=$'\t' read -r cached _ < "$cache_file"
-    if [ "$cached" = "$stamp" ]; then
-      cut -f2- "$cache_file"
-      return
-    fi
-  fi
-  local out
-  out=$(python3 - "$path" <<'PYEOF'
-import datetime, json, os, sys
+# Burst's /compact-async-full: Claude Code's own history replaced with the
+# summary Burst already wrote. Claude Code runs it as its own /compact and
+# echoes it as that, so the transcript is where it is told apart: a compact
+# boundary whose summary, the message after it, says Burst wrote it.
+def full_compaction_markers(lines):
+    """[(epoch, "full", None)] for each compaction made with Burst's summary."""
+    out = []
+    for i, line in enumerate(lines):
+        if '"compact_boundary"' not in line or i + 1 >= len(lines):
+            continue
+        if "compacted by claude-burst" not in lines[i + 1][:2000]:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts = parse_iso(d.get("timestamp")) if d.get("subtype") == "compact_boundary" else None
+        if ts is not None:
+            out.append((ts, "full", None))
+    return out
 
-path = sys.argv[1]
-sid = os.path.basename(path).removesuffix(".jsonl")
-model = "unknown"
-folder = ""
-first_ts = None
-try:
-    with open(path) as f:
-        for line in f:
+def text_lines(b):
+    """The lines of b as iterating open(path) gives them: universal
+    newlines, so a bare CR ends a line there too. Without a CR, split
+    plainly and leave the newline off (nothing here reads it): a third of
+    the time of a first read of a large transcript."""
+    if not b:
+        return []
+    s = b.decode(ENCODING)
+    if "\r" in s:
+        return io.StringIO(s, newline=None).readlines()
+    lines = s.split("\n")
+    if not lines[-1]:
+        lines.pop()
+    return lines
+
+class Resume:
+    """A file opened where the last run stopped, if that still holds.
+    batches() yields its complete new lines; what follows the last newline
+    is left in .tail, unread by the state."""
+    def __init__(self, path, rec):
+        self.f = open(path, "rb")
+        st = os.fstat(self.f.fileno())
+        self.ino, self.off, self.fp, self.fresh, self.tail = st.st_ino, 0, b"", True, b""
+        try:
+            off = rec["off"]
+            if rec["ino"] == st.st_ino and isinstance(off, int) and 0 <= off <= st.st_size:
+                fp = bytes.fromhex(rec["fp"])
+                if len(fp) == min(off, FP_LEN):
+                    self.f.seek(off - len(fp))
+                    if self.f.read(len(fp)) == fp:
+                        self.off, self.fp, self.fresh = off, fp, False
+        except (TypeError, KeyError, ValueError):
+            pass
+        self.f.seek(self.off)
+
+    def batches(self):
+        buf = b""
+        with self.f:
+            while True:
+                chunk = self.f.read(CHUNK)
+                if not chunk:
+                    break
+                buf = buf + chunk if buf else chunk
+                cut = buf.rfind(b"\n") + 1
+                if cut:
+                    done, buf = buf[:cut], buf[cut:]
+                    self.fp = (self.fp + done[-FP_LEN:])[-FP_LEN:]
+                    self.off += cut
+                    yield text_lines(done)
+        self.tail = buf
+
+    def rec(self):
+        return {"ino": self.ino, "off": self.off, "fp": self.fp.hex()}
+
+def state_file(kind, key):
+    if not STATE_DIR:
+        return ""
+    h = hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    return os.path.join(STATE_DIR, "inc-%s-%s.json" % (kind, h))
+
+def load_state(sf, key):
+    if not sf:
+        return None
+    try:
+        with open(sf) as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(s, dict) or s.get("tag") != STATE_TAG or s.get("key") != key:
+        return None
+    return s
+
+def save_state(sf, s):
+    if not sf:
+        return
+    tmp = "%s.%d.tmp" % (sf, os.getpid())
+    try:
+        # dumps, not dump: dump to a file is the pure-python encoder.
+        data = json.dumps(s, separators=(",", ":"))
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, sf)
+    except (OSError, ValueError, TypeError):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+class Session:
+    """What identity and the turn table need from one transcript, read
+    once for both: the old identity scan and the old turn loop, line for
+    line, with each turn kept as the transcript gave it (pricing it and
+    matching it to the gateway's log is redone every run, from inputs that
+    change on their own)."""
+    def __init__(self, s=None):
+        s = s or {}
+        self.folder = s.get("folder", "")
+        self.first_ts = s.get("first_ts")
+        self.model = s.get("model", "unknown")
+        self.turns = s.get("turns", [])
+        self.seen = set(s.get("seen", []))
+        self.full = [tuple(m) for m in s.get("full", [])]
+        # The last line read when it was a compact boundary: whether it is a
+        # Burst one is decided by the line after it, not read yet.
+        self.pending = s.get("pending")
+
+    def dump(self, key, rec):
+        return {"tag": STATE_TAG, "key": key, "file": rec, "folder": self.folder,
+                "first_ts": self.first_ts, "model": self.model, "turns": self.turns,
+                "seen": list(self.seen), "full": self.full, "pending": self.pending}
+
+    def feed(self, lines):
+        if not lines:
+            return
+        prev = [self.pending] if self.pending is not None else []
+        self.full.extend(full_compaction_markers(prev + lines))
+        self.pending = lines[-1] if '"compact_boundary"' in lines[-1] else None
+        for line in lines:
+            # Once folder and start are known only assistant lines can
+            # change anything, and one cannot be without that string.
+            if self.folder and self.first_ts and '"assistant"' not in line:
+                continue
             try:
                 d = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not folder and d.get("cwd"):
-                folder = os.path.basename(d["cwd"])
-            if not first_ts and d.get("timestamp"):
-                first_ts = d["timestamp"]
-            if d.get("type") == "assistant":
-                m = d.get("message", {}).get("model")
-                # "<synthetic>" is Claude Code's own placeholder for an API
-                # error it logged as a reply, not a model that served.
-                if m and m != "<synthetic>":
-                    model = m
-except OSError:
-    pass
+            if not self.folder and d.get("cwd"):
+                self.folder = os.path.basename(d["cwd"])
+            if not self.first_ts and d.get("timestamp"):
+                self.first_ts = d["timestamp"]
+            if d.get("type") != "assistant":
+                continue
+            msg = d.get("message", {})
+            m = msg.get("model")
+            # "<synthetic>" is Claude Code's own placeholder for an API
+            # error it logged as a reply, not a model that served.
+            if m and m != "<synthetic>":
+                self.model = m
+            usage = msg.get("usage")
+            mid = msg.get("id")
+            if not usage or not mid or mid in self.seen:
+                continue
+            self.seen.add(mid)
 
-rest = model.removeprefix("claude-")
-parts = rest.split("-")
-name = parts[0].capitalize()
-nums = parts[1:]
-if len(nums) >= 2:
-    label = f"{name} {nums[0]}.{nums[1]}"
-elif len(nums) == 1:
-    label = f"{name} {nums[0]}"
-else:
-    label = name
+            model = msg.get("model", "unknown")
+            # Claude Code logs an API error ("Can't reach the API server") as an
+            # assistant message from model "<synthetic>" with all-zero usage. It is
+            # not a turn, and counting it as one flagged it unpriced, which blanked
+            # Session and Burn for the rest of the session over a network blip.
+            if model == "<synthetic>":
+                continue
+            turn_ts = parse_iso(d.get("timestamp"))
+            in_tok = usage.get("input_tokens", 0)
+            out_tok = usage.get("output_tokens", 0)
+            cr_tok = usage.get("cache_read_input_tokens", 0)
+            cc_tok = usage.get("cache_creation_input_tokens", 0)
+            cc = usage.get("cache_creation") or {}
+            # See the same fix in the hourly-bucket PYEOF block above: no nested
+            # breakdown means the default 5-minute TTL was used, not the 1h beta.
+            if cc:
+                cw_1h = cc.get("ephemeral_1h_input_tokens", 0)
+                cw_5m = cc.get("ephemeral_5m_input_tokens", 0)
+            else:
+                cw_1h = 0
+                cw_5m = cc_tok
+            self.turns.append([model, turn_ts, in_tok, out_tok, cr_tok, cc_tok, cw_1h, cw_5m])
 
-epoch = 0
-if first_ts:
-    epoch = int(datetime.datetime.fromisoformat(first_ts.replace("Z", "+00:00")).timestamp())
-print(f"{sid}\t{model}\t{label}\t{folder}\t{epoch}")
-PYEOF
-)
-  printf '%s\t%s\n' "$stamp" "$out" > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
-  printf '%s' "$out"
-}
+def session_read(path):
+    """The Session for path, its state brought up to the last complete
+    line and saved, and the partial last line fed in on top (not saved)."""
+    sf = state_file("sess", path)
+    s = load_state(sf, path)
+    try:
+        r = Resume(path, s and s.get("file"))
+    except OSError:
+        return Session()
+    sess = None
+    if not r.fresh:
+        try:
+            sess = Session(s)
+        except (TypeError, ValueError, AttributeError):
+            r = Resume(path, None)
+    if sess is None:
+        sess = Session()
+    start = r.off
+    for lines in r.batches():
+        sess.feed(lines)
+    if r.fresh or r.off != start:
+        save_state(sf, sess.dump(path, r.rec()))
+    sess.feed(text_lines(r.tail))
+    return sess
 
-# $1 = transcript path, $2... = the same color/threshold args the table
-# always took MINUS burn_color/burn_str -- those are a live every-refresh
-# figure independent of this file's contents, so the caller prints that
-# header line itself and only asks for the (cacheable) table body here.
-# Same mtime+size cache as session_identity_cached() above, and for the
-# same reason: this used to re-read and re-price the ENTIRE transcript on
-# every single refresh, which for a multi-million-token session is real,
-# repeated CPU for a result that's usually unchanged since the last frame.
-turn_table_cached() {
-  local path="$1"; shift
-  local key cache_file stamp cached
-  # The script's own mtime is in the key: a new price table (or any parser
-  # change) re-prices turns already cached, rather than waiting for the
-  # session's next reply.
-  key=$(printf '%s' "$path $* $(stat -f %m "${BASH_SOURCE[0]}" 2>/dev/null)" | shasum -a 256 | cut -c1-16)
-  cache_file="$CCUSAGE_CACHE_DIR/turns-$key.out"
-  transcript_stamp_v stamp "$path"
-  if [ -f "$cache_file" ]; then
-    IFS=$'\t' read -r cached < "$cache_file"
-    if [ "$cached" = "$stamp" ]; then
-      tail -n +2 "$cache_file"
-      return
-    fi
-  fi
-  {
-    printf '%s\n' "$stamp"
-    python3 - "$path" "$@" <<'PYEOF'
-import json, os, sys
-from datetime import datetime
+def identity_line(path, sess):
+    sid = os.path.basename(path).removesuffix(".jsonl")
+    model, folder, first_ts = sess.model, sess.folder, sess.first_ts
+    rest = model.removeprefix("claude-")
+    parts = rest.split("-")
+    name = parts[0].capitalize()
+    nums = parts[1:]
+    if len(nums) >= 2:
+        label = f"{name} {nums[0]}.{nums[1]}"
+    elif len(nums) == 1:
+        label = f"{name} {nums[0]}"
+    else:
+        label = name
+
+    epoch = 0
+    if first_ts:
+        epoch = int(datetime.fromisoformat(first_ts.replace("Z", "+00:00")).timestamp())
+    return f"{sid}\t{model}\t{label}\t{folder}\t{epoch}"
+
+# A session's tokens today, as ccusage counts them (see
+# session_today_tokens_cached): a message logged more than once counts once,
+# at its largest usage, and the day is the timestamp's own UTC prefix. Each
+# file keeps its own offset and line count (a line with no message id is
+# keyed by its file and line number). A new day starts again from the top.
+TOKEN_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+def today_tokens(path, today):
+    files = [path] + sorted(glob.glob(os.path.join(path[:-len(".jsonl")], "subagents", "*.jsonl")))
+    sf = state_file("tok", path)
+    s = load_state(sf, path)
+    for attempt in (0, 1):
+        known, by_key, readers, ok = {}, {}, [], True
+        if attempt == 0 and s and s.get("today") == today:
+            try:
+                known = {p: r for p, r in s["files"].items()}
+                by_key = {(a, b): v for a, b, v in s["by_key"]}
+            except (KeyError, TypeError, ValueError, AttributeError):
+                known, by_key, ok = {}, {}, False
+            if any(p not in files for p in known):
+                ok = False
+        for p in files if ok else ():
+            try:
+                r = Resume(p, known.get(p))
+            except OSError:
+                if p in known:
+                    ok = False
+                    break
+                continue
+            readers.append((p, r))
+            if r.fresh and p in known:
+                ok = False
+                break
+        if ok:
+            break
+        for _, r in readers:
+            r.f.close()
+    else:
+        return None
+
+    def count(p, n, line):
+        if '"usage"' not in line:
+            return
+        try:
+            d = json.loads(line)
+        except ValueError:
+            return
+        msg = d.get("message") or {}
+        usage = msg.get("usage")
+        if d.get("type") != "assistant" or not usage:
+            return
+        if not str(d.get("timestamp", "")).startswith(today):
+            return
+        key = (msg.get("id"), d.get("requestId"))
+        if None in key:
+            key = (p, n)
+        tokens = sum(int(usage.get(x) or 0) for x in TOKEN_FIELDS)
+        by_key[key] = max(by_key.get(key, 0), tokens)
+
+    recs, tails, moved = {}, [], False
+    for p, r in readers:
+        n = 0 if r.fresh else known[p].get("n", 0)
+        start = r.off
+        for lines in r.batches():
+            for line in lines:
+                count(p, n, line)
+                n += 1
+        moved = moved or r.fresh or r.off != start
+        recs[p] = dict(r.rec(), n=n)
+        tails.append((p, n, r.tail))
+    if moved or set(recs) != set(known):
+        save_state(sf, {"tag": STATE_TAG, "key": path, "today": today, "files": recs,
+                        "by_key": [[k[0], k[1], v] for k, v in by_key.items()]})
+    for p, n, tail in tails:
+        for line in text_lines(tail):
+            count(p, n, line)
+            n += 1
+    return sum(by_key.values())
+
+if MODE == "identity":
+    print(identity_line(sys.argv[1], session_read(sys.argv[1])))
+    sys.exit(0)
+if MODE == "todaytok":
+    total = today_tokens(sys.argv[1], sys.argv[2])
+    if total is not None:
+        print(total)
+    sys.exit(0)
+if MODE != "turns":
+    sys.exit("usage: identity <path> | todaytok <path> <today> | turns <path> <table args>")
 
 path, max_rows, c_head, c_reset = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 col_turn, col_model, col_input, col_cache, col_cost, col_mid_tier = sys.argv[5:11]
@@ -2410,15 +2566,6 @@ def severity_rank(color):
 BURST_METRICS = os.path.expanduser("~/.config/claude-burst/metrics.jsonl")
 MATCH_WINDOW_S = 3.0
 
-def parse_iso(t):
-    if not t:
-        return None
-    try:
-        # Python's fromisoformat rejects the trailing "Z" the transcript uses.
-        return datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp()
-    except ValueError:
-        return None
-
 def load_secondary_events():
     """[(epoch, model, output_tokens, input_tokens, usd, route)] for
     secondary-served requests."""
@@ -2426,6 +2573,10 @@ def load_secondary_events():
     try:
         with open(BURST_METRICS) as f:
             for line in f:
+                # Most of the log is primary traffic: a line with no
+                # "secondary" in it cannot have that slot, and is not parsed.
+                if '"secondary"' not in line:
+                    continue
                 try:
                     e = json.loads(line)
                 except json.JSONDecodeError:
@@ -2545,72 +2696,29 @@ def secondary_event_for(turn_ts, out_tok):
         best, best_gap = (model, ev_in, usd, route), gap
     return best
 
-turns, seen = [], set()
-try:
-    with open(path) as f:
-        lines = f.readlines()
-except OSError:
-    lines = []
+# The transcript, read from where the last run stopped (Session above): the
+# Burst compaction rows and each turn as it was logged.
+SESS = session_read(path)
+COMPACTION_MARKERS = sorted(COMPACTION_MARKERS + SESS.full, key=lambda m: m[0])
 
-# Burst's /compact-async-full: Claude Code's own history replaced with the
-# summary Burst already wrote. Claude Code runs it as its own /compact and
-# echoes it as that, so the transcript is where it is told apart: a compact
-# boundary whose summary, the message after it, says Burst wrote it.
-def full_compaction_markers(lines):
-    """[(epoch, "full", None)] for each compaction made with Burst's summary."""
-    out = []
-    for i, line in enumerate(lines):
-        if '"compact_boundary"' not in line or i + 1 >= len(lines):
-            continue
-        if "compacted by claude-burst" not in lines[i + 1][:2000]:
-            continue
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        ts = parse_iso(d.get("timestamp")) if d.get("subtype") == "compact_boundary" else None
-        if ts is not None:
-            out.append((ts, "full", None))
-    return out
-
-COMPACTION_MARKERS = sorted(COMPACTION_MARKERS + full_compaction_markers(lines), key=lambda m: m[0])
-
-for line in lines:
+# The same read answers identity. Given the transcript's stamp, write the
+# entry session_identity_cached keeps (sessid-<sha256 of the path>.tsv,
+# "stamp<TAB>line"), so the identity asked for in the same tick is a cache
+# hit instead of a second python.
+_id_stamp = os.environ.get("CCP_ID_STAMP", "")
+if _id_stamp and STATE_DIR:
     try:
-        d = json.loads(line)
-    except json.JSONDecodeError:
-        continue
-    if d.get("type") != "assistant":
-        continue
-    msg = d.get("message", {})
-    usage = msg.get("usage")
-    mid = msg.get("id")
-    if not usage or not mid or mid in seen:
-        continue
-    seen.add(mid)
+        _id_file = os.path.join(STATE_DIR, "sessid-%s.tsv" % hashlib.sha256(
+            path.encode("utf-8", "surrogateescape")).hexdigest()[:16])
+        _id_tmp = "%s.%d.tmp" % (_id_file, os.getpid())
+        with open(_id_tmp, "w") as _f:
+            _f.write(f"{_id_stamp}\t{identity_line(path, SESS)}\n")
+        os.replace(_id_tmp, _id_file)
+    except Exception:
+        pass
 
-    model = msg.get("model", "unknown")
-    # Claude Code logs an API error ("Can't reach the API server") as an
-    # assistant message from model "<synthetic>" with all-zero usage. It is
-    # not a turn, and counting it as one flagged it unpriced, which blanked
-    # Session and Burn for the rest of the session over a network blip.
-    if model == "<synthetic>":
-        continue
-    turn_ts = parse_iso(d.get("timestamp"))
-    in_tok = usage.get("input_tokens", 0)
-    out_tok = usage.get("output_tokens", 0)
-    cr_tok = usage.get("cache_read_input_tokens", 0)
-    cc_tok = usage.get("cache_creation_input_tokens", 0)
-    cc = usage.get("cache_creation") or {}
-    # See the same fix in the hourly-bucket PYEOF block above: no nested
-    # breakdown means the default 5-minute TTL was used, not the 1h beta.
-    if cc:
-        cw_1h = cc.get("ephemeral_1h_input_tokens", 0)
-        cw_5m = cc.get("ephemeral_5m_input_tokens", 0)
-    else:
-        cw_1h = 0
-        cw_5m = cc_tok
-
+turns = []
+for model, turn_ts, in_tok, out_tok, cr_tok, cc_tok, cw_1h, cw_5m in SESS.turns:
     total_ctx = in_tok + cr_tok + cc_tok
     cache_pct = (cr_tok / total_ctx * 100) if total_ctx else 0.0
 
@@ -2855,7 +2963,148 @@ if shown:
         # truncated mid-word. Naming the vendor says "not Anthropic" by itself.
         biller = ", ".join(sorted(secondary_routes)) or "secondary vendor"
         print(f"  {c_na}* via claude-burst secondary; billed by {biller}{c_reset}")
-PYEOF
+PARSE_PYEOF
+}
+
+# $1 = session id, $2 = today's date (YYYY-MM-DD). Prints that session's
+# token count for today.
+#
+# The underlying `ccusage session --json -i <sid>` parses EVERY transcript
+# under ~/.claude/projects to answer -- the `-i` only filters the OUTPUT, it
+# does not narrow the scan. So the unconditional fan-out that used to live at
+# the "Top Sessions Today" block re-scanned the entire corpus once per
+# active session, concurrently, every refresh: 8 sessions today meant 8 full
+# scans every 10s, each pegging a core. That was the single largest CPU cost
+# in this panel by a wide margin, and ccusage_cached() could not help --
+# every sid is a DIFFERENT cache key, so the TTL and the mkdir-lock only
+# dedupe a query against itself, never the eight against each other.
+#
+# A session's today-slice can only change when that session's own transcript
+# is written to, which is an exact signal rather than a guess -- so key on
+# mtime+size like session_identity_cached() above instead of a TTL. An idle
+# session then pays nothing at all, and an ordinary tick rescans only the one
+# session actually being typed into. $today is folded into the stamp so the
+# slice invalidates by itself at midnight rather than serving yesterday's.
+#
+# That still left one full scan per BUSY session per panel per slow tick, and
+# on 16 Oct 2026 six panels over three or four busy sessions kept about one
+# core occupied (2.5 CPU-s a scan over a 2GB corpus). So the count no longer
+# asks ccusage at all: it reads the session's own transcript and its
+# subagents', which takes 0.06 CPU-s, and counts as ccusage does. Checked
+# against ccusage on 39 session-days from 14 to 16 Oct 2026, all identical;
+# two rules were needed for that. A message logged more than once (once per
+# content block, and again when a session is rewound or copied) counts once,
+# at its LARGEST usage: streamed copies grow, and copies of a rewound
+# session carry zeros, so neither the first nor the last copy matches.
+# And the day is the timestamp's own UTC prefix, as ccusage's entries are.
+# The cache's answer for a session's tokens today into $1, with no process:
+# true on a hit; false when it must be worked out (session_today_tokens_cached).
+session_today_tokens_hit_v() { # $1 = variable to set, $2 = session id, $3 = today
+  local _st_c _st_path="" _st_key _st_file _st_stamp _st_line="" _st_cached
+  for _st_c in "$HOME"/.claude/projects/*/"$2".jsonl; do
+    [ -f "$_st_c" ] && { _st_path="$_st_c"; break; }
+  done
+  [ -n "$_st_path" ] || return 1
+  panel_hash16_v _st_key "$2"
+  _st_file="$CCUSAGE_CACHE_DIR/todaytok-$_st_key.tsv"
+  [ -f "$_st_file" ] || return 1
+  transcript_stamp_v _st_stamp "$_st_path"
+  IFS= read -r _st_line < "$_st_file"
+  _st_cached=${_st_line%%$'\t'*}
+  [ "$_st_cached" = "$_st_stamp:$3" ] || return 1
+  # cut -f2-: everything after the first tab (the line itself when none).
+  [[ $_st_line == *$'\t'* ]] && _st_line=${_st_line#*$'\t'}
+  printf -v "$1" '%s' "$_st_line"
+}
+session_today_tokens_cached() {
+  local sid="$1" today="$2" path key cache_file stamp cached out
+  path=""
+  for c in "$HOME"/.claude/projects/*/"$sid".jsonl; do
+    [ -f "$c" ] && { path="$c"; break; }
+  done
+  [ -n "$path" ] || return
+  key=$(printf '%s' "$sid" | shasum -a 256 | cut -c1-16)
+  cache_file="$CCUSAGE_CACHE_DIR/todaytok-$key.tsv"
+  transcript_stamp_v stamp "$path"
+  if [ -f "$cache_file" ]; then
+    IFS=$'\t' read -r cached _ < "$cache_file"
+    if [ "$cached" = "$stamp:$today" ]; then
+      cut -f2- "$cache_file"
+      return
+    fi
+  fi
+  out=$(panel_parse_py todaytok "$path" "$today" 2>/dev/null)
+  # Only a real answer gets cached -- caching "" on a failed/interrupted
+  # fetch would pin the empty result until the next turn landed.
+  [ -n "$out" ] || return
+  printf '%s\t%s\n' "$stamp:$today" "$out" > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
+  printf '%s' "$out"
+}
+
+# $1 = transcript path. Prints the cached "sid\tmodel\tlabel\tfolder\tepoch"
+# tsv line, calling the identity-scan python only when path+mtime+size
+# changed since the last call (by any panel).
+# The cache's line for a transcript, fields 2 on, into $1 with no process:
+# true on a hit (session_identity_cached does the rest).
+session_identity_hit_v() { # $1 = variable to set, $2 = transcript path
+  local _si_key _si_file _si_stamp _si_line="" _si_cached
+  panel_hash16_v _si_key "$2"
+  _si_file="$CCUSAGE_CACHE_DIR/sessid-$_si_key.tsv"
+  [ -f "$_si_file" ] || return 1
+  transcript_stamp_v _si_stamp "$2"
+  IFS= read -r _si_line < "$_si_file"
+  _si_cached=${_si_line%%$'\t'*}
+  [ "$_si_cached" = "$_si_stamp" ] || return 1
+  [[ $_si_line == *$'\t'* ]] && _si_line=${_si_line#*$'\t'}
+  printf -v "$1" '%s' "$_si_line"
+}
+session_identity_cached() {
+  local path="$1" key cache_file stamp cached
+  key=$(printf '%s' "$path" | shasum -a 256 | cut -c1-16)
+  cache_file="$CCUSAGE_CACHE_DIR/sessid-$key.tsv"
+  transcript_stamp_v stamp "$path"
+  if [ -f "$cache_file" ]; then
+    IFS=$'\t' read -r cached _ < "$cache_file"
+    if [ "$cached" = "$stamp" ]; then
+      cut -f2- "$cache_file"
+      return
+    fi
+  fi
+  local out
+  out=$(panel_parse_py identity "$path")
+  printf '%s\t%s\n' "$stamp" "$out" > "$cache_file.$$.tmp" && mv "$cache_file.$$.tmp" "$cache_file"
+  printf '%s' "$out"
+}
+
+# $1 = transcript path, $2... = the same color/threshold args the table
+# always took MINUS burn_color/burn_str -- those are a live every-refresh
+# figure independent of this file's contents, so the caller prints that
+# header line itself and only asks for the (cacheable) table body here.
+# Same mtime+size cache as session_identity_cached() above, and for the
+# same reason: this used to re-read and re-price the ENTIRE transcript on
+# every single refresh, which for a multi-million-token session is real,
+# repeated CPU for a result that's usually unchanged since the last frame.
+turn_table_cached() {
+  local path="$1"; shift
+  local key cache_file stamp cached
+  # The script's own mtime is in the key: a new price table (or any parser
+  # change) re-prices turns already cached, rather than waiting for the
+  # session's next reply.
+  key=$(printf '%s' "$path $* $(stat -f %m "${BASH_SOURCE[0]}" 2>/dev/null)" | shasum -a 256 | cut -c1-16)
+  cache_file="$CCUSAGE_CACHE_DIR/turns-$key.out"
+  transcript_stamp_v stamp "$path"
+  if [ -f "$cache_file" ]; then
+    IFS=$'\t' read -r cached < "$cache_file"
+    if [ "$cached" = "$stamp" ]; then
+      tail -n +2 "$cache_file"
+      return
+    fi
+  fi
+  {
+    printf '%s\n' "$stamp"
+    # CCP_ID_STAMP: write the identity entry for this transcript too, from
+    # the same read (see resolve_identity).
+    CCP_ID_STAMP="$stamp" panel_parse_py turns "$path" "$@"
   } > "$cache_file.$$.tmp"
   if [ $? -eq 0 ] && [ -s "$cache_file.$$.tmp" ]; then
     mv "$cache_file.$$.tmp" "$cache_file"
@@ -4079,7 +4328,15 @@ resolve_identity() {
       folder_name=${ID_MEMO[3]} sess_start_epoch=${ID_MEMO[4]}
     else
       local id_line=""
-      session_identity_hit_v id_line "$latest" || id_line=$(session_identity_cached "$latest")
+      if ! session_identity_hit_v id_line "$latest"; then
+        # The turn table is asked for next in every tick that gets here, and
+        # its python writes this identity entry from the same read of the
+        # transcript: so ask for the table first, and one python answers
+        # both where there were two. Its own cache makes the table's later
+        # call in this tick a read of a file.
+        turn_table_series_v _ "$latest" >/dev/null 2>&1
+        session_identity_hit_v id_line "$latest" || id_line=$(session_identity_cached "$latest")
+      fi
       IFS=$'\t' read -r sess_id model_id model_label folder_name sess_start_epoch <<< "$id_line"
       ID_MEMO_KEY=""
       if [ -n "$sess_id" ]; then
@@ -6695,6 +6952,14 @@ headless_main() {
 if [ -n "${PANEL_LIB_ONLY:-}" ]; then
   return 0 2>/dev/null || exit 0
 fi
+
+# A panel with no terminal on stdin installs no restore_tty trap, and that
+# trap was the only thing that removed this process's error log: so every
+# such panel left one behind, empty, for the week's prune. Remove it on exit
+# when there is nothing in it. (Headless and the collector set traps of
+# their own that remove it; restore_tty's does too.)
+panel_err_cleanup() { [ -s "$PANEL_ERR_FILE" ] || rm -f "$PANEL_ERR_FILE"; }
+[ -n "${ORIG_STTY:-}" ] || trap panel_err_cleanup EXIT
 
 # Headless for the Claude Code mod: none of the terminal set-up below.
 if [ -n "${PANEL_HEADLESS:-}" ]; then
