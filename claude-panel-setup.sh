@@ -1656,16 +1656,540 @@ ccusage_cached_v() { # $1 = variable to set, $2... = ccusage arguments
   ccusage_fetch_v "$_cv_out" "$@"
 }
 
+# ---- the shadow corpus: live reports from the last day or two ----
+# Every ccusage run reads every transcript, whatever the report or --since
+# (3.7GB and 2.4 CPU-s a run on 2026-11-20), and it was the biggest CPU user
+# under the panels. The collector keeps a copy of the transcripts holding
+# only the lines from local midnight yesterday on (shadow_py, whose header
+# says what makes each figure exact), runs daily and blocks --active on that
+# (0.17 CPU-s each), takes the days before it from one full daily run a day,
+# and sums weekly and monthly from the merged daily rows. session still runs
+# on the whole corpus on TTL_HISTORY: it needs every session's lifetime.
+#
+# Only the collector's slow job writes or reads the shadow (COLLECTOR_COMPUTE),
+# so there is one writer. A panel with no collector, PANEL_SHADOW=0, or a
+# shadow that cannot answer (missing, being built by another process, a
+# failed run, no provable block) all mean the full ccusage run, as before.
+# The last result is in $SHADOW_DIR/status; check-panel-status.sh shows it.
+SHADOW_DIR="$CCUSAGE_CACHE_DIR/shadow"
+PANEL_SHADOW="${PANEL_SHADOW:-1}"
+# The full daily run behind the days before the shadow: once a local day,
+# and at most this old.
+SHADOW_HISTORY_MAX="${SHADOW_HISTORY_MAX:-21600}"
+SHADOW_READY=0
+SHADOW_BLOCKS=0
+
+shadow_py() {
+  python3 - "$@" <<'SHADOW_PYEOF'
+import calendar, fcntl, json, os, re, shutil, subprocess, sys, time, traceback
+from datetime import date, datetime, timedelta
+
+# The shadow corpus: ccusage's live reports read from the last day or two of
+# the transcripts instead of all of them.
+#
+# Every ccusage run reads every transcript (3.7GB, 975 files, about 2.4
+# CPU-s on 2026-11-20), whatever the report and whatever --since says, and
+# the panels' live reports (daily, blocks --active) ran every two minutes.
+# This keeps <shadow>/projects/<same relative path> holding only the lines
+# whose "timestamp" is at or after S, a local midnight, and runs those two
+# reports with CLAUDE_CONFIG_DIR=<shadow>: 0.17 CPU-s each. The days before
+# S come from one full `daily` run a day, and weekly and monthly are summed
+# from the merged daily rows instead of being run at all.
+#
+# Usage: <projects> <shadow dir> <daily key> <weekly key> <monthly key>
+#        <blocks key>   (the panel's shared cache files for those reports)
+# Prints "ok <blocks 0|1> <first exact date>" when the reports in
+# <shadow dir>/out-*.json are good, or "fallback <why>": the panel then runs
+# ccusage on the whole corpus, as it did before this existed.
+#
+# What makes each figure exact:
+#   * Every line with any "timestamp" value >= S is in the shadow, so a day
+#     whose local midnight is >= S has all its entries. Rows for days from
+#     the first such day are the shadow's; earlier rows are the full run's.
+#   * Blocks. A block starts at the hour of the first entry after a gap of
+#     more than 5h, or more than 5h after its own start, so the active
+#     block's start depends on the chain of entries before it, back to the
+#     last gap of more than 5h. After such a gap the chain is the same in
+#     any corpus holding every entry from there on. The shadow knows a
+#     superset of the entry times >= S (every timestamp value it saw, kept
+#     per minute), and a gap in a superset is a gap in the set, so when it
+#     finds a gap of more than 5h (between two minutes, or between S and the
+#     first minute) the active block is provably the full corpus's.
+#     Otherwise blocks come from the full corpus.
+#   * Appends only. Each source file's inode, size, mtime, the offset of the
+#     end of its last complete line and the 64 bytes before that offset are
+#     kept; a file read again reads only from there. One that shrank, is
+#     another inode, or no longer has those 64 bytes is read again from the
+#     top into a new shadow file. A line still being written is left for the
+#     next run, as a full ccusage run cannot parse it either.
+#   * The window rolls once a day: the first run after local midnight drops
+#     the lines before the new S.
+#   * Anything unexpected: the state says "building" from the first change
+#     to the last, so a run that died half way is rebuilt from scratch.
+
+VERSION = 1
+FP_LEN = 64
+CHUNK = 1 << 24
+GAP = 5 * 3600
+TS_RE = re.compile(rb'"timestamp":"([^"\\]{10,40})"')
+FIELDS = ("inputTokens", "outputTokens", "cacheCreationTokens", "cacheReadTokens")
+
+
+def ts_epoch(v):
+    """Whole seconds of a timestamp value, or None."""
+    try:
+        if len(v) >= 20 and v[10:11] == b"T" and v[-1:] == b"Z" and v[4:5] == b"-":
+            return calendar.timegm((int(v[0:4]), int(v[5:7]), int(v[8:10]),
+                                    int(v[11:13]), int(v[14:16]), int(v[17:19]), 0, 0, 0))
+        return int(datetime.fromisoformat(v.decode().replace("Z", "+00:00")).timestamp())
+    except (ValueError, UnicodeDecodeError, OverflowError):
+        return None
+
+
+def line_times(line):
+    if b'"timestamp":"' not in line:
+        return ()
+    return [t for t in (ts_epoch(m) for m in TS_RE.findall(line)) if t is not None]
+
+
+class Shadow:
+    def __init__(self, projects, sdir, now):
+        self.projects = projects
+        self.sdir = sdir
+        self.root = os.path.join(sdir, "root")
+        self.sproj = os.path.join(self.root, "projects")
+        self.state_path = os.path.join(sdir, "state.json")
+        self.now = now
+        self.st = None
+        self.building = False
+        self.changed = False
+        self.minutes = set()
+
+    # ---- state ----
+    def load(self):
+        try:
+            with open(self.state_path) as f:
+                st = json.load(f)
+            if st.get("v") == VERSION and st.get("status") == "ok" and isinstance(st.get("files"), dict):
+                self.st = st
+                self.minutes = set(st.get("minutes") or [])
+                return True
+        except (OSError, ValueError, AttributeError):
+            pass
+        return False
+
+    def save(self, status):
+        self.st["status"] = status
+        self.st["minutes"] = sorted(self.minutes)
+        tmp = self.state_path + ".%d.tmp" % os.getpid()
+        with open(tmp, "w") as f:
+            json.dump(self.st, f, separators=(",", ":"))
+        os.replace(tmp, self.state_path)
+
+    def dirty(self):
+        """Before the first change: a run that dies from here on is rebuilt."""
+        if not self.building:
+            self.building = True
+            self.save("building")
+        self.changed = True
+
+    def fresh(self, S):
+        if os.path.isdir(self.root):
+            shutil.rmtree(self.root)
+        self.st = {"v": VERSION, "S": S, "gen": (self.st or {}).get("gen", 0) + 1, "files": {}, "rep": {}}
+        self.minutes = set()
+        self.building = False
+        self.dirty()
+
+    # ---- reading ----
+    def keep(self, line, S):
+        ts = line_times(line)
+        if not ts or max(ts) < S:
+            return False
+        for t in ts:
+            if t >= S:
+                self.minutes.add(t // 60)
+        return True
+
+    def scan(self, rel, path, st, off, fp_ok_off, S):
+        """Appends the kept lines of path from off to its shadow file
+        (a new one when off is 0). Returns the file's record."""
+        out = os.path.join(self.sproj, rel)
+        kept = []
+        fp = b""
+        with open(path, "rb") as f:
+            if off and fp_ok_off:
+                f.seek(off - min(off, FP_LEN))
+                fp = f.read(min(off, FP_LEN))
+            f.seek(off)
+            buf = b""
+            while True:
+                chunk = f.read(CHUNK)
+                if not chunk:
+                    break
+                buf = buf + chunk if buf else chunk
+                cut = buf.rfind(b"\n") + 1
+                if not cut:
+                    continue
+                done, buf = buf[:cut], buf[cut:]
+                fp = (fp + done[-FP_LEN:])[-FP_LEN:]
+                off += cut
+                for line in done.splitlines(True):
+                    if self.keep(line, S):
+                        kept.append(line)
+        if not fp_ok_off and os.path.exists(out):
+            self.dirty()
+            os.unlink(out)
+        if kept:
+            self.dirty()
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "ab") as g:
+                g.writelines(kept)
+        return [st.st_ino, st.st_size, st.st_mtime_ns, off, fp.hex()]
+
+    def skip_old(self, path, st):
+        """A file last written before S holds nothing >= S: note where it
+        ends without reading it."""
+        with open(path, "rb") as f:
+            n = min(st.st_size, FP_LEN)
+            f.seek(st.st_size - n)
+            fp = f.read(n)
+        return [st.st_ino, st.st_size, st.st_mtime_ns, st.st_size, fp.hex()]
+
+    def fp_matches(self, path, off, fp_hex):
+        try:
+            fp = bytes.fromhex(fp_hex)
+        except ValueError:
+            return False
+        if len(fp) != min(off, FP_LEN):
+            return False
+        with open(path, "rb") as f:
+            f.seek(off - len(fp))
+            return f.read(len(fp)) == fp
+
+    def sync(self):
+        S = self.st["S"]
+        files = self.st["files"]
+        seen = set()
+        for dirpath, dirnames, filenames in os.walk(self.projects):
+            dirnames.sort()
+            for name in filenames:
+                if not name.endswith(".jsonl"):
+                    continue
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, self.projects)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                seen.add(rel)
+                rec = files.get(rel)
+                try:
+                    if rec is None or rec[0] != st.st_ino or st.st_size < rec[3]:
+                        # New, another file, or smaller: from the top.
+                        if rec is not None:
+                            self.drop(rel)
+                        if st.st_mtime < S:
+                            files[rel] = self.skip_old(path, st)
+                        else:
+                            files[rel] = self.scan(rel, path, st, 0, False, S)
+                    elif st.st_size == rec[1] and st.st_mtime_ns == rec[2]:
+                        continue
+                    elif self.fp_matches(path, rec[3], rec[4]):
+                        files[rel] = self.scan(rel, path, st, rec[3], True, S)
+                    else:
+                        # Rewritten under the offset.
+                        self.drop(rel)
+                        files[rel] = self.scan(rel, path, st, 0, False, S)
+                except OSError:
+                    # Gone between the walk and the read: forget it.
+                    files.pop(rel, None)
+                    self.drop(rel)
+                    seen.discard(rel)
+        for rel in [r for r in files if r not in seen]:
+            del files[rel]
+            self.drop(rel)
+
+    def drop(self, rel):
+        p = os.path.join(self.sproj, rel)
+        if os.path.exists(p):
+            self.dirty()
+            os.unlink(p)
+
+    def roll(self, S_new):
+        """Drops the lines before S_new from every shadow file."""
+        self.dirty()
+        for dirpath, _, filenames in os.walk(self.sproj):
+            for name in filenames:
+                p = os.path.join(dirpath, name)
+                with open(p, "rb") as f:
+                    lines = [l for l in f if (lambda ts: ts and max(ts) >= S_new)(line_times(l))]
+                if lines:
+                    tmp = p + ".tmp"
+                    with open(tmp, "wb") as g:
+                        g.writelines(lines)
+                    os.replace(tmp, p)
+                else:
+                    os.unlink(p)
+        self.minutes = {m for m in self.minutes if m * 60 >= S_new}
+        self.st["S"] = S_new
+
+    def blocks_provable(self):
+        prev = self.st["S"]
+        for m in sorted(self.minutes):
+            if m * 60 - prev >= GAP:
+                return True
+            prev = (m + 1) * 60
+        return False
+
+
+# ---- reports ----
+def local_midnight(d):
+    return int(datetime(d.year, d.month, d.day).timestamp())
+
+
+def first_exact_date(S):
+    d = datetime.fromtimestamp(S)
+    day = d.date()
+    if (d.hour, d.minute, d.second) != (0, 0, 0):
+        day += timedelta(days=1)
+    return day.isoformat()
+
+
+def add_row(acc, r):
+    for k in FIELDS + ("totalTokens",):
+        acc[k] = acc.get(k, 0) + (r.get(k) or 0)
+    acc["totalCost"] = acc.get("totalCost", 0) + (r.get("totalCost") or 0)
+    used = acc.setdefault("modelsUsed", [])
+    for m in r.get("modelsUsed") or []:
+        if m not in used:
+            used.append(m)
+    by = acc.setdefault("_by", {})
+    for b in r.get("modelBreakdowns") or []:
+        x = by.setdefault(b.get("modelName"), {"modelName": b.get("modelName")})
+        for k in FIELDS:
+            x[k] = x.get(k, 0) + (b.get(k) or 0)
+        x["cost"] = x.get("cost", 0) + (b.get("cost") or 0)
+
+
+def finish(acc, key, period):
+    by = acc.pop("_by", {})
+    acc["modelBreakdowns"] = sorted(by.values(), key=lambda b: -b["cost"])
+    acc[key] = period
+    return acc
+
+
+def totals(rows):
+    t = {}
+    for r in rows:
+        for k in FIELDS + ("totalTokens",):
+            t[k] = t.get(k, 0) + (r.get(k) or 0)
+        t["totalCost"] = t.get("totalCost", 0) + (r.get("totalCost") or 0)
+    for k in FIELDS + ("totalTokens", "totalCost"):
+        t.setdefault(k, 0)
+    return t
+
+
+def merge_daily(hist_rows, shadow_rows, dex):
+    rows = [r for r in hist_rows if r.get("date", "") < dex] + \
+           [r for r in shadow_rows if r.get("date", "") >= dex]
+    rows.sort(key=lambda r: r.get("date", ""))
+    return rows
+
+
+def derive(rows, kind):
+    """weekly (weeks start on Sunday, ccusage's default, in local dates) or
+    monthly rows summed from daily rows."""
+    groups = {}
+    order = []
+    for r in rows:
+        d = date.fromisoformat(r["date"])
+        if kind == "week":
+            p = (d - timedelta(days=(d.weekday() + 1) % 7)).isoformat()
+        else:
+            p = r["date"][:7]
+        if p not in groups:
+            groups[p] = {}
+            order.append(p)
+        add_row(groups[p], r)
+    return [finish(groups[p], kind, p) for p in sorted(order)]
+
+
+def ccusage_proc(args, config_dir):
+    env = dict(os.environ)
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    return subprocess.Popen(["ccusage"] + args, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=env)
+
+
+def ccusage_json(p, key):
+    out, err = p.communicate()
+    if p.returncode != 0:
+        raise RuntimeError("ccusage exit %d: %s" % (p.returncode, err.decode(errors="replace")[:120]))
+    j = json.loads(out)
+    if not isinstance(j.get(key), list):
+        raise RuntimeError("ccusage gave no %s list" % key)
+    return j
+
+
+def write_json(path, obj, mtime=None):
+    tmp = path + ".%d.tmp" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(obj, f, sort_keys=True)
+    if mtime is not None:
+        os.utime(tmp, (mtime, mtime))
+    os.replace(tmp, path)
+
+
+def main():
+    projects, sdir = sys.argv[1], sys.argv[2]
+    keys = dict(zip(("daily", "weekly", "monthly", "blocks"), sys.argv[3:7]))
+    now = int(os.environ.get("SHADOW_NOW") or time.time())
+    hist_max = int(os.environ.get("SHADOW_HISTORY_MAX") or 21600)
+    t0 = time.time()
+    os.makedirs(sdir, exist_ok=True)
+    lockf = open(os.path.join(sdir, "lock"), "w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return "fallback busy"
+    if not os.path.isdir(projects):
+        return "fallback no projects"
+
+    today = datetime.fromtimestamp(now).date()
+    S_target = local_midnight(today - timedelta(days=1))
+    sh = Shadow(projects, sdir, now)
+    how = "append"
+    if not sh.load() or sh.st["S"] > S_target:
+        sh.fresh(S_target)
+        how = "rebuild"
+    elif sh.st["S"] < S_target:
+        sh.roll(S_target)
+        how = "roll"
+    sh.sync()
+    if sh.changed:
+        sh.st["gen"] = sh.st.get("gen", 0) + 1
+    sh.save("ok")
+
+    # ---- the reports, when the shadow or the day moved ----
+    st = sh.st
+    S = st["S"]
+    dex = first_exact_date(S)
+    rep = st.get("rep") or {}
+    hist_path = os.path.join(sdir, "history-daily.json")
+    hist_at = rep.get("hist_at", 0)
+    hist_stale = (not os.path.exists(hist_path)
+                  or datetime.fromtimestamp(hist_at).date() != today
+                  or now - hist_at > hist_max
+                  or datetime.fromtimestamp(hist_at).date().isoformat() < dex)
+    blocks_ok = sh.blocks_provable()
+    outs = [os.path.join(sdir, "out-%s.json" % k) for k in ("daily", "weekly", "monthly")]
+    if (not hist_stale and rep.get("gen") == st["gen"] and rep.get("dex") == dex
+            and rep.get("blocks") == blocks_ok and all(os.path.exists(p) for p in outs)
+            and (not blocks_ok or os.path.exists(os.path.join(sdir, "out-blocks.json")))):
+        # Nothing the reports read has moved since they were written, so the
+        # shared answers are as good as of now: a status line seeing the
+        # corpus newer than them would otherwise run ccusage on all of it
+        # for a write (a new folder, a line from before S) that changes
+        # nothing. The block's file only when it is the shadow's own.
+        for k in ("daily", "weekly", "monthly") + (("blocks",) if blocks_ok else ()):
+            if keys.get(k) and os.path.exists(keys[k]):
+                os.utime(keys[k], (t0, t0))
+        return "ok %d %s cached %s" % (blocks_ok, dex, how)
+
+    q = ["--json", "--offline"]
+    pd = ccusage_proc(["claude", "daily"] + q, sh.root)
+    pb = ccusage_proc(["claude", "blocks", "--active"] + q, sh.root) if blocks_ok else None
+    ph = ccusage_proc(["claude", "daily"] + q, None) if hist_stale else None
+    sd = ccusage_json(pd, "daily")
+    sb = ccusage_json(pb, "blocks") if pb else None
+    if ph:
+        hist = ccusage_json(ph, "daily")
+        write_json(hist_path, hist)
+        rep["hist_at"] = now
+    else:
+        with open(hist_path) as f:
+            hist = json.load(f)
+
+    rows = merge_daily(hist["daily"], sd["daily"], dex)
+    daily = {"daily": rows, "totals": totals(rows)}
+    wk = derive(rows, "week")
+    mo = derive(rows, "month")
+    weekly = {"weekly": wk, "totals": totals(wk)}
+    monthly = {"monthly": mo, "totals": totals(mo)}
+    for k, obj in (("daily", daily), ("weekly", weekly), ("monthly", monthly), ("blocks", sb)):
+        p = os.path.join(sdir, "out-%s.json" % k)
+        if obj is None:
+            if os.path.exists(p):
+                os.unlink(p)
+            continue
+        write_json(p, obj)
+        # The panels' shared answers, as of when this run started reading,
+        # for the status line and any panel with no collector.
+        if keys.get(k):
+            write_json(keys[k], obj, t0)
+    rep.update(gen=st["gen"], dex=dex, blocks=blocks_ok)
+    st["rep"] = rep
+    sh.save("ok")
+    return "ok %d %s ran %s" % (blocks_ok, dex, how)
+
+
+if __name__ == "__main__":
+    try:
+        res = main()
+    except Exception:
+        res = "fallback " + traceback.format_exc().strip().splitlines()[-1][:200]
+    try:
+        with open(os.path.join(sys.argv[2], "status"), "w") as f:
+            f.write("%s %s\n" % (int(time.time()), res))
+    except (OSError, IndexError):
+        pass
+    print(res)
+SHADOW_PYEOF
+}
+
+# Brings the shadow up to date and its reports with it, in the collector's
+# slow job, before slow_fetch reads them. Sets SHADOW_READY (out-daily,
+# -weekly and -monthly are good) and SHADOW_BLOCKS (out-blocks is too).
+shadow_refresh() {
+  SHADOW_READY=0 SHADOW_BLOCKS=0
+  (( PANEL_SHADOW && ${COLLECTOR_COMPUTE:-0} )) || return 0
+  local now kd kw km kb res
+  panel_now_v now
+  panel_hash16_v kd "claude daily --json --offline"
+  panel_hash16_v kw "claude weekly --json --offline"
+  panel_hash16_v km "claude monthly --json --offline"
+  panel_hash16_v kb "claude blocks --active --json --offline"
+  mkdir -p "$SHADOW_DIR" 2>/dev/null || return 0
+  res=$(SHADOW_NOW=$now SHADOW_HISTORY_MAX=$SHADOW_HISTORY_MAX shadow_py "$HOME/.claude/projects" "$SHADOW_DIR" \
+    "$CCUSAGE_CACHE_DIR/$kd.json" "$CCUSAGE_CACHE_DIR/$kw.json" \
+    "$CCUSAGE_CACHE_DIR/$km.json" "$CCUSAGE_CACHE_DIR/$kb.json" 2>>"$SHADOW_DIR/errors.log")
+  case "$res" in
+    "ok 1 "*) SHADOW_READY=1 SHADOW_BLOCKS=1 ;;
+    "ok 0 "*) SHADOW_READY=1 ;;
+  esac
+}
+
 recent_sections_fetch() {
   local r
   recent_sections_fetch_v r
   printf '%s' "$r"
 }
 recent_sections_fetch_v() { # $1 = variable to set
-  local _rf_out="$1" d w m _rf_res
-  ccusage_cached_v d claude daily --json --offline
-  ccusage_cached_v w claude weekly --json --offline
-  ccusage_cached_v m claude monthly --json --offline
+  local _rf_out="$1" d="" w="" m="" _rf_res
+  # The collector's shadow reports, in the shape the full runs give.
+  if (( SHADOW_READY )) && [ -s "$SHADOW_DIR/out-daily.json" ] \
+     && [ -s "$SHADOW_DIR/out-weekly.json" ] && [ -s "$SHADOW_DIR/out-monthly.json" ]; then
+    ccusage_file_v d "$SHADOW_DIR/out-daily.json"
+    ccusage_file_v w "$SHADOW_DIR/out-weekly.json"
+    ccusage_file_v m "$SHADOW_DIR/out-monthly.json"
+  fi
+  if [ -z "$d" ] || [ -z "$w" ] || [ -z "$m" ]; then
+    ccusage_cached_v d claude daily --json --offline
+    ccusage_cached_v w claude weekly --json --offline
+    ccusage_cached_v m claude monthly --json --offline
+  fi
   # The scoped reports do NOT use the unified report's key names -- the
   # period each row covers is `date`, `week` and `month` respectively, where
   # `--sections` called all three `period`. Nothing errors on the
@@ -3584,7 +4108,10 @@ refresh_active_block() {
   # ---- active 5h block: fetched once here (not down in the ACTIVE BLOCK
   # section) so the summary line above can show the same burn-rate-derived
   # color as the detailed section, one source of truth, one API call.
-  ccusage_cached_v block_json claude blocks --active --json --offline
+  block_json=""
+  (( SHADOW_BLOCKS )) && [ -s "$SHADOW_DIR/out-blocks.json" ] \
+    && ccusage_file_v block_json "$SHADOW_DIR/out-blocks.json"
+  [ -n "$block_json" ] || ccusage_cached_v block_json claude blocks --active --json --offline
   has_block=$(jq -r '.blocks | length // 0' <<<"$block_json" 2>/dev/null)
   if [ "${has_block:-0}" = "1" ]; then
     # `localtime` before `strftime` is required, fromdateiso8601 hands back
@@ -6596,6 +7123,7 @@ collector_unlock() {
 collector_slow_job() {
   COLLECTOR_COMPUTE=1
   PANEL_ERR_FILE="$COLLECTOR_ERRS.$BASHPID"
+  shadow_refresh 2>>"$PANEL_ERR_FILE"
   slow_fetch
   printf '%s' "$RECENT_JSON" > "$COLLECTOR_RECENT.$BASHPID" && mv -f "$COLLECTOR_RECENT.$BASHPID" "$COLLECTOR_RECENT"
   # The figures summary_globals and build_trailing set, kept by shared_memo

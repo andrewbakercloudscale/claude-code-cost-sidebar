@@ -558,6 +558,51 @@ table, alerts and files.
   panel works every figure out itself, exactly as before: a dead collector
   costs process starts, never a wrong or missing figure.
 
+### Live reports from a shadow corpus
+
+Every `ccusage` run reads every transcript, whatever the report and whatever
+`--since` says: 3.7GB in 975 files and about 2.4 CPU-s a run on 2026-11-20,
+which made it the biggest CPU user under the panels. The collector therefore
+keeps a copy, `~/.cache/ccusage-panel-cache/shadow/root/projects/`, with the
+same relative paths (subagents included) but only the lines whose
+`"timestamp"` is at or after local midnight yesterday, about 110MB. `daily`
+and `blocks --active` run against that with `CLAUDE_CONFIG_DIR` pointed at
+it, at about 0.17 CPU-s each.
+
+- **Incremental.** Each source file's inode, size, mtime, the offset of its
+  last complete line and the 64 bytes before that offset are kept in
+  `shadow/state.json`, so a slow tick reads only what was appended. A file
+  that shrank, is another inode or no longer has those 64 bytes is copied
+  again from the top. A line still being written waits for its newline. The
+  first run after local midnight drops the lines before the new start. A run
+  that dies half way leaves the state marked `building`, and the next one
+  starts from scratch.
+- **Daily.** Rows from the first day the shadow holds completely come from
+  the shadow; earlier rows come from one full `daily` run a day (refetched
+  when the local day changes, or after `SHADOW_HISTORY_MAX`, 6h). The merged
+  report has the full run's shape, totals included.
+- **Weekly and monthly** are summed from the merged daily rows (weeks start on
+  Sunday, ccusage's default) instead of being run at all. `session` still runs
+  on the whole corpus every 15 minutes: it needs every session's lifetime.
+- **The block.** A 5h block starts at the hour of the first entry after a gap
+  of more than 5h (or more than 5h after its own start), so the active block
+  depends on the chain of entries back to the last such gap. The shadow uses
+  its block only when it can see a gap of more than 5h after its start
+  (checked against every timestamp it has seen, kept per minute, which can
+  only make a gap look shorter); otherwise the block comes from the full
+  corpus.
+- **Shared answers.** The merged daily, weekly, monthly and the block are also
+  written to the panel's shared cache files, which is where the status line
+  reads Today and the block from.
+- **Fallback.** Only the collector reads or writes the shadow. A panel with no
+  collector, `PANEL_SHADOW=0`, a shadow being written by another process, or a
+  failed shadow run all mean the full `ccusage` run, as before. The last
+  result is in `shadow/status`, and `bash check-panel-status.sh` prints it.
+
+`tests/checks/BS_shadow_corpus.sh` and `BT_shadow_reports.sh` cover the copy
+(appends, partial lines, shrink, inode, rewrites, the roll), the block proof,
+the merge, the weekly and monthly sums and every fallback.
+
 The tick itself starts as few processes as it can: values are set with
 `printf -v` rather than captured with `$(...)`, files are read with `read`,
 and file stats use bash's own `stat` builtin where the running bash ships it

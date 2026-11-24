@@ -4,7 +4,17 @@
 # Invocation counts are the primary assertion in this suite: they are exact,
 # fast and hermetic, where asserting CPU seconds would be none of those and
 # would produce a flaky gate that gets ignored, then disabled, then deleted.
-printf '%s\n' "$*" >> "${CCUSAGE_CALL_LOG:-/dev/null}"
+#
+# A run pointed at the collector's shadow corpus (CLAUDE_CONFIG_DIR set) is
+# logged as "shadow <dir> <args>", so calls_for keeps counting full-corpus
+# runs only, and serves shadow-<fixture> when the check has one.
+# CCUSAGE_SHADOW_FAIL=1 makes those runs fail.
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  printf 'shadow %s %s\n' "$CLAUDE_CONFIG_DIR" "$*" >> "${CCUSAGE_CALL_LOG:-/dev/null}"
+  [ -n "${CCUSAGE_SHADOW_FAIL:-}" ] && { printf 'ccusage stub: shadow run failed\n' >&2; exit 70; }
+else
+  printf '%s\n' "$*" >> "${CCUSAGE_CALL_LOG:-/dev/null}"
+fi
 
 # Every query the panel makes is `claude <subcommand> ...` -- scoped so the
 # panel reports Claude Code's spend rather than every agent CLI's. Accept the
@@ -20,6 +30,9 @@ case "$sub" in
   *)       printf 'ccusage stub: unhandled subcommand %s\n' "$sub" >&2; exit 70 ;;
 esac
 
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ -f "${CCUSAGE_FIXTURE_DIR:?}/shadow-$fixture" ]; then
+  fixture="shadow-$fixture"
+fi
 path="${CCUSAGE_FIXTURE_DIR:?}/$fixture"
 if [ ! -f "$path" ]; then
   printf 'ccusage stub: missing fixture %s\n' "$path" >&2

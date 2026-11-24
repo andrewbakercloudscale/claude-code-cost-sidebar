@@ -92,6 +92,19 @@ main() {
   check_process "claude-panel-launch.sh"
   check_process "claude-panel-keyblock"
   check_process "claude-panel-overlay"
+  check_process "ccusage-panel-collector"
+
+  echo
+  echo "== shadow corpus (the collector's live ccusage reports) =="
+  local shadow="$HOME/.cache/ccusage-panel-cache/shadow" sline when
+  if [[ -s "$shadow/status" ]]; then
+    sline=$(cat "$shadow/status")
+    when=$(date -r "${sline%% *}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
+    echo "last run $when: ${sline#* }"
+    echo "  ($(du -sh "$shadow/root" 2>/dev/null | cut -f1) on disk; 'ok 1' = shadow for daily and the block, 'ok 0' = block from the full corpus, 'fallback' = full corpus)"
+  else
+    echo "no shadow yet (no collector has run, or PANEL_SHADOW=0)"
+  fi
 
   echo
   echo "== recent launch log (last 5 lines, if any) =="
